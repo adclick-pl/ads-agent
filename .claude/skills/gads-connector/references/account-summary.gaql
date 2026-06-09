@@ -1,0 +1,10 @@
+-- One-row account summary (cost, clicks, impressions, conversions, value)
+-- for the period. Run twice with different --days to compare periods.
+SELECT
+  metrics.cost_micros,
+  metrics.clicks,
+  metrics.impressions,
+  metrics.conversions,
+  metrics.conversions_value
+FROM customer
+WHERE segments.date DURING LAST_30_DAYS

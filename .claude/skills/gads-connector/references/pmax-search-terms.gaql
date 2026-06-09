@@ -1,0 +1,17 @@
+-- Search terms for PERFORMANCE MAX campaigns.
+-- Unlike list-search-terms.gaql (which uses search_term_view and works only for
+-- Search campaigns — it returns 0 rows for PMax), PMax raw search terms live in
+-- campaign_search_term_view, via campaign_search_term_view.search_term.
+-- Do NOT use segments.search_term here ("incompatible segment") or keyword.info.text.
+-- Add `AND campaign.id = <id>` to restrict to one campaign.
+SELECT
+  campaign.name,
+  campaign_search_term_view.search_term,
+  metrics.impressions,
+  metrics.clicks,
+  metrics.cost_micros,
+  metrics.conversions,
+  metrics.conversions_value
+FROM campaign_search_term_view
+WHERE segments.date DURING LAST_30_DAYS
+ORDER BY metrics.impressions DESC

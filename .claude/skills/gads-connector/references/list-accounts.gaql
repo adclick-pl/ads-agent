@@ -1,0 +1,10 @@
+-- List the client (non-manager) accounts under an MCC.
+-- Run against the manager account: --customer=<MCC_ID>.
+SELECT
+  customer_client.id,
+  customer_client.descriptive_name,
+  customer_client.currency_code,
+  customer_client.time_zone
+FROM customer_client
+WHERE customer_client.manager = false
+  AND customer_client.status = 'ENABLED'

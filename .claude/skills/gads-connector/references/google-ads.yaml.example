@@ -1,0 +1,8 @@
+# Alternative to .env — the connector reads ~/google-ads.yaml as a fallback.
+# Copy to ~/google-ads.yaml (your home directory) and fill in your values.
+developer_token: "YOUR_DEVELOPER_TOKEN"
+client_id: "YOUR_OAUTH_CLIENT_ID.apps.googleusercontent.com"
+client_secret: "YOUR_OAUTH_CLIENT_SECRET"
+refresh_token: "YOUR_OAUTH_REFRESH_TOKEN"
+login_customer_id: "1234567890"   # 10-digit MCC account, no dashes
+default_customer_id: "1234567890" # optional default child account, no dashes

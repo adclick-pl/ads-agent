@@ -1,0 +1,20 @@
+{
+  "name": "ads-agent",
+  "version": "0.1.0",
+  "description": "Claude Code skill package for Google Ads — a connector plus related skills. One npm install at this root serves every bundled skill.",
+  "type": "module",
+  "private": true,
+  "license": "SEE LICENSE IN LICENSE",
+  "scripts": {
+    "connector:smoke": "node .claude/skills/gads-connector/scripts/smoke-test.js",
+    "connector:auth": "node .claude/skills/gads-connector/scripts/auth.js",
+    "connector:test": "node .claude/skills/gads-connector/scripts/cli.js --action=test-connection",
+    "connector:mcp": "node .claude/skills/gads-connector/scripts/mcp-server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "dotenv": "^17.2.3",
+    "google-ads-api": "^21.0.1",
+    "js-yaml": "^4.1.1"
+  }
+}

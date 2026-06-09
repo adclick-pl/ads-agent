@@ -1,0 +1,14 @@
+-- Active campaigns with basic performance, last 30 days.
+-- Override window with --days=N.
+SELECT
+  campaign.name,
+  campaign.status,
+  campaign.advertising_channel_type,
+  metrics.cost_micros,
+  metrics.clicks,
+  metrics.impressions,
+  metrics.conversions
+FROM campaign
+WHERE segments.date DURING LAST_30_DAYS
+  AND campaign.status = 'ENABLED'
+ORDER BY metrics.cost_micros DESC

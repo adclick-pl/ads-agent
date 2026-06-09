@@ -1,0 +1,10 @@
+node_modules/
+.env
+*.local
+google-ads.yaml
+# Account registry holds real client IDs — never commit it. Ship accounts.example.json instead.
+accounts.json
+.claude/accounts.json
+*.csv
+npm-debug.log*
+.DS_Store

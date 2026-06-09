@@ -1,0 +1,35 @@
+{
+  "_README": "Optional account registry. Copy to .claude/accounts.json in your project root (NOT in this skill folder), so you can refer to accounts by name/alias instead of a 10-digit ID. The real file is gitignored — keep client IDs out of version control. Keys starting with _ are ignored (documentation only). All values below are placeholders.",
+
+  "_fields": {
+    "name": "Human-readable account name, shown in --list-accounts. Can be used to select the account (--account=\"Example Client One\").",
+    "id": "The 10-digit Google Ads customer ID (dashes optional). This is the account that gets queried/changed.",
+    "login_customer_id": "The MCC (manager) account ID this account sits under. Required for agency setups so child-account queries don't fail with PERMISSION_DENIED. Omit for a standalone account.",
+    "currency": "Account currency code (e.g. USD, EUR, PLN). Informational only — shown in --list-accounts.",
+    "timezone": "IANA timezone (e.g. Europe/Warsaw). Used so --days date ranges are computed in the account's local time.",
+    "type": "Free-form tag for your own grouping (e.g. client, internal). Not used by the connector.",
+    "default": "true on exactly ONE account = the one used when you run a command WITHOUT --account/--customer. Optional; if no account is flagged default, you must always pass --account/--customer.",
+    "aliases": "Extra short names you can use to select this account (--account=client-one). Optional."
+  },
+
+  "example-client-one": {
+    "name": "Example Client One",
+    "id": "1234567890",
+    "login_customer_id": "1112223334",
+    "currency": "USD",
+    "timezone": "Europe/London",
+    "type": "client",
+    "default": true,
+    "aliases": ["client-one", "example-one"]
+  },
+  "example-client-two": {
+    "name": "Example Client Two",
+    "id": "2233445566",
+    "login_customer_id": "1112223334",
+    "currency": "EUR",
+    "timezone": "Europe/Berlin",
+    "type": "client",
+    "default": false,
+    "aliases": ["client-two", "example-two"]
+  }
+}
