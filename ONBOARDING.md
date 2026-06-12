@@ -56,9 +56,19 @@ połączenia z kontem Google Ads.
 
 1. Upewnij się, że jesteś w folderze sklonowanej paczki (zawiera `package.json`
    i ten plik). Jeśli nie — przejdź do niego.
-2. Sprawdź Node.js: `node --version` (potrzebna wersja **18 lub nowsza**) oraz
+2. **Ustaw zdalne repo na przyszłe aktualizacje.** Paczka jest sklonowana z repo
+   projektu, więc `origin` już na nie wskazuje; dla jasności ustaw też `upstream`
+   na to samo repo (to z niego przychodzą aktualizacje i nowe skille):
+   ```
+   git remote add upstream https://github.com/adclick-pl/ads-agent.git 2>/dev/null || git remote set-url upstream https://github.com/adclick-pl/ads-agent.git
+   ```
+   Powiedz użytkownikowi, że **gdy wyjdzie aktualizacja lub nowy skill**, odświeży
+   paczkę poleceniem **`git pull upstream main`** (a jeśli zmienią się zależności —
+   ponowi `npm install`). Jego dane dostępowe są poza repo (gitignored), więc
+   aktualizacja ich nie ruszy.
+3. Sprawdź Node.js: `node --version` (potrzebna wersja **18 lub nowsza**) oraz
    `npm --version`.
-3. Jeśli Node.js nie jest zainstalowany lub jest za stary — poprowadź instalację:
+4. Jeśli Node.js nie jest zainstalowany lub jest za stary — poprowadź instalację:
    - **macOS:** pobierz wersję **LTS** z [nodejs.org](https://nodejs.org) (plik
      `.pkg`) i zainstaluj. Jeśli użytkownik ma Homebrew, alternatywnie: `brew install node`.
    - **Windows:** pobierz wersję **LTS** z [nodejs.org](https://nodejs.org) (plik
