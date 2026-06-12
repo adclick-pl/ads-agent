@@ -74,16 +74,16 @@ When an account is resolved from the registry, its `login_customer_id` (MCC) and
 
 ### Read actions (safe, no confirmation needed)
 
+**For the authoritative, always-current list of actions, run `node scripts/cli.js --help`.**
+It is generated from the code, so it never drifts — do not maintain a copy of the
+action catalog here (e.g. there are separate `get-search-terms` for Search and
+`get-pmax-search-terms` for Performance Max; `--help` always shows what exists).
+
+Common shape — pick the action from `--help`, then add `--customer` and flags:
+
 ```bash
-node scripts/cli.js --action=test-connection
-node scripts/cli.js --action=list-accounts --auto
-node scripts/cli.js --action=get-campaigns --customer=1234567890 --days=30 --auto
-node scripts/cli.js --action=get-keywords --customer=1234567890 --days=30 --auto
-node scripts/cli.js --action=get-search-terms --customer=1234567890 --days=30 --min-cost=5 --auto
-node scripts/cli.js --action=keyword-ideas --customer=1234567890 --keywords="buty trekkingowe,buty górskie" --auto
-node scripts/cli.js --action=keyword-ideas --customer=1234567890 --url="https://example.com/sklep" --auto
-node scripts/cli.js --action=get-budgets --customer=1234567890 --auto
-node scripts/cli.js --action=raw-query --customer=1234567890 --query="SELECT campaign.id, campaign.name FROM campaign LIMIT 5" --auto
+node scripts/cli.js --help
+node scripts/cli.js --action=<action> --customer=1234567890 --days=30 --auto
 ```
 
 Output modes:
@@ -106,7 +106,7 @@ context automatically when large — no need to guess the size up front.
 Keyword research: `keyword-ideas` is **not GAQL** — it calls the Keyword Planner
 service (`generateKeywordIdeas`). Pass `--keywords="a,b"` and/or `--url=...` as
 seeds; it returns avg monthly searches, competition and the top-of-page bid range,
-sorted by volume. Defaults target Poland (`--geo=2616`) + Polish (`--language=1045`);
+sorted by volume. Defaults target Poland (`--geo=2616`) + Polish (`--language=1030`);
 override for other markets. Use it as the base layer to expand a keyword set — a
 script can build clustering/intent/scoring on top of these rows.
 

@@ -127,7 +127,7 @@ Akcje zapisu (zawsze najpierw --dry-run!):
   update-status           Zmiana statusu kampanii (--campaign, --status).
   update-budget           Zmiana budżetu dziennego (--budget-id, --amount).
                           SafetyLimits blokuje skok > ${DEFAULT_MAX_BUDGET_CHANGE_PCT}% — użyj --force, by wymusić.
-  add-negatives           Negatywne słowa kluczowe (--campaign, --keywords).
+  add-negatives           Negatywne słowa kluczowe (--campaign, --keywords, --match-type).
   add-negative-placements Wykluczenia miejsc docelowych (--domains).
 
 Opcje:
@@ -137,10 +137,11 @@ Opcje:
   --days=<n>                  Zakres dni (domyślnie 30; liczony w strefie konta).
   --min-cost=<x>              Minimalny koszt dla get-search-terms.
   --query="<GAQL>"            Zapytanie GAQL (dla raw-query).
-  --keywords="a,b"            Słowa-zalążki dla keyword-ideas (po przecinku).
+  --keywords="a,b"            Słowa-zalążki dla keyword-ideas; lub frazy do add-negatives (po przecinku).
+  --match-type=<typ>          OBOWIĄZKOWE dla add-negatives: EXACT | PHRASE | BROAD (wybierz świadomie).
   --url=<https://...>         Strona-zalążek dla keyword-ideas (zamiast/oprócz --keywords).
   --geo=<ID>                  geoTargetConstant dla keyword-ideas (domyślnie 2616 = Polska).
-  --language=<ID>             languageConstant dla keyword-ideas (domyślnie 1045 = polski).
+  --language=<ID>             languageConstant dla keyword-ideas (domyślnie 1030 = polski).
   --network=<sieć>            GOOGLE_SEARCH (domyślnie) lub GOOGLE_SEARCH_AND_PARTNERS.
   --page-size=<n>             Limit pomysłów dla keyword-ideas (domyślnie 1000).
   --auto                      Inteligentny output: wynik <= progu → JSON inline;
@@ -157,7 +158,7 @@ Przykłady:
   node scripts/cli.js --action=get-search-terms --customer=1234567890 --days=90 --auto --max-inline-rows=1000
   node scripts/cli.js --action=get-pmax-search-terms --customer=1234567890 --days=30 --campaign=987654321 --auto
   node scripts/cli.js --action=keyword-ideas --customer=1234567890 --keywords="buty trekkingowe,buty górskie" --auto
-  node scripts/cli.js --action=keyword-ideas --customer=1234567890 --url="https://example.com/sklep" --geo=2616 --language=1045 --auto
+  node scripts/cli.js --action=keyword-ideas --customer=1234567890 --url="https://example.com/sklep" --geo=2616 --language=1030 --auto
   node scripts/cli.js --action=get-campaigns --customer=1234567890 --days=30 --json
   node scripts/cli.js --action=raw-query --account=client-one --query="SELECT campaign.name, metrics.cost_micros FROM campaign WHERE segments.date DURING LAST_30_DAYS" --json
   node scripts/cli.js --action=update-budget --customer=1234567890 --budget-id=111222333 --amount=150.00 --dry-run
@@ -392,7 +393,12 @@ async function main() {
       const campaignId = args.campaign;
       const keywordsString = args.keywords;
       if (!campaignId || !keywordsString) throw new Error('add-negatives requires --campaign=<ID> and --keywords="fraza1,fraza 2"');
-      const keywords = keywordsString.split(',').map((k) => k.trim()).filter(Boolean);
+      // Match type is mandatory — choosing EXACT vs PHRASE vs BROAD must always be a conscious decision.
+      const matchType = String(args['match-type'] || '').trim().toUpperCase();
+      if (!['EXACT', 'PHRASE', 'BROAD'].includes(matchType)) {
+        throw new Error('add-negatives requires --match-type=EXACT|PHRASE|BROAD (mandatory — choose deliberately; for search-term exclusions EXACT is usually correct)');
+      }
+      const keywords = keywordsString.split(',').map((k) => ({ text: k.trim(), matchType })).filter((k) => k.text);
       const result = await addCampaignNegativeKeywords(customerId, campaignId, keywords, dryRun, loginCustomerId);
       console.log(JSON.stringify(result, null, 2));
     }

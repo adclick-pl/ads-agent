@@ -9,10 +9,17 @@ import dotenv from 'dotenv';
 // no matter which working directory Claude Code or the agent launches it from.
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SKILL_ROOT = path.resolve(__dirname, '..');
+// Package root (holds the shared package.json / node_modules). By convention it
+// is also the canonical place for a single .env shared across all skills in the
+// package — put any additional API keys there.
+const PACKAGE_ROOT = path.resolve(SKILL_ROOT, '..', '..', '..');
 
-// Load .env: prefer the skill-local file, then fall back to the current
-// working directory (so `dotenv` defaults still apply when run elsewhere).
+// Load .env, most specific first (dotenv keeps the first value set for each key):
+//   1. skill-local .env, 2. package-root .env (shared keys for all skills),
+//   3. current working directory. The explicit package-root load makes that file
+//   work no matter where the connector is launched from (CLI, npm, MCP server).
 dotenv.config({ path: path.join(SKILL_ROOT, '.env'), quiet: true });
+dotenv.config({ path: path.join(PACKAGE_ROOT, '.env'), quiet: true });
 dotenv.config({ quiet: true });
 
 /**

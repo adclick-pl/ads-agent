@@ -276,7 +276,7 @@ export async function getKeywords(customerId, days = 30, opts = {}) {
  * @param {{loginCustomerId?: string, keywords?: string[], url?: string,
  *          geoTargetId?: string|number, languageId?: string|number,
  *          network?: string, pageSize?: number}} [opts]
- *   Defaults target Poland (geo 2616) + Polish (language 1045); override as needed.
+ *   Defaults target Poland (geo 2616) + Polish (language 1030); override as needed.
  * @returns {Promise<Array<object>>} Ideas sorted by avg monthly searches (desc)
  */
 export async function getKeywordIdeas(customerId, opts = {}) {
@@ -285,7 +285,7 @@ export async function getKeywordIdeas(customerId, opts = {}) {
     keywords = [],
     url,
     geoTargetId = '2616', // Poland
-    languageId = '1045',  // Polish
+    languageId = '1030',  // Polish
     network = 'GOOGLE_SEARCH',
     pageSize = 1000,
   } = opts;

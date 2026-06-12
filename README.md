@@ -62,6 +62,11 @@ Getting the Google Ads API credentials is covered step by step in
 
 - Credentials and the account registry are **gitignored** (`.env`,
   `google-ads.yaml`, `accounts.json`). Only `*.example` templates are shipped.
+- **Where keys live:** the Google Ads connector reads its credentials from
+  `~/google-ads.yaml` or a skill-local `.env`. For keys shared across skills, the
+  **canonical place is a single `.env` in this package root** (next to
+  `package.json`) — it is loaded automatically and gitignored. Create it only when
+  a skill actually needs a key.
 
 ## Disclaimer
 

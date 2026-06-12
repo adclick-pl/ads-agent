@@ -97,7 +97,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             keywords: { type: 'array', items: { type: 'string' }, description: 'Seed keywords.' },
             url: { type: 'string', description: 'Seed landing page URL (instead of/with keywords).' },
             geoTargetId: { type: 'string', description: 'geoTargetConstant ID (default 2616 = Poland).' },
-            languageId: { type: 'string', description: 'languageConstant ID (default 1045 = Polish).' },
+            languageId: { type: 'string', description: 'languageConstant ID (default 1030 = Polish).' },
             network: { type: 'string', enum: ['GOOGLE_SEARCH', 'GOOGLE_SEARCH_AND_PARTNERS'], description: 'Search network (default GOOGLE_SEARCH).' },
             pageSize: { type: 'number', description: 'Max ideas to return (default 1000).' }
           },

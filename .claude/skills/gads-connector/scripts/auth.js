@@ -46,7 +46,7 @@ async function main() {
     `&response_type=code` +
     `&scope=${encodeURIComponent(scopes)}` +
     `&access_type=offline` +
-    `&prompt=consent`;
+    `&prompt=${encodeURIComponent('select_account consent')}`;
 
   console.log('➡️ KROK 1: Otwórz poniższy adres URL w przeglądarce, zaloguj się na konto Google');
   console.log('   powiązane z Twoim kontem Google Ads i zatwierdź uprawnienia:\n');
