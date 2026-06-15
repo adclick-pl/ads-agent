@@ -54,8 +54,12 @@ połączenia z kontem Google Ads.
 
 ## Krok 1 — Sprawdź środowisko
 
-1. Upewnij się, że jesteś w folderze sklonowanej paczki (zawiera `package.json`
-   i ten plik). Jeśli nie — przejdź do niego.
+1. Upewnij się, że pliki paczki (`package.json`, ten plik, folder `.claude/`) są
+   w **korzeniu otwartego projektu**, a nie w podfolderze. Jeśli komenda startowa
+   sklonowała repo do podfolderu `ads-agent`, to ten podfolder jest właściwym
+   projektem — poproś użytkownika, żeby otworzył go w Claude Code jako projekt
+   (zakładka Code → otwórz folder → wybierz `ads-agent`) i kontynuujcie w nim.
+   Skile ładują się tylko z korzenia projektu.
 2. **Ustaw zdalne repo na przyszłe aktualizacje.** Paczka jest sklonowana z repo
    projektu, więc `origin` już na nie wskazuje; dla jasności ustaw też `upstream`
    na to samo repo (to z niego przychodzą aktualizacje i nowe skille):
@@ -270,6 +274,9 @@ a wtedy ponów ten krok.
 
 ## Po instalacji
 
+- Poproś użytkownika, żeby raz zamknął i ponownie otworzył ten projekt w Claude
+  Code. Skile ładują się przy starcie sesji, więc będą dostępne dopiero po
+  ponownym otwarciu.
 - Pogratuluj i krótko powiedz, co dalej: od teraz użytkownik może prosić Cię
   (Claude) o dane z konta Google Ads lub o zmiany, a szczegóły działania opisuje
   `.claude/skills/gads-connector/SKILL.md`.

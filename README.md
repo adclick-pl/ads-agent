@@ -28,8 +28,11 @@ open an empty folder in it, and paste:
 
 > First check whether git is installed and install it for me if it isn't (detect
 > my system — macOS or Windows). Then clone
-> https://github.com/adclick-pl/ads-agent, read ONBOARDING.md and walk me through
-> the installation. Work autonomously and only involve me when necessary.
+> https://github.com/adclick-pl/ads-agent into my current folder: if the folder is
+> empty, run `git clone https://github.com/adclick-pl/ads-agent .` (with the dot);
+> if it isn't empty, clone into an `ads-agent` subfolder. Then read ONBOARDING.md
+> and walk me through the installation. Work autonomously and only involve me when
+> necessary.
 
 Claude reads [`ONBOARDING.md`](ONBOARDING.md) and walks you through everything
 (Node, dependencies, Google Ads API, connection test) step by step — works on
