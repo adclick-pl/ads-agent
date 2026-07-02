@@ -5,6 +5,7 @@ import path from 'path';
 import { getApiClient } from './client.js';
 import {
   listAccounts,
+  listAccessibleAccounts,
   getCampaigns,
   getKeywords,
   getSearchTerms,
@@ -114,7 +115,10 @@ Sposób użycia:
 
 Akcje odczytu:
   test-connection         Test połączenia z API.
-  list-accounts           Konta klientów pod MCC (z API).
+  list-accessible         WSZYSTKIE konta dostępne dla użytkownika: bezpośrednio
+                          udostępnione (np. konto klienta spoza MCC) + dzieci
+                          każdego MCC. Pokazuje, jaki --login-customer-id użyć.
+  list-accounts           Konta klientów pod JEDNYM MCC (z API).
   get-campaigns           Kampanie i statystyki.
   get-keywords            Słowa kluczowe i Quality Score.
   get-search-terms        Hasła wyszukiwania Search (do negatywów).
@@ -153,6 +157,7 @@ Opcje:
   --force                     Wymuś mutację mimo blokady SafetyLimits (skok budżetu > ${DEFAULT_MAX_BUDGET_CHANGE_PCT}%).
 
 Przykłady:
+  node scripts/cli.js --action=list-accessible --auto
   node scripts/cli.js --list-accounts
   node scripts/cli.js --action=get-campaigns --account="Example Client One" --days=30 --auto
   node scripts/cli.js --action=get-search-terms --customer=1234567890 --days=90 --auto --max-inline-rows=1000
@@ -240,6 +245,20 @@ async function main() {
           console.log(`  • [${acc['customer_client.id']}] ${acc['customer_client.descriptive_name'] || 'Brak nazwy'} (Manager: ${acc['customer_client.manager']})`);
         });
       }
+    }
+
+    else if (action === 'list-accessible') {
+      const accounts = await listAccessibleAccounts();
+      emitRows(accounts, (rows) => {
+        console.log(`\n👤 Wszystkie konta dostępne dla użytkownika (${rows.length}):`);
+        console.table(rows.map((a) => ({
+          'ID Konta': a.id,
+          'Nazwa Konta': a.descriptive_name || 'Brak nazwy',
+          'Typ': a.manager ? 'MCC Manager' : 'Klient Ads',
+          Status: a.status,
+          'Login (MCC)': a.login_customer_id || '— bezpośrednio —',
+        })));
+      }, 'list-accessible');
     }
 
     else if (action === 'list-accounts') {

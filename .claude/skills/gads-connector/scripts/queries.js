@@ -1,4 +1,4 @@
-import { getCustomer, unpackError } from './client.js';
+import { getApiClient, getCustomer, unpackError } from './client.js';
 
 /**
  * Format date in YYYY-MM-DD in local time
@@ -177,6 +177,105 @@ export async function listAccounts(customerId, opts = {}) {
   `;
 
   return runRawQuery(targetId, query, { loginCustomerId: opts.loginCustomerId });
+}
+
+/**
+ * Enumerate EVERY account the authenticated user can reach — not just one MCC's
+ * children. Two sources are merged:
+ *   1. Accounts shared directly with the user (`listAccessibleCustomers`). These
+ *      may be plain clients (e.g. a client added you to their own account) or
+ *      manager (MCC) accounts. They are queried directly, with no MCC login.
+ *   2. For every manager among those, all descendant child accounts
+ *      (`customer_client` under that MCC).
+ *
+ * Each returned row carries the `login_customer_id` you must pass to query that
+ * account: empty/null for a directly-shared account (query it directly), or the
+ * MCC id for a child account. Rows are de-duplicated by account id; if an account
+ * is reachable both ways, the direct path wins (it needs no MCC login).
+ *
+ * @returns {Promise<Array<{id:string, descriptive_name:string, manager:boolean,
+ *   status:string|number|null, currency_code:string|null,
+ *   login_customer_id:string|null, source:string}>>}
+ */
+export async function listAccessibleAccounts() {
+  const { api, config } = getApiClient();
+
+  let resourceNames;
+  try {
+    const res = await api.listAccessibleCustomers(config.refresh_token);
+    resourceNames = res?.resource_names || (Array.isArray(res) ? res : []);
+  } catch (error) {
+    throw new Error(`listAccessibleCustomers failed: ${unpackError(error)}`);
+  }
+  const topLevelIds = resourceNames.map((rn) => String(rn).split('/').pop());
+
+  // Query each top-level account in its OWN context (no MCC login) to learn its
+  // name + whether it's a manager. Done in parallel; failures degrade to a stub.
+  const topLevel = await Promise.all(topLevelIds.map(async (id) => {
+    try {
+      const customer = api.Customer({ customer_id: id, refresh_token: config.refresh_token });
+      const rows = await customer.query(
+        'SELECT customer.id, customer.descriptive_name, customer.manager, customer.status, customer.currency_code FROM customer LIMIT 1'
+      );
+      const c = rows[0]?.customer || {};
+      return {
+        id,
+        descriptive_name: c.descriptive_name || '',
+        manager: !!c.manager,
+        status: c.status ?? null,
+        currency_code: c.currency_code ?? null,
+        login_customer_id: null,
+        source: 'direct',
+      };
+    } catch (error) {
+      return {
+        id,
+        descriptive_name: '',
+        manager: null,
+        status: 'INACCESSIBLE',
+        currency_code: null,
+        login_customer_id: null,
+        source: 'direct',
+        error: (error.message || '').slice(0, 80),
+      };
+    }
+  }));
+
+  // For every reachable manager, list its child accounts (one query per MCC
+  // returns all descendants). Children record the MCC as their login id.
+  const managerIds = topLevel.filter((a) => a.manager).map((a) => a.id);
+  const childGroups = await Promise.all(managerIds.map(async (mccId) => {
+    try {
+      const accounts = await listAccounts(mccId, { loginCustomerId: mccId });
+      return accounts.map((acc) => ({
+        id: String(acc['customer_client.id']),
+        descriptive_name: acc['customer_client.descriptive_name'] || '',
+        manager: !!acc['customer_client.manager'],
+        status: acc['customer_client.status'] ?? null,
+        currency_code: null,
+        login_customer_id: mccId,
+        source: `mcc:${mccId}`,
+      }));
+    } catch {
+      return [];
+    }
+  }));
+
+  // Merge, de-duplicating by id. Direct access wins over an MCC path so the
+  // caller doesn't need a login id when one isn't required.
+  const byId = new Map();
+  for (const row of [...topLevel, ...childGroups.flat()]) {
+    const existing = byId.get(row.id);
+    if (!existing) {
+      byId.set(row.id, row);
+    } else if (existing.source.startsWith('mcc:') && row.source === 'direct') {
+      byId.set(row.id, row);
+    }
+  }
+
+  return [...byId.values()].sort((a, b) =>
+    (a.descriptive_name || '').localeCompare(b.descriptive_name || '', 'pl')
+  );
 }
 
 /**

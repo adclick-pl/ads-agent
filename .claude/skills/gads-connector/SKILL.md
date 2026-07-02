@@ -72,6 +72,24 @@ node scripts/cli.js --action=get-campaigns --account="Example Client One" --days
 When an account is resolved from the registry, its `login_customer_id` (MCC) and
 `timezone` are applied automatically. With no registry, just use raw IDs.
 
+**Finding an account when you don't know its ID — use `list-accessible`.**
+`list-accounts` only lists children of *one* MCC, so it misses accounts that were
+shared with you **directly** (e.g. a client added you as a user on their own
+account, outside our MCC). `list-accessible` enumerates **everything you can
+reach** — directly-shared accounts *and* every child under each MCC you manage —
+and for each row shows the `login_customer_id` you must pass to query it:
+
+```bash
+node scripts/cli.js --action=list-accessible --auto
+```
+
+- `Login (MCC) = — bezpośrednio —` → query the account directly (`--customer=<ID>`,
+  no `--login-customer-id`). This is the case for accounts shared straight to you.
+- `Login (MCC) = <id>` → pass that MCC: `--customer=<ID> --login-customer-id=<id>`.
+
+Reach for this first whenever the user names an account that isn't in the registry
+or isn't found under the MCC.
+
 ### Read actions (safe, no confirmation needed)
 
 **For the authoritative, always-current list of actions, run `node scripts/cli.js --help`.**
