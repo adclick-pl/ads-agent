@@ -1,3 +1,4 @@
+import { enums } from 'google-ads-api';
 import { getApiClient, getCustomer, unpackError } from './client.js';
 
 /**
@@ -578,4 +579,165 @@ export async function getBudgets(customerId, opts = {}) {
     WHERE campaign_budget.status = 'ENABLED'
   `;
   return runRawQuery(customerId, query, { loginCustomerId: opts.loginCustomerId });
+}
+
+/**
+ * Account change history (change_event): who changed what, when.
+ *
+ * Handles the two traps a raw GAQL pull of change_event walks into:
+ *  1. Enums arrive as numbers — decoded here via the library's `enums`
+ *     (no hand-maintained maps that can drift).
+ *  2. Criterion changes carry no keyword text — it is resolved with a second
+ *     lookup that depends on the level: ad_group_criterion (group) vs
+ *     campaign_criterion (campaign-level negatives).
+ *
+ * NOTE: the API keeps change_event for the last 30 days only; `days` is
+ * capped at 29. change_event queries require LIMIT (max 10000).
+ *
+ * @param {string} customerId - 10-digit customer ID
+ * @param {number} [days=14] - lookback window (capped at 29)
+ * @param {{loginCustomerId?: string, timezone?: string, user?: string}} [opts]
+ *   opts.user - filter by user email(s), comma-separated
+ * @returns {Promise<Array<object>>} Flat rows: datetime, date, user, operation,
+ *   resourceType, campaign, keyword, matchType, negative, level, changedFields,
+ *   oldBudget, newBudget, oldStatus, newStatus, detail
+ */
+export async function getChangeHistory(customerId, days = 14, opts = {}) {
+  const RT = enums.ChangeEventResourceType;
+  const OP = enums.ResourceChangeOperation;
+  const MT = enums.KeywordMatchType;
+
+  const effectiveDays = Math.min(days, 29);
+  const { start, end } = calculateDateRange(effectiveDays, opts.timezone);
+  const customer = getCustomer(customerId, opts.loginCustomerId);
+
+  const userFilter = opts.user
+    ? `AND change_event.user_email IN (${String(opts.user).split(',').map((u) => `'${u.trim()}'`).join(', ')})`
+    : '';
+
+  let rows;
+  try {
+    rows = await customer.query(`
+      SELECT
+        change_event.change_date_time,
+        change_event.change_resource_type,
+        change_event.change_resource_name,
+        change_event.resource_change_operation,
+        change_event.campaign,
+        change_event.ad_group,
+        change_event.changed_fields,
+        change_event.user_email,
+        change_event.old_resource,
+        change_event.new_resource
+      FROM change_event
+      WHERE change_event.change_date_time >= '${start} 00:00:00'
+        AND change_event.change_date_time <= '${end} 23:59:59'
+        ${userFilter}
+      ORDER BY change_event.change_date_time ASC
+      LIMIT 10000
+    `);
+  } catch (error) {
+    throw new Error(unpackError(error));
+  }
+
+  // Batch lookups: campaign names + criterion texts (level decides the resource).
+  const uniq = (arr) => [...new Set(arr.filter(Boolean))];
+  const campaignNames = uniq(rows.map((r) => r.change_event?.campaign));
+  const groupCriteria = uniq(rows
+    .filter((r) => r.change_event?.change_resource_type === RT.AD_GROUP_CRITERION)
+    .map((r) => r.change_event?.change_resource_name));
+  const campCriteria = uniq(rows
+    .filter((r) => r.change_event?.change_resource_type === RT.CAMPAIGN_CRITERION)
+    .map((r) => r.change_event?.change_resource_name));
+
+  const lookup = async (resource, names) => {
+    if (names.length === 0) return {};
+    const inClause = names.map((n) => `'${n}'`).join(', ');
+    const map = {};
+    try {
+      const res = await customer.query(`
+        SELECT ${resource}.resource_name, ${resource}.keyword.text,
+               ${resource}.keyword.match_type, ${resource}.negative
+        FROM ${resource}
+        WHERE ${resource}.resource_name IN (${inClause})
+      `);
+      for (const r of res) {
+        const c = r[resource];
+        map[c.resource_name] = { text: c.keyword?.text, match: c.keyword?.match_type, negative: c.negative };
+      }
+    } catch { /* removed resources simply stay unresolved */ }
+    return map;
+  };
+
+  const [campMap, kwMap, ccMap] = await Promise.all([
+    (async () => {
+      if (campaignNames.length === 0) return {};
+      const map = {};
+      try {
+        const res = await customer.query(`
+          SELECT campaign.resource_name, campaign.name FROM campaign
+          WHERE campaign.resource_name IN (${campaignNames.map((n) => `'${n}'`).join(', ')})
+        `);
+        for (const r of res) map[r.campaign.resource_name] = r.campaign.name;
+      } catch { /* deleted campaigns keep their resource name */ }
+      return map;
+    })(),
+    lookup('ad_group_criterion', groupCriteria),
+    lookup('campaign_criterion', campCriteria),
+  ]);
+
+  return rows.map((r) => {
+    const e = r.change_event;
+    const paths = Array.isArray(e.changed_fields?.paths) ? e.changed_fields.paths : [];
+    const out = {
+      datetime: e.change_date_time || '',
+      date: (e.change_date_time || '').substring(0, 10),
+      user: e.user_email || null,
+      operation: OP[e.resource_change_operation] || String(e.resource_change_operation),
+      resourceType: RT[e.change_resource_type] || String(e.change_resource_type),
+      campaign: campMap[e.campaign] || e.campaign || '',
+      keyword: null,
+      matchType: null,
+      negative: null,
+      level: null,
+      changedFields: paths.join('; '),
+      detail: '',
+    };
+
+    // Criterion text (group vs campaign level)
+    const isGroupCrit = e.change_resource_type === RT.AD_GROUP_CRITERION;
+    const isCampCrit = e.change_resource_type === RT.CAMPAIGN_CRITERION;
+    if (isGroupCrit || isCampCrit) {
+      out.level = isCampCrit ? 'campaign' : 'ad_group';
+      const c = (isCampCrit ? ccMap : kwMap)[e.change_resource_name];
+      if (c && c.text != null) {
+        out.keyword = c.text;
+        out.matchType = MT[c.match] || null;
+        out.negative = c.negative ?? null;
+        out.detail = `${c.negative ? 'NEGATIVE' : 'keyword'}: ${c.text}`;
+      } else {
+        out.detail = 'criterion (text unavailable — removed?)';
+      }
+    }
+
+    // Budget amounts
+    if (e.change_resource_type === RT.CAMPAIGN_BUDGET) {
+      const o = e.old_resource?.campaign_budget?.amount_micros;
+      const n = e.new_resource?.campaign_budget?.amount_micros;
+      if (o != null) out.oldBudget = Number(o) / 1_000_000;
+      if (n != null) out.newBudget = Number(n) / 1_000_000;
+      out.detail = `budget: ${out.oldBudget ?? '?'} → ${out.newBudget ?? '?'}`;
+    }
+
+    // Campaign status flips
+    if (e.change_resource_type === RT.CAMPAIGN && paths.includes('status')) {
+      const CS = enums.CampaignStatus;
+      out.oldStatus = CS[e.old_resource?.campaign?.status] || null;
+      out.newStatus = CS[e.new_resource?.campaign?.status] || null;
+      out.detail = `status: ${out.oldStatus ?? '?'} → ${out.newStatus ?? '?'}`;
+    }
+
+    if (!out.detail) out.detail = out.changedFields;
+    return out;
+  });
 }

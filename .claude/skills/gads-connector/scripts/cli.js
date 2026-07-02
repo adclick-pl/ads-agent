@@ -12,6 +12,7 @@ import {
   getPmaxSearchTerms,
   getKeywordIdeas,
   getBudgets,
+  getChangeHistory,
   runRawQuery,
   getAccountTimezone,
 } from './queries.js';
@@ -125,6 +126,9 @@ Akcje odczytu:
   get-pmax-search-terms   Hasła wyszukiwania dla Performance Max (--campaign opcjonalnie).
   keyword-ideas           Research słów kluczowych w Keyword Planner (--keywords i/lub --url).
   get-budgets             Aktywne budżety.
+  get-change-history      Kto co zmienił na koncie (change_event; maks. 29 dni wstecz,
+                          --user=email[,email] opcjonalny filtr; teksty wykluczeń
+                          rozwiązywane dla poziomu grupy i kampanii).
   raw-query               Własne zapytanie GAQL (wymaga --query).
 
 Akcje zapisu (zawsze najpierw --dry-run!):
@@ -220,7 +224,7 @@ async function main() {
   // accounts.json; if unknown and this action computes a range, fall back to
   // fetching the account's timezone from the API (one extra query). For raw GAQL
   // without --days, Google evaluates DURING macros in the account timezone anyway.
-  const dateBasedActions = new Set(['get-campaigns', 'get-keywords', 'get-search-terms', 'get-pmax-search-terms']);
+  const dateBasedActions = new Set(['get-campaigns', 'get-keywords', 'get-search-terms', 'get-pmax-search-terms', 'get-change-history']);
   const usesDateRange = dateBasedActions.has(action) || (action === 'raw-query' && !!args.days);
   let effectiveTimezone = timezone;
   if (usesDateRange && !effectiveTimezone) {
@@ -341,6 +345,26 @@ async function main() {
         })));
         if (rows.length > 50) console.log(`\n  * 50 z ${rows.length}. Użyj --auto / --output / --json po całość.`);
       }, 'get-pmax-search-terms');
+    }
+
+    else if (action === 'get-change-history') {
+      if (days > 29) {
+        console.error('⚠️  Google Ads API przechowuje change_event tylko 30 dni — zakres przycięty do 29 dni.');
+      }
+      const effDays = Math.min(days, 29);
+      const changes = await getChangeHistory(customerId, effDays, { ...readOpts, user: args.user });
+      emitRows(changes, (rows) => {
+        console.log(`\n📋 Historia zmian (${effDays} dni${args.user ? `, user: ${args.user}` : ''}):`);
+        console.table(rows.slice(0, 50).map((c) => ({
+          Data: (c.datetime || '').substring(0, 16),
+          Kto: c.user,
+          Operacja: c.operation,
+          Typ: c.resourceType,
+          Kampania: (c.campaign || '').substring(0, 28),
+          Szczegóły: (c.detail || '').substring(0, 50),
+        })));
+        if (rows.length > 50) console.log(`\n  * 50 z ${rows.length}. Użyj --auto / --output / --json po całość.`);
+      }, 'get-change-history');
     }
 
     else if (action === 'keyword-ideas') {
