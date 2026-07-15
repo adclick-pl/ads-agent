@@ -228,5 +228,81 @@ check('resolveAccount(undefined) does not throw', () => {
   accounts.resolveAccount(undefined);
 });
 
+// 10. Final URL update helpers (validation, resource-name building, CSV parsing).
+check('validateFinalUrl accepts a well-formed https URL', () => {
+  const r = safety.validateFinalUrl('https://flexizone.pl/podloze-pod-plac-zabaw/');
+  assert(r.valid && r.host === 'flexizone.pl', JSON.stringify(r));
+});
+check('validateFinalUrl rejects empty / non-http', () => {
+  assert(!safety.validateFinalUrl('').valid);
+  assert(!safety.validateFinalUrl('ftp://x.pl/').valid);
+  assert(!safety.validateFinalUrl('not a url').valid);
+});
+check('validateFinalUrl domain lock rejects off-domain (www ignored)', () => {
+  assert(safety.validateFinalUrl('https://www.flexizone.pl/x/', { domain: 'flexizone.pl' }).valid);
+  assert(!safety.validateFinalUrl('https://evil.example/x/', { domain: 'flexizone.pl' }).valid);
+});
+check('buildFinalUrlResourceName builds from bare ID and passes through full names', () => {
+  assert(mutator.buildFinalUrlResourceName('123-456-7890', 'ad', '999') === 'customers/1234567890/ads/999');
+  assert(mutator.buildFinalUrlResourceName('1234567890', 'keyword', '11~22') === 'customers/1234567890/adGroupCriteria/11~22');
+  const full = 'customers/1234567890/ads/999';
+  assert(mutator.buildFinalUrlResourceName('1234567890', 'ad', full) === full);
+});
+check('buildFinalUrlResourceName rejects unknown entity / empty id', () => {
+  let t1 = false, t2 = false;
+  try { mutator.buildFinalUrlResourceName('1', 'sitelink', '9'); } catch { t1 = true; }
+  try { mutator.buildFinalUrlResourceName('1', 'ad', ''); } catch { t2 = true; }
+  assert(t1 && t2);
+});
+check('parseCsv reads header + quoted cells with commas', () => {
+  const rows = csv.parseCsv('id,final_url,label\n999,https://flexizone.pl/a/,"grupa, x"\n11~22,https://flexizone.pl/b/,kw\n');
+  assert(rows.length === 2, `got ${rows.length}`);
+  assert(rows[0].id === '999' && rows[0].final_url === 'https://flexizone.pl/a/' && rows[0].label === 'grupa, x', JSON.stringify(rows[0]));
+  assert(rows[1].id === '11~22', JSON.stringify(rows[1]));
+});
+check('parseCsv skips blank trailing lines and returns [] for empty input', () => {
+  assert(csv.parseCsv('id,final_url\n\n').length === 0);
+  assert(csv.parseCsv('').length === 0);
+});
+
+// 11. Sitelink link-level detection (routes the right GAQL table for URL swaps).
+check('sitelinkLinkLevel detects campaign/ad_group/customer', () => {
+  assert(queries.sitelinkLinkLevel('customers/1/campaignAssets/2~3~SITELINK') === 'campaign');
+  assert(queries.sitelinkLinkLevel('customers/1/adGroupAssets/2~3~SITELINK') === 'ad_group');
+  assert(queries.sitelinkLinkLevel('customers/1/customerAssets/3~SITELINK') === 'customer');
+});
+check('sitelinkLinkLevel throws on an unrecognised resource name', () => {
+  let threw = false;
+  try { queries.sitelinkLinkLevel('customers/1/ads/999'); } catch { threw = true; }
+  assert(threw);
+});
+check('swapSitelinkFinalUrls exists and rejects an empty batch', async () => {
+  assert(typeof mutator.swapSitelinkFinalUrls === 'function');
+});
+
+// 12. Sitelink creation guards: text limits + pairing rule.
+check('checkSitelinkTexts accepts valid texts and empty descriptions', () => {
+  assert(safety.checkSitelinkTexts({ linkText: 'Płyty gumowe SBR', description1: 'Ekonomiczne, z certyfikatem HIC', description2: 'Wiele kolorów, montaż na gruncie' }).valid);
+  assert(safety.checkSitelinkTexts({ linkText: 'Sklep online' }).valid);
+});
+check('checkSitelinkTexts rejects over-limit and unpaired descriptions', () => {
+  assert(!safety.checkSitelinkTexts({ linkText: 'To jest zdecydowanie za długi nagłówek' }).valid); // >25
+  assert(!safety.checkSitelinkTexts({ linkText: 'OK', description1: 'x'.repeat(36), description2: 'y' }).valid); // desc1 >35
+  assert(!safety.checkSitelinkTexts({ linkText: 'OK', description1: 'tylko jeden opis' }).valid); // unpaired
+  assert(!safety.checkSitelinkTexts({ linkText: '' }).valid); // empty
+});
+check('addSitelinks / pauseSitelinkLinks are exported functions', () => {
+  assert(typeof mutator.addSitelinks === 'function');
+  assert(typeof mutator.pauseSitelinkLinks === 'function');
+});
+check('clearKeywordFinalUrls is exported and rejects non-keyword resources', async () => {
+  assert(typeof mutator.clearKeywordFinalUrls === 'function');
+  let threw = false;
+  try {
+    await mutator.clearKeywordFinalUrls('1234567890', [{ resourceName: 'customers/1/ads/999' }], true);
+  } catch { threw = true; }
+  assert(threw, 'should refuse a non-adGroupCriteria resource');
+});
+
 console.log(`\nResult: ${passed} passed, ${failed} failed.\n`);
 process.exit(failed === 0 ? 0 : 1);

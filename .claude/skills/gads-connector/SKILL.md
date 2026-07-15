@@ -155,7 +155,55 @@ node scripts/cli.js --action=add-negatives --customer=1234567890 --campaign=9876
 
 # Add account-level placement exclusions (display/PMax spam domains)
 node scripts/cli.js --action=add-negative-placements --customer=1234567890 --domains="spam.example,clickfarm.example" --dry-run
+
+# Change an ad's Final URL — single ad (works for RSA; legacy text ads are immutable)
+node scripts/cli.js --action=update-ad-url --customer=1234567890 --ad=670502653180 --url="https://example.pl/kategoria/" --domain=example.pl --dry-run
+
+# Change a keyword's Final URL override — single keyword (--criterion=adGroupId~criterionId)
+node scripts/cli.js --action=update-keyword-url --customer=1234567890 --criterion=112447007410~495997481489 --url="https://example.pl/kategoria/" --domain=example.pl --dry-run
+
+# Bulk Final URL swap (ads or keywords) from a CSV map — columns: id,final_url[,label]
+#   id = bare ad ID (ads) or adGroupId~criterionId (keywords), or a full resource_name
+node scripts/cli.js --action=update-ad-url --customer=1234567890 --input=urls.csv --domain=example.pl --dry-run
+
+# Repoint a sitelink's Final URL (data-preserving: clone asset + relink + pause old link)
+#   --sitelink is the FULL link resource name; batch via --input (col: link_resource_name,final_url)
+node scripts/cli.js --action=update-sitelink-url --customer=1234567890 --sitelink="customers/1234567890/campaignAssets/111~222~SITELINK" --url="https://example.pl/kategoria/" --domain=example.pl --dry-run
 ```
+
+**Final URL updates (`update-ad-url`, `update-keyword-url`).** Built for site
+migrations / domain restructures where many ads or keyword-level Final URLs point
+at old (redirecting) paths. Both take either a single item (`--ad` / `--criterion`
++ `--url`) or a batch `--input=map.csv`. Guardrails: every URL is validated as a
+well-formed http(s) URL and — with `--domain=<host>` — must stay on that host
+(off-domain or malformed URLs block the **whole** batch, nothing half-applies).
+`--dry-run` reads the current URLs and returns a per-item `from → to` diff (plus
+`found`/`changed` flags) so you can eyeball it before committing.
+
+**Sitelink URL swaps (`update-sitelink-url`).** Sitelink assets are (largely)
+immutable, so this can't edit the URL in place — instead it does the
+data-preserving swap in ONE atomic `mutateResources`: it **clones** the asset
+(same link text + descriptions) with the new Final URL, **links** the clone at the
+same level/parent (`ENABLED`), and sets the **old link to `PAUSED`** (kept, not
+removed, so its history survives). Input is the FULL link resource name
+(`--sitelink=` or CSV column `link_resource_name`) — a bare ID won't do, because
+the same asset can be linked at campaign / ad-group / account level. New assets are
+de-duplicated by (source asset + new URL): one clone is made even when a sitelink
+is linked in many places, then linked N times. Same URL validation + `--domain`
+lock as above. Caveat: a separate **mobile** Final URL is NOT carried to the clone
+(the dry-run `plan.warning` flags it) — the desktop URL is used for both.
+
+**New sitelink sets (`add-sitelinks`, `pause-sitelinks`).** `add-sitelinks` builds
+a fresh sitelink set from `--input=map.csv` (cols `level`=customer|campaign,
+`campaign_id`, `link_text`, `description1`, `description2`, `final_url`): creates the
+assets and links them at account or campaign level in one atomic call. It is
+**idempotent** — first reads the sitelinks that already exist (`ENABLED` or
+`PAUSED`) and skips any with the same parent + text + URL, so re-running the same
+CSV adds nothing (the dry-run reports `skipped` vs `linksToAdd`). Texts are checked
+against Google's limits (`link_text` 25, descriptions 35, descriptions as a pair).
+`pause-sitelinks` retires links (status `PAUSED`, kept not removed) — the data-
+preserving way to swap a whole set: `add-sitelinks` the new one, `pause-sitelinks`
+the old resource names.
 
 **SafetyLimits (budget).** `update-budget` reads the current budget and **blocks
 any change larger than 40%** (up or down), and also blocks the change if it can't

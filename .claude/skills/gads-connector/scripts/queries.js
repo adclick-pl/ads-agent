@@ -741,3 +741,152 @@ export async function getChangeHistory(customerId, days = 14, opts = {}) {
     return out;
   });
 }
+
+/**
+ * Read the current Final URLs for a set of ads or keywords, keyed by resource
+ * name. Used to build a before→after diff for the `update-ad-url` /
+ * `update-keyword-url` dry-run so the operator sees exactly what changes.
+ *
+ * @param {string} customerId
+ * @param {'ad'|'keyword'} entity
+ * @param {Array<string>} resourceNames - full resource names to look up
+ * @param {{loginCustomerId?: string}} [opts]
+ * @returns {Promise<Map<string, string[]>>} resourceName → current final_urls
+ */
+export async function getCurrentFinalUrls(customerId, entity, resourceNames, opts = {}) {
+  const map = new Map();
+  const names = [...new Set(resourceNames.filter(Boolean))];
+  if (names.length === 0) return map;
+
+  // GAQL IN-lists have a practical size limit; chunk to stay well under it.
+  const CHUNK = 200;
+  const inList = (arr) => arr.map((n) => `'${String(n).replace(/'/g, "")}'`).join(', ');
+
+  for (let i = 0; i < names.length; i += CHUNK) {
+    const chunk = names.slice(i, i + CHUNK);
+    const query = entity === 'ad'
+      ? `SELECT ad_group_ad.ad.resource_name, ad_group_ad.ad.final_urls
+         FROM ad_group_ad
+         WHERE ad_group_ad.ad.resource_name IN (${inList(chunk)})`
+      : `SELECT ad_group_criterion.resource_name, ad_group_criterion.final_urls
+         FROM ad_group_criterion
+         WHERE ad_group_criterion.resource_name IN (${inList(chunk)})`;
+    const rows = await runRawQuery(customerId, query, { loginCustomerId: opts.loginCustomerId });
+    for (const r of rows) {
+      const rn = entity === 'ad' ? r['ad_group_ad.ad.resource_name'] : r['ad_group_criterion.resource_name'];
+      const urls = entity === 'ad' ? r['ad_group_ad.ad.final_urls'] : r['ad_group_criterion.final_urls'];
+      if (rn) map.set(rn, urls || []);
+    }
+  }
+  return map;
+}
+
+/**
+ * Detect the level of a sitelink *_asset LINK resource name.
+ * @param {string} rn - e.g. customers/1/campaignAssets/2~3~SITELINK
+ * @returns {'campaign'|'ad_group'|'customer'}
+ */
+export function sitelinkLinkLevel(rn) {
+  const s = String(rn);
+  if (s.includes('/campaignAssets/')) return 'campaign';
+  if (s.includes('/adGroupAssets/')) return 'ad_group';
+  if (s.includes('/customerAssets/')) return 'customer';
+  throw new Error(`Nierozpoznany resource_name linku sitelink: "${rn}" (oczekiwano campaignAssets/adGroupAssets/customerAssets).`);
+}
+
+/**
+ * List the sitelinks that already EXIST on the account (status ENABLED or PAUSED,
+ * i.e. not removed), at campaign and customer level, as
+ * `{level, campaignId, linkText, finalUrl}`. Lets `add-sitelinks` converge — skip
+ * a sitelink that already exists at the same parent — instead of blindly creating
+ * duplicates. Paused ones count as "exists" too, so a set we deliberately paused
+ * (e.g. a retired sitelink) is not silently resurrected by a re-run.
+ *
+ * @param {string} customerId
+ * @param {{loginCustomerId?: string}} [opts]
+ * @returns {Promise<Array<{level:'campaign'|'customer', campaignId:string|null, linkText:string, finalUrl:string}>>}
+ */
+export async function getExistingSitelinks(customerId, opts = {}) {
+  const clean = String(customerId).replace(/-/g, '');
+  const out = [];
+  const campRows = await runRawQuery(clean,
+    `SELECT campaign.id, campaign.status, campaign_asset.status, asset.sitelink_asset.link_text, asset.final_urls
+     FROM campaign_asset
+     WHERE asset.type = 'SITELINK' AND campaign_asset.status IN ('ENABLED', 'PAUSED')`,
+    { loginCustomerId: opts.loginCustomerId });
+  for (const r of campRows) {
+    out.push({ level: 'campaign', campaignId: String(r['campaign.id']), linkText: r['asset.sitelink_asset.link_text'] || '', finalUrl: (r['asset.final_urls'] || [])[0] || '' });
+  }
+  const custRows = await runRawQuery(clean,
+    `SELECT customer_asset.status, asset.sitelink_asset.link_text, asset.final_urls
+     FROM customer_asset
+     WHERE asset.type = 'SITELINK' AND customer_asset.status IN ('ENABLED', 'PAUSED')`,
+    { loginCustomerId: opts.loginCustomerId });
+  for (const r of custRows) {
+    out.push({ level: 'customer', campaignId: null, linkText: r['asset.sitelink_asset.link_text'] || '', finalUrl: (r['asset.final_urls'] || [])[0] || '' });
+  }
+  return out;
+}
+
+/**
+ * Read the full detail of sitelink LINKS (campaign/ad_group/customer level) so a
+ * URL swap can clone the underlying asset and re-link it. Returns per-link:
+ * level, parent resource (campaign/ad_group, null for account), link status, the
+ * source asset resource name, and the sitelink text/descriptions + current URLs.
+ *
+ * @param {string} customerId
+ * @param {Array<string>} linkResourceNames - full *_asset resource names
+ * @param {{loginCustomerId?: string}} [opts]
+ * @returns {Promise<Map<string, object>>} linkResourceName → detail
+ */
+export async function getSitelinkLinkDetails(customerId, linkResourceNames, opts = {}) {
+  const map = new Map();
+  const names = [...new Set(linkResourceNames.filter(Boolean))];
+  if (names.length === 0) return map;
+
+  const byLevel = { campaign: [], ad_group: [], customer: [] };
+  for (const rn of names) byLevel[sitelinkLinkLevel(rn)].push(rn);
+
+  const assetFields =
+    'asset.resource_name, asset.sitelink_asset.link_text, ' +
+    'asset.sitelink_asset.description1, asset.sitelink_asset.description2, ' +
+    'asset.final_urls, asset.final_mobile_urls';
+  const inList = (arr) => arr.map((n) => `'${String(n).replace(/'/g, "")}'`).join(', ');
+  const CHUNK = 200;
+
+  const runChunks = async (level, arr, buildQuery, mapRow) => {
+    for (let i = 0; i < arr.length; i += CHUNK) {
+      const rows = await runRawQuery(customerId, buildQuery(arr.slice(i, i + CHUNK)), { loginCustomerId: opts.loginCustomerId });
+      for (const r of rows) {
+        const d = mapRow(r);
+        if (d.linkResourceName) map.set(d.linkResourceName, d);
+      }
+    }
+  };
+
+  const assetOf = (r) => ({
+    assetResourceName: r['asset.resource_name'],
+    linkText: r['asset.sitelink_asset.link_text'] || '',
+    description1: r['asset.sitelink_asset.description1'] || '',
+    description2: r['asset.sitelink_asset.description2'] || '',
+    finalUrls: r['asset.final_urls'] || [],
+    finalMobileUrls: r['asset.final_mobile_urls'] || [],
+  });
+
+  if (byLevel.campaign.length) {
+    await runChunks('campaign', byLevel.campaign,
+      (c) => `SELECT campaign_asset.resource_name, campaign_asset.status, campaign.resource_name, ${assetFields} FROM campaign_asset WHERE campaign_asset.resource_name IN (${inList(c)})`,
+      (r) => ({ level: 'campaign', linkResourceName: r['campaign_asset.resource_name'], parent: r['campaign.resource_name'], linkStatus: r['campaign_asset.status'], ...assetOf(r) }));
+  }
+  if (byLevel.ad_group.length) {
+    await runChunks('ad_group', byLevel.ad_group,
+      (c) => `SELECT ad_group_asset.resource_name, ad_group_asset.status, ad_group.resource_name, ${assetFields} FROM ad_group_asset WHERE ad_group_asset.resource_name IN (${inList(c)})`,
+      (r) => ({ level: 'ad_group', linkResourceName: r['ad_group_asset.resource_name'], parent: r['ad_group.resource_name'], linkStatus: r['ad_group_asset.status'], ...assetOf(r) }));
+  }
+  if (byLevel.customer.length) {
+    await runChunks('customer', byLevel.customer,
+      (c) => `SELECT customer_asset.resource_name, customer_asset.status, ${assetFields} FROM customer_asset WHERE customer_asset.resource_name IN (${inList(c)})`,
+      (r) => ({ level: 'customer', linkResourceName: r['customer_asset.resource_name'], parent: null, linkStatus: r['customer_asset.status'], ...assetOf(r) }));
+  }
+  return map;
+}

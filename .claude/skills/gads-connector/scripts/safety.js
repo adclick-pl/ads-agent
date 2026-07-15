@@ -55,6 +55,68 @@ export function pctChange(current, next) {
 }
 
 /**
+ * Validate a Final URL before it is written to an ad or keyword.
+ *
+ * Pure guardrail (no network): rejects anything that isn't a well-formed
+ * absolute http(s) URL, and — when `domain` is given — rejects URLs that point
+ * to a different host. The domain lock is the cheap way to stop a typo or a
+ * pasted foreign link from silently sending traffic off-site; it does NOT verify
+ * the page actually resolves (that would need a live fetch).
+ *
+ * @param {string} url
+ * @param {{domain?: string}} [opts] - if set, the URL host must equal this
+ *   (leading `www.` is ignored on both sides).
+ * @returns {{valid: boolean, reason: string|null, host: string|null}}
+ */
+export function validateFinalUrl(url, opts = {}) {
+  const raw = String(url ?? '').trim();
+  if (!raw) return { valid: false, reason: 'Pusty URL.', host: null };
+
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return { valid: false, reason: `Niepoprawny URL: "${raw}".`, host: null };
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    return { valid: false, reason: `URL musi być http/https (jest "${parsed.protocol}").`, host: parsed.host };
+  }
+
+  const host = parsed.host.replace(/^www\./, '');
+  if (opts.domain) {
+    const want = String(opts.domain).trim().replace(/^www\./, '').toLowerCase();
+    if (host.toLowerCase() !== want) {
+      return { valid: false, reason: `URL wskazuje na "${host}", oczekiwano domeny "${want}".`, host };
+    }
+  }
+  return { valid: true, reason: null, host };
+}
+
+/** Google Ads hard limits for sitelink texts (characters, Unicode-aware). */
+export const SITELINK_LIMITS = { linkText: 25, description: 35 };
+
+/**
+ * Validate sitelink texts against Google's hard character limits.
+ * Descriptions are optional as a pair (both empty is fine — Google allows
+ * text-only sitelinks), but when given each must fit its limit.
+ *
+ * @param {{linkText: string, description1?: string, description2?: string}} t
+ * @returns {{valid: boolean, reasons: string[]}}
+ */
+export function checkSitelinkTexts(t) {
+  const len = (s) => [...String(s ?? '')].length;
+  const reasons = [];
+  if (!String(t.linkText ?? '').trim()) reasons.push('Pusty nagłówek (link_text).');
+  if (len(t.linkText) > SITELINK_LIMITS.linkText) reasons.push(`link_text ma ${len(t.linkText)} znaków (limit ${SITELINK_LIMITS.linkText}).`);
+  if (len(t.description1) > SITELINK_LIMITS.description) reasons.push(`description1 ma ${len(t.description1)} znaków (limit ${SITELINK_LIMITS.description}).`);
+  if (len(t.description2) > SITELINK_LIMITS.description) reasons.push(`description2 ma ${len(t.description2)} znaków (limit ${SITELINK_LIMITS.description}).`);
+  // Google requires description1 if description2 is set (and vice versa).
+  const d1 = String(t.description1 ?? '').trim(), d2 = String(t.description2 ?? '').trim();
+  if ((d1 && !d2) || (!d1 && d2)) reasons.push('Opisy muszą być podane parą (oba albo żaden).');
+  return { valid: reasons.length === 0, reasons };
+}
+
+/**
  * Decide whether a budget change is within the safety limit.
  * @param {number|null|undefined} currentAmount - current daily budget (standard currency)
  * @param {number} newAmount - requested daily budget (standard currency)

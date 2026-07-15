@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { writeFileSync } from 'fs';
+import { writeFileSync, readFileSync } from 'fs';
 import path from 'path';
 import { getApiClient } from './client.js';
 import {
@@ -21,9 +21,15 @@ import {
   updateCampaignBudget,
   addCampaignNegativeKeywords,
   addAccountNegativePlacements,
+  updateFinalUrls,
+  clearKeywordFinalUrls,
+  buildFinalUrlResourceName,
+  swapSitelinkFinalUrls,
+  addSitelinks,
+  pauseSitelinkLinks,
 } from './mutator.js';
 import { resolveAccount, loadAccounts } from './accounts.js';
-import { rowsToCsv } from './csv.js';
+import { rowsToCsv, parseCsv } from './csv.js';
 import { chooseOutputMode, defaultCsvPath, DEFAULT_INLINE_THRESHOLD } from './output.js';
 import { DEFAULT_MAX_BUDGET_CHANGE_PCT } from './safety.js';
 
@@ -106,6 +112,79 @@ function emitRows(rows, prettyFn, action) {
   prettyFn(rows);
 }
 
+/**
+ * Build the list of Final-URL updates for update-ad-url / update-keyword-url,
+ * from either a batch CSV (`--input`) or single-item flags.
+ *
+ * CSV columns (case-insensitive, first match wins):
+ *   id | resource_name | ad_id | criterion   → the entity ID or full resource name
+ *   final_url | new_url | url                 → the new Final URL
+ *   label | grupa | ad_group | campaign       → optional human label for output
+ *
+ * @param {'ad'|'keyword'} entity
+ * @param {string} customerId
+ * @returns {Array<{resourceName: string, finalUrl: string, label: string}>}
+ */
+function loadFinalUrlItems(entity, customerId) {
+  const pick = (obj, keys) => { for (const k of keys) if (obj[k] !== undefined && obj[k] !== '') return obj[k]; return undefined; };
+
+  if (args.input) {
+    const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+    if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
+    return rows.map((r, i) => {
+      const id = pick(r, ['id', 'resource_name', 'ad_id', 'criterion', 'criterion_id']);
+      const url = pick(r, ['final_url', 'new_url', 'url']);
+      const label = pick(r, ['label', 'grupa', 'ad_group', 'campaign']) || String(id ?? `wiersz ${i + 2}`);
+      if (!id) throw new Error(`Wiersz ${i + 2}: brak kolumny id/resource_name.`);
+      if (!url) throw new Error(`Wiersz ${i + 2} (${label}): brak kolumny final_url.`);
+      return { resourceName: buildFinalUrlResourceName(customerId, entity, id), finalUrl: url, label };
+    });
+  }
+
+  // Single-item mode
+  const singleId = entity === 'ad' ? (args.ad || args.id) : (args.criterion || args.id);
+  const url = args.url;
+  const flag = entity === 'ad' ? '--ad=<adId>' : '--criterion=<adGroupId~criterionId>';
+  if (!singleId || !url) {
+    throw new Error(`${entity === 'ad' ? 'update-ad-url' : 'update-keyword-url'} wymaga ${flag} i --url=<https://...>, albo --input=mapa.csv`);
+  }
+  return [{ resourceName: buildFinalUrlResourceName(customerId, entity, singleId), finalUrl: url, label: String(singleId) }];
+}
+
+/**
+ * Build the list of sitelink URL swaps for update-sitelink-url. A sitelink item
+ * needs the FULL link resource name (e.g. .../campaignAssets/111~222~SITELINK) —
+ * it can't be built from a bare ID — plus the new Final URL.
+ *
+ * CSV columns: link_resource_name | resource_name | id → the full link resource
+ * name; final_url | new_url | url → new URL; label | grupa | campaign → optional.
+ *
+ * @returns {Array<{linkResourceName: string, finalUrl: string, label: string}>}
+ */
+function loadSitelinkItems() {
+  const pick = (obj, keys) => { for (const k of keys) if (obj[k] !== undefined && obj[k] !== '') return obj[k]; return undefined; };
+
+  if (args.input) {
+    const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+    if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
+    return rows.map((r, i) => {
+      const rn = pick(r, ['link_resource_name', 'resource_name', 'id']);
+      const url = pick(r, ['final_url', 'new_url', 'url']);
+      const label = pick(r, ['label', 'grupa', 'campaign']) || rn;
+      if (!rn) throw new Error(`Wiersz ${i + 2}: brak kolumny link_resource_name/resource_name.`);
+      if (!String(rn).includes('/')) throw new Error(`Wiersz ${i + 2} (${label}): sitelink wymaga PEŁNEGO resource_name linku (np. .../campaignAssets/111~222~SITELINK), nie samego ID.`);
+      if (!url) throw new Error(`Wiersz ${i + 2} (${label}): brak kolumny final_url.`);
+      return { linkResourceName: String(rn), finalUrl: url, label };
+    });
+  }
+
+  const rn = args.sitelink;
+  const url = args.url;
+  if (!rn || !url) throw new Error('update-sitelink-url wymaga --sitelink=<pełny resource_name linku> i --url=<https://...>, albo --input=mapa.csv');
+  if (!String(rn).includes('/')) throw new Error('--sitelink musi być PEŁNYM resource_name linku (np. customers/ID/campaignAssets/111~222~SITELINK).');
+  return [{ linkResourceName: String(rn), finalUrl: url, label: String(rn) }];
+}
+
 function printHelp() {
   console.log(`
 🚀 --- Google Ads Connector CLI --- 🚀
@@ -137,6 +216,20 @@ Akcje zapisu (zawsze najpierw --dry-run!):
                           SafetyLimits blokuje skok > ${DEFAULT_MAX_BUDGET_CHANGE_PCT}% — użyj --force, by wymusić.
   add-negatives           Negatywne słowa kluczowe (--campaign, --keywords, --match-type).
   add-negative-placements Wykluczenia miejsc docelowych (--domains).
+  update-ad-url           Zmiana Final URL reklamy (RSA). Pojedynczo: --ad=<adId> --url=<...>;
+                          wsadowo: --input=mapa.csv (kolumny: id,final_url).
+  update-keyword-url      Zmiana Final URL słowa kluczowego (override). Pojedynczo:
+                          --criterion=<adGroupId~criterionId> --url=<...>; wsadowo: --input=mapa.csv.
+  clear-keyword-url       Czyści override Final URL słowa (final_urls=[]) → słowo dziedziczy URL
+                          reklamy. Tylko --input=mapa.csv (kolumna id lub resource_name).
+  update-sitelink-url     Zmiana Final URL sitelinka bez utraty danych: klonuje asset z nowym
+                          URL, podpina (ENABLED) i wstrzymuje stary link (PAUSED). Pojedynczo:
+                          --sitelink=<pełny resource_name linku> --url=<...>; wsadowo: --input=mapa.csv.
+  add-sitelinks           Tworzy NOWE sitelinki (asset + link) na poziomie konta lub kampanii,
+                          atomowo. Tylko --input=mapa.csv (kolumny: level=customer|campaign,
+                          campaign_id,link_text,description1,description2,final_url).
+  pause-sitelinks         Wstrzymuje (PAUSED) istniejące linki sitelink — dane zostają.
+                          --input=mapa.csv (kolumna link_resource_name) lub --links="rn1,rn2".
 
 Opcje:
   --account=<nazwa|alias|ID>  Konto z accounts.json (nazwa/alias) LUB 10-cyfrowe ID.
@@ -159,6 +252,11 @@ Opcje:
   --json                      WYMUŚ czysty JSON na stdout (niezależnie od liczby wierszy).
   --dry-run                   Symulacja mutacji (bez zmian na koncie).
   --force                     Wymuś mutację mimo blokady SafetyLimits (skok budżetu > ${DEFAULT_MAX_BUDGET_CHANGE_PCT}%).
+  --ad=<adId>                 ID reklamy dla update-ad-url (pojedynczo).
+  --criterion=<agId~critId>   Zasób słowa kluczowego dla update-keyword-url (pojedynczo).
+  --sitelink=<resource_name>  Pełny resource_name linku sitelink dla update-sitelink-url (pojedynczo).
+  --input=<mapa.csv>          Plik wsadowy dla update-*-url (kolumny: id/resource_name,final_url).
+  --domain=<flexizone.pl>     Blokada domeny: odrzuć Final URL spoza tej domeny (guardrail).
 
 Przykłady:
   node scripts/cli.js --action=list-accessible --auto
@@ -451,6 +549,65 @@ async function main() {
       if (!domainsString) throw new Error('add-negative-placements requires --domains="domena1.com,domena2.pl"');
       const domains = domainsString.split(',').map((d) => d.trim()).filter(Boolean);
       const result = await addAccountNegativePlacements(customerId, domains, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'update-ad-url' || action === 'update-keyword-url') {
+      const entity = action === 'update-ad-url' ? 'ad' : 'keyword';
+      const items = loadFinalUrlItems(entity, customerId);
+      const result = await updateFinalUrls(customerId, entity, items, dryRun, loginCustomerId, { domain: args.domain });
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'clear-keyword-url') {
+      // Batch-only: clearing overrides one at a time is rarely useful.
+      if (!args.input) throw new Error('clear-keyword-url wymaga --input=mapa.csv (kolumna: id lub resource_name słowa kluczowego)');
+      const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+      if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
+      const items = rows.map((r, i) => {
+        const id = r.id || r.resource_name || r.criterion;
+        if (!id) throw new Error(`Wiersz ${i + 2}: brak kolumny id/resource_name.`);
+        const resourceName = buildFinalUrlResourceName(customerId, 'keyword', id);
+        return { resourceName, label: r.label || r.grupa || id };
+      });
+      const result = await clearKeywordFinalUrls(customerId, items, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'update-sitelink-url') {
+      const items = loadSitelinkItems();
+      const result = await swapSitelinkFinalUrls(customerId, items, dryRun, loginCustomerId, { domain: args.domain });
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'add-sitelinks') {
+      // Batch-only: creating a sitelink set one flag at a time is error-prone.
+      if (!args.input) throw new Error('add-sitelinks wymaga --input=mapa.csv (kolumny: level,campaign_id,link_text,description1,description2,final_url)');
+      const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+      if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
+      const items = rows.map((r, i) => ({
+        level: r.level,
+        campaignId: r.campaign_id || r.campaign,
+        linkText: r.link_text,
+        description1: r.description1 || r.desc1 || '',
+        description2: r.description2 || r.desc2 || '',
+        finalUrl: r.final_url || r.url,
+        label: r.label || `${r.link_text} (wiersz ${i + 2})`,
+      }));
+      const result = await addSitelinks(customerId, items, dryRun, loginCustomerId, { domain: args.domain });
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'pause-sitelinks') {
+      let names = [];
+      if (args.input) {
+        const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+        names = rows.map((r) => r.link_resource_name || r.resource_name || r.id).filter(Boolean);
+      } else if (args.links) {
+        names = String(args.links).split(',').map((s) => s.trim()).filter(Boolean);
+      }
+      if (names.length === 0) throw new Error('pause-sitelinks wymaga --input=mapa.csv (kolumna: link_resource_name) albo --links="rn1,rn2"');
+      const result = await pauseSitelinkLinks(customerId, names, dryRun, loginCustomerId);
       console.log(JSON.stringify(result, null, 2));
     }
 
