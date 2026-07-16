@@ -286,7 +286,9 @@ export async function listAccessibleAccounts() {
  * @returns {Promise<Array<object>>} Campaigns
  */
 export async function getCampaigns(customerId, days = 30, opts = {}) {
-  const { start, end } = calculateDateRange(days, opts.timezone);
+  // opts.range = { start, end } (YYYY-MM-DD) wins over the rolling `days` window —
+  // e.g. to end on yesterday (complete days) instead of including today's partial data.
+  const { start, end } = opts.range || calculateDateRange(days, opts.timezone);
   const query = `
     SELECT
       campaign.id,
@@ -298,7 +300,8 @@ export async function getCampaigns(customerId, days = 30, opts = {}) {
       metrics.impressions,
       metrics.cost_micros,
       metrics.conversions,
-      metrics.conversions_value
+      metrics.conversions_value,
+      metrics.search_impression_share
     FROM campaign
     WHERE segments.date BETWEEN '${start}' AND '${end}'
       AND campaign.status IN ('ENABLED', 'PAUSED')
@@ -328,7 +331,9 @@ export async function getCampaigns(customerId, days = 30, opts = {}) {
       conversion_value: convValue,
       ctr: impressions > 0 ? (clicks / impressions) * 100 : 0,
       cpc: clicks > 0 ? cost / clicks : 0,
-      roas: cost > 0 ? convValue / cost : 0
+      roas: cost > 0 ? convValue / cost : 0,
+      // Search impression share (0..1) — null for non-Search campaigns (Display/PMax/etc.)
+      impression_share: row['metrics.search_impression_share'] ?? null
     };
   });
 }
@@ -448,14 +453,26 @@ export async function getKeywordIdeas(customerId, opts = {}) {
  * @returns {Promise<Array<object>>} Search terms
  */
 export async function getSearchTerms(customerId, days = 30, minCost = 0, opts = {}) {
-  const { start, end } = calculateDateRange(days, opts.timezone);
+  // opts.range = { start, end } (YYYY-MM-DD) wins over the rolling `days` window.
+  const { start, end } = opts.range || calculateDateRange(days, opts.timezone);
+
+  // Opt-in: the triggering keyword (`segments.keyword.info.text`) plus its match
+  // type (`segments.keyword.info.match_type`, enum 2=EXACT/3=PHRASE/4=BROAD). Both
+  // belong to the same `segments.keyword` message, so adding match_type does not
+  // split rows further — it's a property of the keyword `text` already breaks on.
+  // It's a SEGMENT, so it splits a search term into one row per matched keyword —
+  // only add it when the caller wants that breakdown, to keep the default row shape
+  // unchanged.
+  const keywordField = opts.includeKeyword
+    ? '\n      segments.keyword.info.text,\n      segments.keyword.info.match_type,'
+    : '';
 
   const query = `
     SELECT
       campaign.name,
       ad_group.name,
       search_term_view.search_term,
-      search_term_view.status,
+      search_term_view.status,${keywordField}
       metrics.clicks,
       metrics.impressions,
       metrics.cost_micros,
