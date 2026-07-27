@@ -6,15 +6,17 @@ A Claude Code **skill package** for Google Ads. It bundles a low-level connector
 ## Layout
 
 ```
-Ads-Agent/                       ← package root (this folder)
-├── package.json                 ← one manifest, deps for all skills
+Ads-Agent/                          ← package root (this folder)
+├── package.json                    ← one manifest, deps for all skills
 ├── package-lock.json
-├── node_modules/                ← gitignored, created by `npm install`
+├── node_modules/                   ← gitignored, created by `npm install`
+├── CHANGELOG.md                    ← what landed and what it does (PL)
 ├── .gitignore
 └── .claude/
     └── skills/
-        ├── gads-connector/      ← Google Ads API connector (CLI + MCP)
-        └── gads-reklamy/        ← Google Ads RSA ad writer (Polish, no setup)
+        ├── gads-connector/         ← Google Ads API connector (CLI + MCP)
+        ├── gads-reklamy/           ← Google Ads RSA ad writer (Polish, no setup)
+        └── gads-wykluczenia-hasel/ ← negative keyword finder (report + copy-paste lists)
         #   …more skills added here over time
 ```
 
@@ -58,8 +60,10 @@ Getting the Google Ads API credentials is covered step by step in
 |---|---|
 | `gads-connector` | Connect to and manage Google Ads accounts (read + mutations) via CLI and MCP. Needs the Google Ads API credentials from [`ONBOARDING.md`](ONBOARDING.md). |
 | `gads-reklamy` | Write effective Google Ads RSA ads in Polish via a guided 4-step process (data → company & competitor research → ad angles for approval → headlines/descriptions). Pure prompting — **no setup or credentials needed**, works the moment you open the folder in Claude Code. |
+| `gads-wykluczenia-hasel` | Find **negative keywords**: an HTML report, per campaign, splitting wasteful search terms into "certain — exclude" and "check by hand", each with 30-day and 12-month numbers plus a plain-language reason, and copy-paste-ready lists. Combines four signals (30-day spend, a full year without conversions, keyword-match distance, and an AI relevance verdict that knows your offer). Read-only — it never changes the account. Needs `gads-connector` configured. |
 
-*(More skills will be added to `.claude/skills/` over time.)*
+*(More skills will be added to `.claude/skills/` over time. What each release
+brought, in Polish: [`CHANGELOG.md`](CHANGELOG.md).)*
 
 ## Notes
 
