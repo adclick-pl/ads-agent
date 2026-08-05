@@ -116,6 +116,140 @@ export function checkSitelinkTexts(t) {
   return { valid: reasons.length === 0, reasons };
 }
 
+/** Google Ads hard limits for a positive keyword. */
+export const KEYWORD_LIMITS = { chars: 80, words: 10 };
+
+/** Match types the connector will write. BROAD is allowed but must be explicit. */
+export const KEYWORD_MATCH_TYPES = ['EXACT', 'PHRASE', 'BROAD'];
+
+/**
+ * Validate a positive keyword before it is written to an ad group.
+ *
+ * Pure guardrail (no network). Google rejects the *whole* mutate batch when a
+ * single keyword is malformed, so catching this locally is the difference
+ * between "one row flagged" and "nothing applied, opaque API error".
+ *
+ * Checks Google's hard limits (80 characters, 10 words) plus the characters the
+ * API refuses in keyword text. Match-type brackets/quotes are a common paste
+ * artefact — `[stół okrągły]` typed as text is a different keyword than the
+ * EXACT keyword `stół okrągły`, so we reject rather than silently strip them.
+ *
+ * @param {string} text
+ * @param {string} matchType
+ * @returns {{valid: boolean, reasons: string[]}}
+ */
+export function checkKeywordText(text, matchType) {
+  const raw = String(text ?? '').trim();
+  const reasons = [];
+
+  if (!raw) reasons.push('Puste słowo kluczowe.');
+  const chars = [...raw].length;
+  if (chars > KEYWORD_LIMITS.chars) reasons.push(`Słowo ma ${chars} znaków (limit ${KEYWORD_LIMITS.chars}).`);
+  const words = raw.split(/\s+/).filter(Boolean).length;
+  if (words > KEYWORD_LIMITS.words) reasons.push(`Słowo ma ${words} wyrazów (limit ${KEYWORD_LIMITS.words}).`);
+  if (/[[\]"]/.test(raw)) {
+    reasons.push('Nawiasy [] i cudzysłowy "" nie należą do treści słowa — typ dopasowania podaj w kolumnie match_type.');
+  }
+  if (/[!@%,*;^()={}<>~`|\\]/.test(raw)) {
+    reasons.push('Słowo zawiera znak niedozwolony przez Google Ads (! @ % , * ; ^ ( ) = { } < > ~ ` | \\).');
+  }
+
+  const mt = String(matchType ?? '').trim().toUpperCase();
+  if (!KEYWORD_MATCH_TYPES.includes(mt)) {
+    reasons.push(`Typ dopasowania musi być jednym z: ${KEYWORD_MATCH_TYPES.join(' | ')} (jest "${matchType}").`);
+  }
+
+  return { valid: reasons.length === 0, reasons };
+}
+
+/** Google Ads hard limits for a Responsive Search Ad. */
+export const RSA_LIMITS = {
+  headlineChars: 30, descriptionChars: 90,
+  minHeadlines: 3, maxHeadlines: 15,
+  minDescriptions: 2, maxDescriptions: 4,
+  pathChars: 15,
+};
+
+/**
+ * Validate a Responsive Search Ad before it is written.
+ *
+ * Pure guardrail (no network). Google rejects the whole mutate batch on a single
+ * over-limit asset, so catching this locally turns an opaque API failure into a
+ * named row. Also enforces the *minimums* — an RSA with 2 headlines is refused by
+ * the API, and that is easy to hit when a curated set gets trimmed too far.
+ *
+ * Duplicate headlines within one ad are rejected: Google dedupes them silently,
+ * so an ad that looks like it has 15 assets can serve with fewer, which quietly
+ * weakens the ad strength you thought you had.
+ *
+ * @param {{headlines: string[], descriptions: string[], path1?: string, path2?: string}} ad
+ * @returns {{valid: boolean, reasons: string[]}}
+ */
+export function checkRsaTexts(ad) {
+  const len = (s) => [...String(s ?? '')].length;
+  const reasons = [];
+  const hs = (ad.headlines || []).map((h) => String(h ?? '').trim()).filter(Boolean);
+  const ds = (ad.descriptions || []).map((d) => String(d ?? '').trim()).filter(Boolean);
+
+  if (hs.length < RSA_LIMITS.minHeadlines) reasons.push(`Za mało nagłówków: ${hs.length} (min ${RSA_LIMITS.minHeadlines}).`);
+  if (hs.length > RSA_LIMITS.maxHeadlines) reasons.push(`Za dużo nagłówków: ${hs.length} (max ${RSA_LIMITS.maxHeadlines}).`);
+  if (ds.length < RSA_LIMITS.minDescriptions) reasons.push(`Za mało tekstów: ${ds.length} (min ${RSA_LIMITS.minDescriptions}).`);
+  if (ds.length > RSA_LIMITS.maxDescriptions) reasons.push(`Za dużo tekstów: ${ds.length} (max ${RSA_LIMITS.maxDescriptions}).`);
+
+  for (const h of hs) if (len(h) > RSA_LIMITS.headlineChars) reasons.push(`Nagłówek ${len(h)} zn. (limit ${RSA_LIMITS.headlineChars}): "${h}"`);
+  for (const d of ds) if (len(d) > RSA_LIMITS.descriptionChars) reasons.push(`Tekst ${len(d)} zn. (limit ${RSA_LIMITS.descriptionChars}): "${d}"`);
+
+  const dupH = hs.length - new Set(hs.map((h) => h.toLowerCase())).size;
+  if (dupH) reasons.push(`${dupH} zduplikowany(ch) nagłówek(ów) w jednej reklamie — Google je scali.`);
+  const dupD = ds.length - new Set(ds.map((d) => d.toLowerCase())).size;
+  if (dupD) reasons.push(`${dupD} zduplikowany(ch) tekst(ów) w jednej reklamie.`);
+
+  for (const [k, v] of [['path1', ad.path1], ['path2', ad.path2]]) {
+    if (v && len(v) > RSA_LIMITS.pathChars) reasons.push(`${k} ma ${len(v)} zn. (limit ${RSA_LIMITS.pathChars}).`);
+    if (v && /[/?#]/.test(String(v))) reasons.push(`${k} nie może zawierać / ? #.`);
+  }
+
+  return { valid: reasons.length === 0, reasons };
+}
+
+/** Google Ads hard limit for a callout ("objaśnienie"). */
+export const CALLOUT_LIMIT = 25;
+
+/**
+ * Validate a callout text. Callout assets are immutable — a bad one can only be
+ * paused and replaced — so it is worth blocking before the write.
+ * @param {string} text
+ * @returns {{valid: boolean, reasons: string[]}}
+ */
+export function checkCalloutText(text) {
+  const raw = String(text ?? '').trim();
+  const reasons = [];
+  if (!raw) reasons.push('Puste objaśnienie.');
+  const n = [...raw].length;
+  if (n > CALLOUT_LIMIT) reasons.push(`Objaśnienie ma ${n} znaków (limit ${CALLOUT_LIMIT}).`);
+  return { valid: reasons.length === 0, reasons };
+}
+
+/** Google Ads hard limit for an ad group name. */
+export const AD_GROUP_NAME_LIMIT = 255;
+
+/**
+ * Validate an ad group name. Google rejects duplicate names within a campaign,
+ * but that is caught by the idempotency read in the mutator — here we only guard
+ * the format.
+ *
+ * @param {string} name
+ * @returns {{valid: boolean, reasons: string[]}}
+ */
+export function checkAdGroupName(name) {
+  const raw = String(name ?? '').trim();
+  const reasons = [];
+  if (!raw) reasons.push('Pusta nazwa grupy reklam.');
+  const chars = [...raw].length;
+  if (chars > AD_GROUP_NAME_LIMIT) reasons.push(`Nazwa ma ${chars} znaków (limit ${AD_GROUP_NAME_LIMIT}).`);
+  return { valid: reasons.length === 0, reasons };
+}
+
 /**
  * Decide whether a budget change is within the safety limit.
  * @param {number|null|undefined} currentAmount - current daily budget (standard currency)

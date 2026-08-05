@@ -27,6 +27,12 @@ import {
   swapSitelinkFinalUrls,
   addSitelinks,
   pauseSitelinkLinks,
+  createAdGroups,
+  addKeywords,
+  addAds,
+  updateAdAssets,
+  addCallouts,
+  pauseCallouts,
 } from './mutator.js';
 import { resolveAccount, loadAccounts } from './accounts.js';
 import { rowsToCsv, parseCsv } from './csv.js';
@@ -230,6 +236,26 @@ Akcje zapisu (zawsze najpierw --dry-run!):
                           campaign_id,link_text,description1,description2,final_url).
   pause-sitelinks         Wstrzymuje (PAUSED) istniejące linki sitelink — dane zostają.
                           --input=mapa.csv (kolumna link_resource_name) lub --links="rn1,rn2".
+  create-ad-groups        Tworzy grupy reklam w istniejących kampaniach Search. Idempotentne:
+                          pomija grupę, której nazwa już jest w kampanii. Tylko --input=mapa.csv
+                          (kolumny: campaign_id,ad_group_name[,status]).
+  add-keywords            Dodaje POZYTYWNE słowa kluczowe do grup reklam. Idempotentne: pomija
+                          duplikaty (tekst + typ dopasowania). Grupę wskazujesz przez ad_group_id
+                          albo campaign_id + ad_group_name. Tylko --input=mapa.csv
+                          (kolumny: [ad_group_id|campaign_id+ad_group_name],keyword,match_type[,final_url]).
+  add-callouts            Dodaje objaśnienia (callouts) na poziomie konta/kampanii/grupy.
+                          Idempotentne. --input=mapa.csv (kolumny: level,campaign_id,
+                          ad_group_name|ad_group_id,text).
+  pause-callouts          Wstrzymuje objaśnienia — dane zostają. Callout jest niezmienialny,
+                          więc "edycja" = add-callouts nowego + pause-callouts starego.
+                          --input=mapa.csv (kolumna link_resource_name) lub --links="rn1,rn2".
+  add-ads                 Dodaje reklamy RSA do grup reklam. Idempotentne po TREŚCI: pomija
+                          reklamę o tym samym zestawie nagłówków/tekstów i Final URL. Tylko
+                          --input=mapa.csv (kolumny: [ad_group_id|campaign_id+ad_group_name],
+                          final_url,headline1..15,description1..4[,path1,path2]).
+  update-ad-assets        Podmienia nagłówki/teksty ISTNIEJĄCEJ reklamy RSA (to samo ID reklamy,
+                          nic nie jest wstrzymywane). Grupa musi mieć dokładnie jedną RSA albo
+                          podaj ad_id. --input=mapa.csv (kolumny jak w add-ads, bez final_url).
 
 Opcje:
   --account=<nazwa|alias|ID>  Konto z accounts.json (nazwa/alias) LUB 10-cyfrowe ID.
@@ -582,12 +608,14 @@ async function main() {
 
     else if (action === 'add-sitelinks') {
       // Batch-only: creating a sitelink set one flag at a time is error-prone.
-      if (!args.input) throw new Error('add-sitelinks wymaga --input=mapa.csv (kolumny: level,campaign_id,link_text,description1,description2,final_url)');
+      if (!args.input) throw new Error('add-sitelinks wymaga --input=mapa.csv (kolumny: level=customer|campaign|ad_group,campaign_id,ad_group_name|ad_group_id,link_text,description1,description2,final_url)');
       const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
       if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
       const items = rows.map((r, i) => ({
         level: r.level,
         campaignId: r.campaign_id || r.campaign,
+        adGroupId: r.ad_group_id || '',
+        adGroupName: r.ad_group_name || r.ad_group || '',
         linkText: r.link_text,
         description1: r.description1 || r.desc1 || '',
         description2: r.description2 || r.desc2 || '',
@@ -608,6 +636,112 @@ async function main() {
       }
       if (names.length === 0) throw new Error('pause-sitelinks wymaga --input=mapa.csv (kolumna: link_resource_name) albo --links="rn1,rn2"');
       const result = await pauseSitelinkLinks(customerId, names, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'create-ad-groups') {
+      // Batch-only: building a group set one flag at a time invites typos in names
+      // that then have to be un-made by hand (no-delete policy).
+      if (!args.input) throw new Error('create-ad-groups wymaga --input=mapa.csv (kolumny: campaign_id,ad_group_name[,status])');
+      const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+      if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
+      const items = rows.map((r, i) => ({
+        campaignId: r.campaign_id || r.campaign,
+        name: r.ad_group_name || r.ad_group || r.name,
+        status: r.status || 'ENABLED',
+        label: `${r.ad_group_name || r.ad_group || r.name} (wiersz ${i + 2})`,
+      }));
+      const result = await createAdGroups(customerId, items, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'add-keywords') {
+      if (!args.input) throw new Error('add-keywords wymaga --input=mapa.csv (kolumny: [ad_group_id|campaign_id+ad_group_name],keyword,match_type[,final_url])');
+      const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+      if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
+      const items = rows.map((r, i) => ({
+        adGroupId: r.ad_group_id || '',
+        campaignId: r.campaign_id || r.campaign || '',
+        adGroupName: r.ad_group_name || r.ad_group || '',
+        text: r.keyword || r.text,
+        matchType: r.match_type || r.matchtype || args['match-type'] || '',
+        finalUrl: r.final_url || '',
+        label: `${r.keyword || r.text} (wiersz ${i + 2})`,
+      }));
+      const result = await addKeywords(customerId, items, dryRun, loginCustomerId, { domain: args.domain });
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'add-callouts') {
+      if (!args.input) throw new Error('add-callouts wymaga --input=mapa.csv (kolumny: level,campaign_id,ad_group_name|ad_group_id,text)');
+      const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+      if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
+      const items = rows.map((r, i) => ({
+        level: r.level,
+        campaignId: r.campaign_id || r.campaign || '',
+        adGroupId: r.ad_group_id || '',
+        adGroupName: r.ad_group_name || r.ad_group || '',
+        text: r.text || r.callout_text,
+        label: `${r.text || r.callout_text} (wiersz ${i + 2})`,
+      }));
+      const result = await addCallouts(customerId, items, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'pause-callouts') {
+      let names = [];
+      if (args.input) {
+        const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+        names = rows.map((r) => r.link_resource_name || r.resource_name || r.id).filter(Boolean);
+      } else if (args.links) {
+        names = String(args.links).split(',').map((s) => s.trim()).filter(Boolean);
+      }
+      if (names.length === 0) throw new Error('pause-callouts wymaga --input=mapa.csv (kolumna link_resource_name) albo --links="rn1,rn2"');
+      const result = await pauseCallouts(customerId, names, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'add-ads') {
+      if (!args.input) throw new Error('add-ads wymaga --input=mapa.csv (kolumny: [ad_group_id|campaign_id+ad_group_name],final_url,headline1..15,description1..4)');
+      const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+      if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
+      const items = rows.map((r, i) => {
+        const pick = (prefix, n) => Array.from({ length: n }, (_, k) => r[`${prefix}${k + 1}`]).filter((v) => v && v.trim());
+        return {
+          adGroupId: r.ad_group_id || '',
+          campaignId: r.campaign_id || r.campaign || '',
+          adGroupName: r.ad_group_name || r.ad_group || '',
+          headlines: pick('headline', 15),
+          descriptions: pick('description', 4),
+          finalUrl: r.final_url || r.url,
+          path1: r.path1 || '',
+          path2: r.path2 || '',
+          label: `${r.ad_group_name || r.ad_group_id} (wiersz ${i + 2})`,
+        };
+      });
+      const result = await addAds(customerId, items, dryRun, loginCustomerId, { domain: args.domain });
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'update-ad-assets') {
+      if (!args.input) throw new Error('update-ad-assets wymaga --input=mapa.csv (kolumny: [ad_id|ad_group_id|campaign_id+ad_group_name],headline1..15,description1..4)');
+      const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+      if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
+      const items = rows.map((r, i) => {
+        const pick = (prefix, n) => Array.from({ length: n }, (_, k) => r[`${prefix}${k + 1}`]).filter((v) => v && v.trim());
+        return {
+          adId: r.ad_id || '',
+          adGroupId: r.ad_group_id || '',
+          campaignId: r.campaign_id || r.campaign || '',
+          adGroupName: r.ad_group_name || r.ad_group || '',
+          headlines: pick('headline', 15),
+          descriptions: pick('description', 4),
+          path1: r.path1 || '',
+          path2: r.path2 || '',
+          label: `${r.ad_group_name || r.ad_id} (wiersz ${i + 2})`,
+        };
+      });
+      const result = await updateAdAssets(customerId, items, dryRun, loginCustomerId);
       console.log(JSON.stringify(result, null, 2));
     }
 

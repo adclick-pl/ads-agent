@@ -304,5 +304,80 @@ check('clearKeywordFinalUrls is exported and rejects non-keyword resources', asy
   assert(threw, 'should refuse a non-adGroupCriteria resource');
 });
 
+// 13. Ad group + keyword creation guards.
+check('checkAdGroupName accepts a normal name, rejects empty / over-limit', () => {
+  assert(safety.checkAdGroupName('Meble do jadalni [KW]').valid);
+  assert(!safety.checkAdGroupName('   ').valid);
+  assert(!safety.checkAdGroupName('x'.repeat(256)).valid);
+});
+check('checkKeywordText accepts valid keywords in every match type', () => {
+  for (const mt of ['EXACT', 'PHRASE', 'BROAD']) {
+    assert(safety.checkKeywordText('stół okrągły rozkładany', mt).valid, mt);
+  }
+});
+check('checkKeywordText rejects match-type punctuation left in the text', () => {
+  assert(!safety.checkKeywordText('[stół okrągły]', 'EXACT').valid);
+  assert(!safety.checkKeywordText('"kanapa z funkcją spania"', 'PHRASE').valid);
+});
+check('checkKeywordText enforces Google limits and a known match type', () => {
+  assert(!safety.checkKeywordText('', 'EXACT').valid);
+  assert(!safety.checkKeywordText('x'.repeat(81), 'EXACT').valid);            // >80 znaków
+  assert(!safety.checkKeywordText('a b c d e f g h i j k', 'EXACT').valid);   // 11 wyrazów
+  assert(!safety.checkKeywordText('komoda', 'SZEROKIE').valid);               // zły typ dopasowania
+  assert(!safety.checkKeywordText('komoda + szafka', 'EXACT').valid === false); // '+' jest dozwolony
+});
+check('createAdGroups / addKeywords are exported functions', () => {
+  assert(typeof mutator.createAdGroups === 'function');
+  assert(typeof mutator.addKeywords === 'function');
+});
+check('addKeywords refuses a row with no ad group reference', async () => {
+  let threw = false;
+  try {
+    await mutator.addKeywords('1234567890', [{ text: 'komoda', matchType: 'EXACT' }], true);
+  } catch { threw = true; }
+  assert(threw, 'should refuse a keyword with neither ad_group_id nor campaign_id + ad_group_name');
+});
+check('createAdGroups refuses REMOVED (no-delete policy) and empty input', async () => {
+  let threwStatus = false;
+  try {
+    await mutator.createAdGroups('1234567890', [{ campaignId: '1', name: 'X', status: 'REMOVED' }], true);
+  } catch { threwStatus = true; }
+  assert(threwStatus, 'should refuse status REMOVED');
+  let threwEmpty = false;
+  try { await mutator.createAdGroups('1234567890', [], true); } catch { threwEmpty = true; }
+  assert(threwEmpty, 'should refuse an empty list');
+});
+
+// 14. RSA guards.
+check('checkRsaTexts accepts a valid RSA', () => {
+  assert(safety.checkRsaTexts({
+    headlines: ['Stół Okrągły Rozkładany', 'Stół do Jadalni', 'Raty 0%'],
+    descriptions: ['Stół okrągły rozkładany do jadalni. Sprawdź wymiary.', 'Rabaty do -50%. Raty 0%.'],
+  }).valid);
+});
+check('checkRsaTexts enforces minimums and maximums', () => {
+  assert(!safety.checkRsaTexts({ headlines: ['A', 'B'], descriptions: ['x', 'y'] }).valid);          // <3 nagłówki
+  assert(!safety.checkRsaTexts({ headlines: ['A', 'B', 'C'], descriptions: ['x'] }).valid);           // <2 teksty
+  assert(!safety.checkRsaTexts({ headlines: Array(16).fill(0).map((_, i) => 'H' + i), descriptions: ['x', 'y'] }).valid);
+});
+check('checkRsaTexts enforces 30/90 char limits', () => {
+  assert(!safety.checkRsaTexts({ headlines: ['x'.repeat(31), 'B', 'C'], descriptions: ['x', 'y'] }).valid);
+  assert(!safety.checkRsaTexts({ headlines: ['A', 'B', 'C'], descriptions: ['x'.repeat(91), 'y'] }).valid);
+});
+check('checkRsaTexts rejects duplicate headlines within one ad', () => {
+  const r = safety.checkRsaTexts({ headlines: ['Komoda', 'komoda', 'Komody'], descriptions: ['x', 'y'] });
+  assert(!r.valid && r.reasons.some((x) => x.includes('zduplikowany')));
+});
+check('checkRsaTexts validates display paths', () => {
+  assert(!safety.checkRsaTexts({ headlines: ['A', 'B', 'C'], descriptions: ['x', 'y'], path1: 'x'.repeat(16) }).valid);
+  assert(!safety.checkRsaTexts({ headlines: ['A', 'B', 'C'], descriptions: ['x', 'y'], path1: 'a/b' }).valid);
+});
+check('addAds is exported and refuses an empty batch', async () => {
+  assert(typeof mutator.addAds === 'function');
+  let threw = false;
+  try { await mutator.addAds('1234567890', [], true); } catch { threw = true; }
+  assert(threw);
+});
+
 console.log(`\nResult: ${passed} passed, ${failed} failed.\n`);
 process.exit(failed === 0 ? 0 : 1);

@@ -205,6 +205,38 @@ against Google's limits (`link_text` 25, descriptions 35, descriptions as a pair
 preserving way to swap a whole set: `add-sitelinks` the new one, `pause-sitelinks`
 the old resource names.
 
+**Building out a campaign (`create-ad-groups`, `add-keywords`).** The pair that
+turns a keyword research file into a live structure. `create-ad-groups` takes
+`--input=map.csv` (cols `campaign_id`, `ad_group_name`, optional `status`) and
+creates `SEARCH_STANDARD` ad groups in an existing campaign. `add-keywords` takes
+`--input=map.csv` (cols `keyword`, `match_type`, optional `final_url`, plus either
+`ad_group_id` **or** `campaign_id` + `ad_group_name`) and adds POSITIVE keywords —
+note `add-negatives` is a different action for exclusions.
+
+```bash
+node scripts/cli.js --action=create-ad-groups --customer=1234567890 --input=groups.csv --dry-run
+node scripts/cli.js --action=add-keywords    --customer=1234567890 --input=keywords.csv --dry-run
+```
+
+Both are **idempotent**: they read what already exists (ad group names in the
+campaign / keyword text + match type in the ad group, `ENABLED` or `PAUSED`) and
+skip it, so re-running the same CSV adds nothing. Keyword text is checked against
+Google's limits (80 chars, 10 words, forbidden characters) and rejects `[brackets]`
+or `"quotes"` left in the text — match type belongs in `match_type`, not in the
+keyword. No CPC bids are set: the campaigns this targets run Smart Bidding, where
+an ad-group bid is ignored.
+
+**Order matters.** Addressing ad groups by name is what lets you write the keyword
+file before the groups exist — but it means `add-keywords --dry-run` **fails until
+the groups are created** (it refuses the whole batch and lists the unresolved
+names). So the flow is: dry-run groups → confirm → create → dry-run keywords →
+confirm → add. Keyword *text* validation runs before the group lookup, so that
+first failure still tells you whether the keyword file itself is clean.
+
+Two caveats: `parseCsv` reads **commas** (a `;`-separated export from Excel PL will
+not parse), and batches over 1000 operations are chunked — atomic within a chunk,
+so the result reports `chunks` to make a partial apply visible.
+
 **SafetyLimits (budget).** `update-budget` reads the current budget and **blocks
 any change larger than 40%** (up or down), and also blocks the change if it can't
 read the current amount to verify the scale. The block is reported in the

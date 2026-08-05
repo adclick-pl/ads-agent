@@ -82,3 +82,24 @@ How to add a lesson: append a bullet under the right section in the form
   "incompatible segment", and not `keyword.info.text`). Avoid
   `campaign_search_term_insight` too — it only returns bucketed categories and is
   empty for fresh campaigns. (verified on the MWM meble account)
+
+- **`ad_group_ad_asset_view` returns only `metrics.impressions` for Search RSA text
+  assets (headlines/descriptions)** → clicks / conversions / cost per single
+  headline are **not retrievable via API**. You *can* put them in `WHERE`/`ORDER BY`
+  (the server filters, e.g. `metrics.clicks > 0` returns a subset), but the value
+  never comes back in the row — so **no per-headline CTR / conv-rate / CPA**. Only
+  impressions + the qualitative `ad_group_ad_asset_view.performance_label`
+  (PENDING/LEARNING/LOW/GOOD/BEST; often all PENDING on low-volume accounts). The
+  Google Ads UI shows per-asset stats, the API does not for RSA. Full per-asset
+  metrics (clicks/conv/cost) exist only for **Performance Max** via
+  `asset_group_asset`. To judge one headline, run an ad-variation experiment, not a
+  report. (verified empirically 2026-07 by filtering vs. selecting the metric)
+
+- **Editing RSA headlines/descriptions in place** → do it through `mutateResources`
+  with an `Ad` `update` op that sends the **full** `responsive_search_ad.headlines`
+  array **with each asset's `pinned_field` preserved** (HEADLINE_1=2, _2=3, _3=4;
+  DESCRIPTION_1=5, _2=6). The list is replaced wholesale, so a partial array drops
+  the rest. Note the connector's `update-ad-assets` action sends `{text}` only and
+  therefore **strips all pins** — don't use it on ads that rely on pinned slots;
+  build the pin-preserving op instead. Use `{ validate_only: true }` as a true
+  server-side dry-run.

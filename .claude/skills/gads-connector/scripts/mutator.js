@@ -1,6 +1,6 @@
 import { getCustomer, unpackError } from './client.js';
-import { getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks } from './queries.js';
-import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts } from './safety.js';
+import { getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts } from './queries.js';
+import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText } from './safety.js';
 
 /**
  * Entity metadata for Final URL updates. Maps our short entity key to the
@@ -569,15 +569,22 @@ export async function addSitelinks(customerId, items, dryRun = false, loginCusto
   const rows = items.map((it, i) => {
     const ref = it.label || it.linkText || `wiersz ${i + 1}`;
     const level = String(it.level ?? '').trim().toLowerCase();
-    if (!['customer', 'campaign'].includes(level)) problems.push(`${ref}: level musi być "customer" lub "campaign" (jest "${it.level}").`);
+    if (!['customer', 'campaign', 'ad_group'].includes(level)) problems.push(`${ref}: level musi być "customer", "campaign" lub "ad_group" (jest "${it.level}").`);
     const campaignId = String(it.campaignId ?? '').replace(/[^0-9]/g, '');
     if (level === 'campaign' && !campaignId) problems.push(`${ref}: level=campaign wymaga campaign_id.`);
+    const adGroupId = String(it.adGroupId ?? '').replace(/[^0-9]/g, '');
+    const adGroupName = String(it.adGroupName ?? '').trim();
+    // ad_group: albo gotowe ID, albo campaign_id + nazwa (rozwiązywana niżej) —
+    // ta druga droga pozwala napisać plik zanim grupy dostaną ID.
+    if (level === 'ad_group' && !adGroupId && !(campaignId && adGroupName)) {
+      problems.push(`${ref}: level=ad_group wymaga ad_group_id albo campaign_id + ad_group_name.`);
+    }
     const urlCheck = validateFinalUrl(it.finalUrl, { domain: opts.domain });
     if (!urlCheck.valid) problems.push(`${ref}: ${urlCheck.reason}`);
     const textCheck = checkSitelinkTexts({ linkText: it.linkText, description1: it.description1, description2: it.description2 });
     if (!textCheck.valid) textCheck.reasons.forEach((r) => problems.push(`${ref}: ${r}`));
     return {
-      level, campaignId,
+      level, campaignId, adGroupId, adGroupName,
       linkText: String(it.linkText ?? '').trim(),
       description1: String(it.description1 ?? '').trim(),
       description2: String(it.description2 ?? '').trim(),
@@ -589,25 +596,42 @@ export async function addSitelinks(customerId, items, dryRun = false, loginCusto
     throw new Error(`🛑 Zablokowano — ${problems.length} problem(ów) walidacji, nic nie zapisano:\n${problems.map((p) => `  • ${p}`).join('\n')}`);
   }
 
+  // Resolve ad-group names → IDs, same contract as addKeywords/addAds.
+  const needGroup = rows.filter((r) => r.level === 'ad_group' && !r.adGroupId);
+  if (needGroup.length) {
+    const groups = await getAdGroupsByCampaign(cleanCustomerId, needGroup.map((r) => r.campaignId), { loginCustomerId });
+    const byKey = new Map(groups.map((g) => [`${g.campaignId}|${g.name.toLowerCase()}`, g.adGroupId]));
+    const unresolved = new Set();
+    for (const r of needGroup) {
+      const id = byKey.get(`${r.campaignId}|${r.adGroupName.toLowerCase()}`);
+      if (id) r.adGroupId = id;
+      else unresolved.add(`kampania ${r.campaignId} → grupa "${r.adGroupName}"`);
+    }
+    if (unresolved.size) {
+      throw new Error(`🛑 Nie znaleziono ${unresolved.size} grup(y) reklam, nic nie zapisano:\n${[...unresolved].map((u) => `  • ${u}`).join('\n')}`);
+    }
+  }
+
   // Converge, don't accumulate: read the ENABLED sitelinks already on the account
   // and skip any with the same parent + text + URL. This makes re-running the same
   // set a no-op (like the other mutations), instead of silently duplicating — same
   // "read reality first" basis as the URL-swap dry-runs. Read runs in dry-run too,
   // so the preview is truthful.
   const norm = (u) => String(u).replace(/\/$/, '');
-  const keyOf = (level, campaignId, text, url) =>
-    `${level}:${level === 'campaign' ? campaignId : 'acct'}|${text}|${norm(url)}`;
+  const parentOf = (level, campaignId, adGroupId) =>
+    level === 'campaign' ? campaignId : level === 'ad_group' ? adGroupId : 'acct';
+  const keyOf = (level, parent, text, url) => `${level}:${parent}|${text}|${norm(url)}`;
   let existing = new Set();
   try {
     const current = await getExistingSitelinks(cleanCustomerId, { loginCustomerId });
-    existing = new Set(current.map((s) => keyOf(s.level, s.campaignId, s.linkText, s.finalUrl)));
+    existing = new Set(current.map((s) => keyOf(s.level, parentOf(s.level, s.campaignId, s.adGroupId), s.linkText, s.finalUrl)));
   } catch {
     existing = new Set(); // best-effort — a read failure must not block a first-time add
   }
   const toCreate = [];
   const skipped = [];
   for (const r of rows) {
-    (existing.has(keyOf(r.level, r.campaignId, r.linkText, r.finalUrl)) ? skipped : toCreate).push(r);
+    (existing.has(keyOf(r.level, parentOf(r.level, r.campaignId, r.adGroupId), r.linkText, r.finalUrl)) ? skipped : toCreate).push(r);
   }
 
   // De-duplicate assets by content (only among links we will actually create).
@@ -620,8 +644,8 @@ export async function addSitelinks(customerId, items, dryRun = false, loginCusto
 
   const plan = {
     assetsToCreate: [...assetPlan.values()].map((a) => ({ linkText: a.linkText, description1: a.description1, description2: a.description2, finalUrl: a.finalUrl })),
-    linksToAdd: links.map((l) => ({ label: l.label, linkText: l.linkText, level: l.level, campaignId: l.campaignId || null, finalUrl: l.finalUrl })),
-    skipped: skipped.map((s) => ({ label: s.label, linkText: s.linkText, level: s.level, campaignId: s.campaignId || null, finalUrl: s.finalUrl })),
+    linksToAdd: links.map((l) => ({ label: l.label, linkText: l.linkText, level: l.level, campaignId: l.campaignId || null, adGroupId: l.adGroupId || null, adGroupName: l.adGroupName || null, finalUrl: l.finalUrl })),
+    skipped: skipped.map((s) => ({ label: s.label, linkText: s.linkText, level: s.level, campaignId: s.campaignId || null, adGroupId: s.adGroupId || null, finalUrl: s.finalUrl })),
   };
 
   console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Sitelinki: do utworzenia ${links.length}, pominięte (już istnieją) ${skipped.length}...`);
@@ -654,6 +678,8 @@ export async function addSitelinks(customerId, items, dryRun = false, loginCusto
       const assetRef = `customers/${cleanCustomerId}/assets/${a.tempId}`;
       if (l.level === 'campaign') {
         mutations.push({ entity: 'CampaignAsset', operation: 'create', resource: { campaign: `customers/${cleanCustomerId}/campaigns/${l.campaignId}`, asset: assetRef, field_type: 'SITELINK', status: 'ENABLED' } });
+      } else if (l.level === 'ad_group') {
+        mutations.push({ entity: 'AdGroupAsset', operation: 'create', resource: { ad_group: `customers/${cleanCustomerId}/adGroups/${l.adGroupId}`, asset: assetRef, field_type: 'SITELINK', status: 'ENABLED' } });
       } else {
         mutations.push({ entity: 'CustomerAsset', operation: 'create', resource: { asset: assetRef, field_type: 'SITELINK', status: 'ENABLED' } });
       }
@@ -708,5 +734,660 @@ export async function pauseSitelinkLinks(customerId, linkResourceNames, dryRun =
     return { success: true, dryRun: false, count: toPause.length, alreadyPaused: plan.length - toPause.length, plan, response };
   } catch (error) {
     throw new Error(`Nie udało się wstrzymać sitelinków: ${unpackError(error)}`);
+  }
+}
+
+/**
+ * Split a mutation list into chunks. `mutateResources` is atomic *per request*,
+ * so a set that fits in one chunk applies all-or-nothing. Above the chunk size
+ * the batch is split and atomicity holds only within each chunk — the callers
+ * below surface `chunks` in the result so a partial apply is visible rather than
+ * silent. Validation and the duplicate read both run before any write, so the
+ * realistic failure mode here is a transport error, not a bad row.
+ */
+const MUTATE_CHUNK = 1000;
+
+function chunk(arr, size = MUTATE_CHUNK) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+/**
+ * Reduce raw `mutateResources` responses to just the created resource names.
+ *
+ * The raw response is a protobuf object tree that `JSON.stringify` can choke on —
+ * and the CLI stringifies whatever the mutator returns. A throw there happens
+ * AFTER the write has landed, so the operator sees an error for a change that
+ * actually succeeded and is tempted to re-run. Returning a plain summary keeps
+ * the result printable and is the only part anyone reads anyway.
+ */
+function mutatedResourceNames(responses) {
+  const names = [];
+  for (const res of responses || []) {
+    for (const r of res?.results || []) {
+      if (r?.resource_name) names.push(String(r.resource_name));
+    }
+  }
+  return names;
+}
+
+/**
+ * Create Search ad groups in existing campaigns.
+ *
+ * Idempotent: reads the ad groups already in the target campaigns first and
+ * skips any whose name is taken (case-insensitively). Re-running the same file
+ * is a no-op instead of an "duplicate ad group name" API error. Paused groups
+ * count as existing — a re-run must not resurrect what was deliberately paused.
+ *
+ * Bids are deliberately not settable here: the campaigns this connector targets
+ * run Smart Bidding (tROAS / tCPA), where an ad-group CPC bid is ignored. Setting
+ * one would create a number in the UI that does nothing.
+ *
+ * @param {string} customerId
+ * @param {Array<{campaignId: string|number, name: string, status?: string, label?: string}>} items
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>} `{plan, toCreate, skipped, ...}` — in dry-run the plan only.
+ */
+export async function createAdGroups(customerId, items, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  if (!Array.isArray(items) || items.length === 0) throw new Error('Brak grup reklam do utworzenia (pusta lista).');
+
+  // Fail-safe validation of every row before any write.
+  const problems = [];
+  const rows = items.map((it, i) => {
+    const name = String(it.name ?? '').trim();
+    const ref = it.label || name || `wiersz ${i + 1}`;
+    const campaignId = String(it.campaignId ?? '').replace(/[^0-9]/g, '');
+    if (!campaignId) problems.push(`${ref}: brak campaign_id.`);
+    const nameCheck = checkAdGroupName(name);
+    if (!nameCheck.valid) nameCheck.reasons.forEach((r) => problems.push(`${ref}: ${r}`));
+    const status = String(it.status ?? 'ENABLED').trim().toUpperCase();
+    assertNotRemoval(status);
+    if (!['ENABLED', 'PAUSED'].includes(status)) problems.push(`${ref}: status musi być ENABLED lub PAUSED (jest "${it.status}").`);
+    return { campaignId, name, status, label: ref };
+  });
+
+  // Duplicate names inside the input file itself would pass the "already on the
+  // account" check and then collide with each other in one batch.
+  const seenInFile = new Set();
+  for (const r of rows) {
+    const k = `${r.campaignId}|${r.name.toLowerCase()}`;
+    if (seenInFile.has(k)) problems.push(`${r.label}: nazwa powtarza się w pliku wejściowym.`);
+    seenInFile.add(k);
+  }
+
+  if (problems.length) {
+    throw new Error(`🛑 Zablokowano — ${problems.length} problem(ów) walidacji, nic nie zapisano:\n${problems.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  // Converge, don't accumulate. A read failure here MUST block: creating a
+  // duplicate ad group is not recoverable by re-running (unlike a skip).
+  const existingRows = await getAdGroupsByCampaign(cleanCustomerId, rows.map((r) => r.campaignId), { loginCustomerId });
+  const existing = new Map(existingRows.map((g) => [`${g.campaignId}|${g.name.toLowerCase()}`, g]));
+
+  const toCreate = [];
+  const skipped = [];
+  for (const r of rows) {
+    const hit = existing.get(`${r.campaignId}|${r.name.toLowerCase()}`);
+    if (hit) skipped.push({ ...r, adGroupId: hit.adGroupId });
+    else toCreate.push(r);
+  }
+
+  const plan = {
+    toCreate: toCreate.map((r) => ({ campaignId: r.campaignId, name: r.name, status: r.status })),
+    skipped: skipped.map((r) => ({ campaignId: r.campaignId, name: r.name, adGroupId: r.adGroupId, reason: 'grupa o tej nazwie już istnieje w kampanii' })),
+  };
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Grupy reklam: do utworzenia ${toCreate.length}, pominięte (już istnieją) ${skipped.length}...`);
+  if (dryRun) return { success: true, dryRun: true, entity: 'ad_group', toCreate: toCreate.length, skipped: skipped.length, plan };
+
+  if (toCreate.length === 0) {
+    return { success: true, dryRun: false, entity: 'ad_group', created: 0, skipped: skipped.length, plan, createdGroups: [], response: null };
+  }
+
+  try {
+    const customer = getCustomer(cleanCustomerId, loginCustomerId);
+    const mutations = toCreate.map((r) => ({
+      entity: 'AdGroup',
+      operation: 'create',
+      resource: {
+        campaign: `customers/${cleanCustomerId}/campaigns/${r.campaignId}`,
+        name: r.name,
+        status: r.status,
+        type: 'SEARCH_STANDARD',
+      },
+    }));
+    const responses = [];
+    for (const part of chunk(mutations)) responses.push(await customer.mutateResources(part));
+
+    // Read back so the caller gets real ad group IDs to hang keywords on.
+    const after = await getAdGroupsByCampaign(cleanCustomerId, rows.map((r) => r.campaignId), { loginCustomerId });
+    const byKey = new Map(after.map((g) => [`${g.campaignId}|${g.name.toLowerCase()}`, g]));
+    const createdGroups = toCreate.map((r) => {
+      const g = byKey.get(`${r.campaignId}|${r.name.toLowerCase()}`);
+      return { campaignId: r.campaignId, name: r.name, adGroupId: g ? g.adGroupId : null };
+    });
+
+    return { success: true, dryRun: false, entity: 'ad_group', created: toCreate.length, skipped: skipped.length, chunks: responses.length, plan, createdGroups, resourceNames: mutatedResourceNames(responses) };
+  } catch (error) {
+    throw new Error(`Nie udało się utworzyć grup reklam: ${unpackError(error)}`);
+  }
+}
+
+/**
+ * Add POSITIVE keywords to existing ad groups.
+ *
+ * Ad groups can be addressed either by `adGroupId` or by `campaignId` +
+ * `adGroupName` — the latter is what makes a hand-written keyword file usable
+ * straight after `create-ad-groups`, before anyone knows the new IDs. Unresolved
+ * names block the whole batch rather than silently dropping rows.
+ *
+ * Idempotent: reads the keywords already in the target ad groups and skips any
+ * (text + match type) pair that is present, so a re-run is a no-op instead of a
+ * "duplicate keyword" error.
+ *
+ * `finalUrl` is the optional keyword-level Final URL override; leave it empty and
+ * the keyword inherits the URL from the ad, which is what you normally want.
+ *
+ * @param {string} customerId
+ * @param {Array<{adGroupId?: string|number, campaignId?: string|number, adGroupName?: string,
+ *                text: string, matchType: string, finalUrl?: string, label?: string}>} items
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @param {{domain?: string}} [opts] - domain lock for keyword-level Final URLs
+ * @returns {Promise<object>}
+ */
+export async function addKeywords(customerId, items, dryRun = false, loginCustomerId, opts = {}) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  if (!Array.isArray(items) || items.length === 0) throw new Error('Brak słów kluczowych do dodania (pusta lista).');
+
+  const problems = [];
+  const rows = items.map((it, i) => {
+    const text = String(it.text ?? '').trim();
+    const ref = it.label || text || `wiersz ${i + 1}`;
+    const matchType = String(it.matchType ?? '').trim().toUpperCase();
+    const kwCheck = checkKeywordText(text, matchType);
+    if (!kwCheck.valid) kwCheck.reasons.forEach((r) => problems.push(`${ref}: ${r}`));
+
+    const adGroupId = String(it.adGroupId ?? '').replace(/[^0-9]/g, '');
+    const campaignId = String(it.campaignId ?? '').replace(/[^0-9]/g, '');
+    const adGroupName = String(it.adGroupName ?? '').trim();
+    if (!adGroupId && !(campaignId && adGroupName)) {
+      problems.push(`${ref}: podaj ad_group_id albo campaign_id + ad_group_name.`);
+    }
+
+    const finalUrl = String(it.finalUrl ?? '').trim();
+    if (finalUrl) {
+      const urlCheck = validateFinalUrl(finalUrl, { domain: opts.domain });
+      if (!urlCheck.valid) problems.push(`${ref}: ${urlCheck.reason}`);
+    }
+    return { adGroupId, campaignId, adGroupName, text, matchType, finalUrl, label: ref };
+  });
+  if (problems.length) {
+    throw new Error(`🛑 Zablokowano — ${problems.length} problem(ów) walidacji, nic nie zapisano:\n${problems.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  // Resolve campaign_id + ad_group_name → adGroupId.
+  const needLookup = rows.filter((r) => !r.adGroupId);
+  if (needLookup.length) {
+    const groups = await getAdGroupsByCampaign(cleanCustomerId, needLookup.map((r) => r.campaignId), { loginCustomerId });
+    const byKey = new Map(groups.map((g) => [`${g.campaignId}|${g.name.toLowerCase()}`, g.adGroupId]));
+    const unresolved = new Set();
+    for (const r of needLookup) {
+      const id = byKey.get(`${r.campaignId}|${r.adGroupName.toLowerCase()}`);
+      if (id) r.adGroupId = id;
+      else unresolved.add(`kampania ${r.campaignId} → grupa "${r.adGroupName}"`);
+    }
+    if (unresolved.size) {
+      throw new Error(`🛑 Nie znaleziono ${unresolved.size} grup(y) reklam, nic nie zapisano:\n${[...unresolved].map((u) => `  • ${u}`).join('\n')}\nUtwórz je najpierw akcją create-ad-groups.`);
+    }
+  }
+
+  // Converge: skip what already sits in the ad group, and collapse duplicates
+  // inside the input file (Google rejects both cases).
+  const existingRows = await getExistingKeywords(cleanCustomerId, rows.map((r) => r.adGroupId), { loginCustomerId });
+  const keyOf = (adGroupId, text, matchType) => `${adGroupId}|${String(text).toLowerCase()}|${matchType}`;
+  const existing = new Set(existingRows.map((k) => keyOf(k.adGroupId, k.text, k.matchType)));
+
+  const toCreate = [];
+  const skipped = [];
+  const seenInFile = new Set();
+  for (const r of rows) {
+    const k = keyOf(r.adGroupId, r.text, r.matchType);
+    if (existing.has(k)) { skipped.push({ ...r, reason: 'już jest w grupie' }); continue; }
+    if (seenInFile.has(k)) { skipped.push({ ...r, reason: 'duplikat w pliku wejściowym' }); continue; }
+    seenInFile.add(k);
+    toCreate.push(r);
+  }
+
+  const byGroup = {};
+  for (const r of toCreate) byGroup[r.adGroupId] = (byGroup[r.adGroupId] || 0) + 1;
+  const plan = {
+    perAdGroup: Object.entries(byGroup).map(([adGroupId, count]) => ({ adGroupId, count })),
+    toCreate: toCreate.map((r) => ({ adGroupId: r.adGroupId, text: r.text, matchType: r.matchType, finalUrl: r.finalUrl || null })),
+    skipped: skipped.map((r) => ({ adGroupId: r.adGroupId, text: r.text, matchType: r.matchType, reason: r.reason })),
+  };
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Słowa kluczowe: do dodania ${toCreate.length}, pominięte ${skipped.length}...`);
+  if (dryRun) return { success: true, dryRun: true, entity: 'keyword', toCreate: toCreate.length, skipped: skipped.length, adGroups: Object.keys(byGroup).length, plan };
+
+  if (toCreate.length === 0) {
+    return { success: true, dryRun: false, entity: 'keyword', created: 0, skipped: skipped.length, plan, response: null };
+  }
+
+  try {
+    const customer = getCustomer(cleanCustomerId, loginCustomerId);
+    const mutations = toCreate.map((r) => {
+      const resource = {
+        ad_group: `customers/${cleanCustomerId}/adGroups/${r.adGroupId}`,
+        status: 'ENABLED',
+        keyword: { text: r.text, match_type: r.matchType },
+      };
+      if (r.finalUrl) resource.final_urls = [r.finalUrl];
+      return { entity: 'AdGroupCriterion', operation: 'create', resource };
+    });
+    const responses = [];
+    for (const part of chunk(mutations)) responses.push(await customer.mutateResources(part));
+    return { success: true, dryRun: false, entity: 'keyword', created: toCreate.length, skipped: skipped.length, adGroups: Object.keys(byGroup).length, chunks: responses.length, plan, resourceNames: mutatedResourceNames(responses) };
+  } catch (error) {
+    throw new Error(`Nie udało się dodać słów kluczowych: ${unpackError(error)}`);
+  }
+}
+
+/**
+ * Add Responsive Search Ads to existing ad groups.
+ *
+ * Ad groups are addressed by `adGroupId` or by `campaignId` + `adGroupName`, same
+ * as `addKeywords` — so an ad file can be written before the groups exist.
+ *
+ * Idempotent by CONTENT, not by name: an ad is skipped when the target group
+ * already holds an RSA with the same headline set, description set and Final URL.
+ * Order is ignored (Google serves assets in its own order, so two ads differing
+ * only in asset order are the same ad in practice). This matters more here than
+ * for keywords — Google happily accepts a second, identical RSA in one ad group
+ * and would silently split traffic between two copies of the same creative.
+ *
+ * @param {string} customerId
+ * @param {Array<{adGroupId?: string|number, campaignId?: string|number, adGroupName?: string,
+ *                headlines: string[], descriptions: string[], finalUrl: string,
+ *                path1?: string, path2?: string, label?: string}>} items
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @param {{domain?: string}} [opts]
+ * @returns {Promise<object>}
+ */
+export async function addAds(customerId, items, dryRun = false, loginCustomerId, opts = {}) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  if (!Array.isArray(items) || items.length === 0) throw new Error('Brak reklam do dodania (pusta lista).');
+
+  const problems = [];
+  const rows = items.map((it, i) => {
+    const ref = it.label || it.adGroupName || `wiersz ${i + 1}`;
+    const headlines = (it.headlines || []).map((h) => String(h ?? '').trim()).filter(Boolean);
+    const descriptions = (it.descriptions || []).map((d) => String(d ?? '').trim()).filter(Boolean);
+    const rsa = checkRsaTexts({ headlines, descriptions, path1: it.path1, path2: it.path2 });
+    if (!rsa.valid) rsa.reasons.forEach((r) => problems.push(`${ref}: ${r}`));
+
+    const finalUrl = String(it.finalUrl ?? '').trim();
+    const urlCheck = validateFinalUrl(finalUrl, { domain: opts.domain });
+    if (!urlCheck.valid) problems.push(`${ref}: ${urlCheck.reason}`);
+
+    const adGroupId = String(it.adGroupId ?? '').replace(/[^0-9]/g, '');
+    const campaignId = String(it.campaignId ?? '').replace(/[^0-9]/g, '');
+    const adGroupName = String(it.adGroupName ?? '').trim();
+    if (!adGroupId && !(campaignId && adGroupName)) problems.push(`${ref}: podaj ad_group_id albo campaign_id + ad_group_name.`);
+
+    return { adGroupId, campaignId, adGroupName, headlines, descriptions, finalUrl,
+             path1: String(it.path1 ?? '').trim(), path2: String(it.path2 ?? '').trim(), label: ref };
+  });
+  if (problems.length) {
+    throw new Error(`🛑 Zablokowano — ${problems.length} problem(ów) walidacji, nic nie zapisano:\n${problems.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  const needLookup = rows.filter((r) => !r.adGroupId);
+  if (needLookup.length) {
+    const groups = await getAdGroupsByCampaign(cleanCustomerId, needLookup.map((r) => r.campaignId), { loginCustomerId });
+    const byKey = new Map(groups.map((g) => [`${g.campaignId}|${g.name.toLowerCase()}`, g.adGroupId]));
+    const unresolved = new Set();
+    for (const r of needLookup) {
+      const id = byKey.get(`${r.campaignId}|${r.adGroupName.toLowerCase()}`);
+      if (id) r.adGroupId = id;
+      else unresolved.add(`kampania ${r.campaignId} → grupa "${r.adGroupName}"`);
+    }
+    if (unresolved.size) {
+      throw new Error(`🛑 Nie znaleziono ${unresolved.size} grup(y) reklam, nic nie zapisano:\n${[...unresolved].map((u) => `  • ${u}`).join('\n')}\nUtwórz je najpierw akcją create-ad-groups.`);
+    }
+  }
+
+  // Content signature: order-insensitive, so an ad differing only in asset order
+  // counts as already present.
+  const sig = (adGroupId, hs, ds, url) => [
+    adGroupId,
+    [...hs].map((x) => x.toLowerCase()).sort().join('|'),
+    [...ds].map((x) => x.toLowerCase()).sort().join('|'),
+    String(url).replace(/\/$/, ''),
+  ].join('##');
+
+  const existingRows = await getExistingRsa(cleanCustomerId, rows.map((r) => r.adGroupId), { loginCustomerId });
+  const existing = new Set(existingRows.map((a) => sig(a.adGroupId, a.headlines, a.descriptions, (a.finalUrls || [])[0] || '')));
+
+  const toCreate = [];
+  const skipped = [];
+  const seenInFile = new Set();
+  for (const r of rows) {
+    const k = sig(r.adGroupId, r.headlines, r.descriptions, r.finalUrl);
+    if (existing.has(k)) { skipped.push({ ...r, reason: 'identyczna reklama już jest w grupie' }); continue; }
+    if (seenInFile.has(k)) { skipped.push({ ...r, reason: 'duplikat w pliku wejściowym' }); continue; }
+    seenInFile.add(k);
+    toCreate.push(r);
+  }
+
+  const plan = {
+    toCreate: toCreate.map((r) => ({ adGroupId: r.adGroupId, adGroupName: r.adGroupName || null,
+      headlines: r.headlines.length, descriptions: r.descriptions.length, finalUrl: r.finalUrl,
+      firstHeadline: r.headlines[0] })),
+    skipped: skipped.map((r) => ({ adGroupId: r.adGroupId, adGroupName: r.adGroupName || null, reason: r.reason })),
+  };
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Reklamy RSA: do utworzenia ${toCreate.length}, pominięte ${skipped.length}...`);
+  if (dryRun) return { success: true, dryRun: true, entity: 'rsa', toCreate: toCreate.length, skipped: skipped.length, plan };
+
+  if (toCreate.length === 0) {
+    return { success: true, dryRun: false, entity: 'rsa', created: 0, skipped: skipped.length, plan, resourceNames: [] };
+  }
+
+  try {
+    const customer = getCustomer(cleanCustomerId, loginCustomerId);
+    const mutations = toCreate.map((r) => {
+      const rsa = {
+        headlines: r.headlines.map((t) => ({ text: t })),
+        descriptions: r.descriptions.map((t) => ({ text: t })),
+      };
+      if (r.path1) rsa.path1 = r.path1;
+      if (r.path2) rsa.path2 = r.path2;
+      return {
+        entity: 'AdGroupAd',
+        operation: 'create',
+        resource: {
+          ad_group: `customers/${cleanCustomerId}/adGroups/${r.adGroupId}`,
+          status: 'ENABLED',
+          ad: { final_urls: [r.finalUrl], responsive_search_ad: rsa },
+        },
+      };
+    });
+    const responses = [];
+    for (const part of chunk(mutations)) responses.push(await customer.mutateResources(part));
+    return { success: true, dryRun: false, entity: 'rsa', created: toCreate.length, skipped: skipped.length, chunks: responses.length, plan, resourceNames: mutatedResourceNames(responses) };
+  } catch (error) {
+    throw new Error(`Nie udało się dodać reklam RSA: ${unpackError(error)}`);
+  }
+}
+
+/**
+ * Replace the headline / description assets of an RSA that already exists in an
+ * ad group. Keeps the ad ID — so nothing is paused, nothing is duplicated and the
+ * ad's history (such as it is) survives. This is the honest way to fix copy: the
+ * alternative under the no-delete policy would be pausing the old ad and adding a
+ * new one, which leaves paused clutter in the account forever.
+ *
+ * Refuses an ad group holding MORE than one RSA: which ad to rewrite would be a
+ * guess, and guessing wrong overwrites the wrong creative. Disambiguate by
+ * passing `adId` explicitly.
+ *
+ * `--dry-run` reads the current assets and returns a real before→after diff
+ * (added / removed per ad), and marks ads whose content already matches as
+ * `changed: false` — so re-running is a visible no-op.
+ *
+ * @param {string} customerId
+ * @param {Array<{adId?: string|number, adGroupId?: string|number, campaignId?: string|number,
+ *                adGroupName?: string, headlines: string[], descriptions: string[],
+ *                path1?: string, path2?: string, label?: string}>} items
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>}
+ */
+export async function updateAdAssets(customerId, items, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  if (!Array.isArray(items) || items.length === 0) throw new Error('Brak reklam do aktualizacji (pusta lista).');
+
+  const problems = [];
+  const rows = items.map((it, i) => {
+    const ref = it.label || it.adGroupName || `wiersz ${i + 1}`;
+    const headlines = (it.headlines || []).map((h) => String(h ?? '').trim()).filter(Boolean);
+    const descriptions = (it.descriptions || []).map((d) => String(d ?? '').trim()).filter(Boolean);
+    const rsa = checkRsaTexts({ headlines, descriptions, path1: it.path1, path2: it.path2 });
+    if (!rsa.valid) rsa.reasons.forEach((r) => problems.push(`${ref}: ${r}`));
+    const adId = String(it.adId ?? '').replace(/[^0-9]/g, '');
+    const adGroupId = String(it.adGroupId ?? '').replace(/[^0-9]/g, '');
+    const campaignId = String(it.campaignId ?? '').replace(/[^0-9]/g, '');
+    const adGroupName = String(it.adGroupName ?? '').trim();
+    if (!adId && !adGroupId && !(campaignId && adGroupName)) {
+      problems.push(`${ref}: podaj ad_id, ad_group_id albo campaign_id + ad_group_name.`);
+    }
+    return { adId, adGroupId, campaignId, adGroupName, headlines, descriptions,
+             path1: String(it.path1 ?? '').trim(), path2: String(it.path2 ?? '').trim(), label: ref };
+  });
+  if (problems.length) {
+    throw new Error(`🛑 Zablokowano — ${problems.length} problem(ów) walidacji, nic nie zapisano:\n${problems.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  const needGroup = rows.filter((r) => !r.adId && !r.adGroupId);
+  if (needGroup.length) {
+    const groups = await getAdGroupsByCampaign(cleanCustomerId, needGroup.map((r) => r.campaignId), { loginCustomerId });
+    const byKey = new Map(groups.map((g) => [`${g.campaignId}|${g.name.toLowerCase()}`, g.adGroupId]));
+    const unresolved = new Set();
+    for (const r of needGroup) {
+      const id = byKey.get(`${r.campaignId}|${r.adGroupName.toLowerCase()}`);
+      if (id) r.adGroupId = id;
+      else unresolved.add(`kampania ${r.campaignId} → grupa "${r.adGroupName}"`);
+    }
+    if (unresolved.size) {
+      throw new Error(`🛑 Nie znaleziono ${unresolved.size} grup(y) reklam, nic nie zapisano:\n${[...unresolved].map((u) => `  • ${u}`).join('\n')}`);
+    }
+  }
+
+  // Resolve ad group → the single RSA inside it.
+  const existing = await getExistingRsa(cleanCustomerId, rows.filter((r) => !r.adId).map((r) => r.adGroupId), { loginCustomerId });
+  const byGroup = new Map();
+  for (const a of existing) {
+    if (!byGroup.has(a.adGroupId)) byGroup.set(a.adGroupId, []);
+    byGroup.get(a.adGroupId).push(a);
+  }
+  const resolveProblems = [];
+  for (const r of rows) {
+    if (r.adId) { r.resourceName = `customers/${cleanCustomerId}/ads/${r.adId}`; continue; }
+    const ads = byGroup.get(r.adGroupId) || [];
+    if (ads.length === 0) resolveProblems.push(`${r.label}: grupa ${r.adGroupId} nie ma reklamy RSA do aktualizacji.`);
+    else if (ads.length > 1) resolveProblems.push(`${r.label}: grupa ${r.adGroupId} ma ${ads.length} reklam RSA — wskaż konkretną przez ad_id.`);
+    else { r.adId = ads[0].adId; r.resourceName = ads[0].adResourceName; r.current = ads[0]; }
+  }
+  if (resolveProblems.length) {
+    throw new Error(`🛑 Nie da się jednoznacznie wskazać reklamy, nic nie zapisano:\n${resolveProblems.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  const norm = (a) => [...a].map((x) => x.toLowerCase()).sort().join('|');
+  const diff = rows.map((r) => {
+    const cur = r.current || { headlines: [], descriptions: [] };
+    const changed = norm(cur.headlines) !== norm(r.headlines) || norm(cur.descriptions) !== norm(r.descriptions);
+    const lower = (a) => new Set(a.map((x) => x.toLowerCase()));
+    const curH = lower(cur.headlines), newH = lower(r.headlines);
+    const curD = lower(cur.descriptions), newD = lower(r.descriptions);
+    return {
+      label: r.label, adId: r.adId, changed,
+      headlinesBefore: cur.headlines.length, headlinesAfter: r.headlines.length,
+      descriptionsBefore: cur.descriptions.length, descriptionsAfter: r.descriptions.length,
+      headlinesRemoved: cur.headlines.filter((x) => !newH.has(x.toLowerCase())),
+      headlinesAdded: r.headlines.filter((x) => !curH.has(x.toLowerCase())),
+      descriptionsRemoved: cur.descriptions.filter((x) => !newD.has(x.toLowerCase())),
+      descriptionsAdded: r.descriptions.filter((x) => !curD.has(x.toLowerCase())),
+    };
+  });
+  const toUpdate = rows.filter((r, i) => diff[i].changed);
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Assety RSA: do podmiany ${toUpdate.length}, bez zmian ${rows.length - toUpdate.length}...`);
+  if (dryRun) return { success: true, dryRun: true, entity: 'rsa_assets', toUpdate: toUpdate.length, unchanged: rows.length - toUpdate.length, diff };
+
+  if (toUpdate.length === 0) {
+    return { success: true, dryRun: false, entity: 'rsa_assets', updated: 0, unchanged: rows.length, diff, resourceNames: [] };
+  }
+
+  try {
+    const customer = getCustomer(cleanCustomerId, loginCustomerId);
+    const mutations = toUpdate.map((r) => {
+      const rsa = {
+        headlines: r.headlines.map((t) => ({ text: t })),
+        descriptions: r.descriptions.map((t) => ({ text: t })),
+      };
+      if (r.path1) rsa.path1 = r.path1;
+      if (r.path2) rsa.path2 = r.path2;
+      return { entity: 'Ad', operation: 'update', resource: { resource_name: r.resourceName, responsive_search_ad: rsa } };
+    });
+    const responses = [];
+    for (const part of chunk(mutations)) responses.push(await customer.mutateResources(part));
+    return { success: true, dryRun: false, entity: 'rsa_assets', updated: toUpdate.length, unchanged: rows.length - toUpdate.length, chunks: responses.length, diff, resourceNames: mutatedResourceNames(responses) };
+  } catch (error) {
+    throw new Error(`Nie udało się podmienić assetów RSA: ${unpackError(error)}`);
+  }
+}
+
+/**
+ * Add CALLOUT assets ("objaśnienia") at account, campaign or ad-group level.
+ *
+ * Callout assets are immutable like sitelinks — you cannot edit the text of an
+ * existing one. Changing a callout therefore means: create the new one, pause
+ * the old one (`pause-callouts` / the UI). That is why a stale callout such as
+ * "Rabaty do -40%" has to be replaced rather than corrected in place.
+ *
+ * Idempotent: skips a callout whose text already exists at the same parent
+ * (ENABLED or PAUSED), so a re-run adds nothing and does not resurrect something
+ * that was deliberately paused.
+ *
+ * @param {string} customerId
+ * @param {Array<{level: 'customer'|'campaign'|'ad_group', campaignId?: string|number,
+ *                adGroupId?: string|number, adGroupName?: string, text: string, label?: string}>} items
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>}
+ */
+export async function addCallouts(customerId, items, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  if (!Array.isArray(items) || items.length === 0) throw new Error('Brak objaśnień do dodania (pusta lista).');
+
+  const problems = [];
+  const rows = items.map((it, i) => {
+    const text = String(it.text ?? '').trim();
+    const ref = it.label || text || `wiersz ${i + 1}`;
+    const check = checkCalloutText(text);
+    if (!check.valid) check.reasons.forEach((r) => problems.push(`${ref}: ${r}`));
+    const level = String(it.level ?? '').trim().toLowerCase();
+    if (!['customer', 'campaign', 'ad_group'].includes(level)) problems.push(`${ref}: level musi być "customer", "campaign" lub "ad_group".`);
+    const campaignId = String(it.campaignId ?? '').replace(/[^0-9]/g, '');
+    const adGroupId = String(it.adGroupId ?? '').replace(/[^0-9]/g, '');
+    const adGroupName = String(it.adGroupName ?? '').trim();
+    if (level === 'campaign' && !campaignId) problems.push(`${ref}: level=campaign wymaga campaign_id.`);
+    if (level === 'ad_group' && !adGroupId && !(campaignId && adGroupName)) problems.push(`${ref}: level=ad_group wymaga ad_group_id albo campaign_id + ad_group_name.`);
+    return { level, campaignId, adGroupId, adGroupName, text, label: ref };
+  });
+  if (problems.length) {
+    throw new Error(`🛑 Zablokowano — ${problems.length} problem(ów) walidacji, nic nie zapisano:\n${problems.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  const needGroup = rows.filter((r) => r.level === 'ad_group' && !r.adGroupId);
+  if (needGroup.length) {
+    const groups = await getAdGroupsByCampaign(cleanCustomerId, needGroup.map((r) => r.campaignId), { loginCustomerId });
+    const byKey = new Map(groups.map((g) => [`${g.campaignId}|${g.name.toLowerCase()}`, g.adGroupId]));
+    const unresolved = new Set();
+    for (const r of needGroup) {
+      const id = byKey.get(`${r.campaignId}|${r.adGroupName.toLowerCase()}`);
+      if (id) r.adGroupId = id; else unresolved.add(`kampania ${r.campaignId} → grupa "${r.adGroupName}"`);
+    }
+    if (unresolved.size) throw new Error(`🛑 Nie znaleziono ${unresolved.size} grup(y) reklam, nic nie zapisano:\n${[...unresolved].map((u) => `  • ${u}`).join('\n')}`);
+  }
+
+  const parentOf = (r) => r.level === 'campaign' ? r.campaignId : r.level === 'ad_group' ? r.adGroupId : 'acct';
+  const keyOf = (level, parent, text) => `${level}:${parent}|${String(text).toLowerCase()}`;
+  let existing = new Set();
+  try {
+    const current = await getExistingCallouts(cleanCustomerId, { loginCustomerId });
+    existing = new Set(current.map((c) => keyOf(c.level, c.level === 'campaign' ? c.campaignId : c.level === 'ad_group' ? c.adGroupId : 'acct', c.text)));
+  } catch {
+    existing = new Set();
+  }
+
+  const toCreate = [];
+  const skipped = [];
+  const seenInFile = new Set();
+  for (const r of rows) {
+    const k = keyOf(r.level, parentOf(r), r.text);
+    if (existing.has(k)) { skipped.push({ ...r, reason: 'takie objaśnienie już jest na tym poziomie' }); continue; }
+    if (seenInFile.has(k)) { skipped.push({ ...r, reason: 'duplikat w pliku wejściowym' }); continue; }
+    seenInFile.add(k);
+    toCreate.push(r);
+  }
+
+  const plan = {
+    toCreate: toCreate.map((r) => ({ level: r.level, parent: parentOf(r), text: r.text })),
+    skipped: skipped.map((r) => ({ level: r.level, parent: parentOf(r), text: r.text, reason: r.reason })),
+  };
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Objaśnienia: do utworzenia ${toCreate.length}, pominięte ${skipped.length}...`);
+  if (dryRun) return { success: true, dryRun: true, entity: 'callout', toCreate: toCreate.length, skipped: skipped.length, plan };
+  if (toCreate.length === 0) return { success: true, dryRun: false, entity: 'callout', created: 0, skipped: skipped.length, plan, resourceNames: [] };
+
+  try {
+    const customer = getCustomer(cleanCustomerId, loginCustomerId);
+    const mutations = [];
+    toCreate.forEach((r, i) => {
+      const tempId = -(i + 1);
+      const assetRef = `customers/${cleanCustomerId}/assets/${tempId}`;
+      mutations.push({ entity: 'Asset', operation: 'create', resource: { resource_name: assetRef, callout_asset: { callout_text: r.text } } });
+      const link = { asset: assetRef, field_type: 'CALLOUT', status: 'ENABLED' };
+      if (r.level === 'campaign') mutations.push({ entity: 'CampaignAsset', operation: 'create', resource: { ...link, campaign: `customers/${cleanCustomerId}/campaigns/${r.campaignId}` } });
+      else if (r.level === 'ad_group') mutations.push({ entity: 'AdGroupAsset', operation: 'create', resource: { ...link, ad_group: `customers/${cleanCustomerId}/adGroups/${r.adGroupId}` } });
+      else mutations.push({ entity: 'CustomerAsset', operation: 'create', resource: link });
+    });
+    const responses = [];
+    for (const part of chunk(mutations)) responses.push(await customer.mutateResources(part));
+    return { success: true, dryRun: false, entity: 'callout', created: toCreate.length, skipped: skipped.length, chunks: responses.length, plan, resourceNames: mutatedResourceNames(responses) };
+  } catch (error) {
+    throw new Error(`Nie udało się dodać objaśnień: ${unpackError(error)}`);
+  }
+}
+
+/**
+ * Pause CALLOUT links (customer/campaign/ad-group `*_asset` rows). Same
+ * data-preserving retirement as `pause-sitelinks`: the link and its history stay,
+ * the callout just stops serving. Pairing `add-callouts` + `pause-callouts` is
+ * how you "edit" an immutable callout.
+ *
+ * @param {string} customerId
+ * @param {Array<string>} linkResourceNames
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ */
+export async function pauseCallouts(customerId, linkResourceNames, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  const names = [...new Set((linkResourceNames || []).map((n) => String(n).trim()).filter(Boolean))];
+  if (names.length === 0) throw new Error('Brak objaśnień do wstrzymania (pusta lista).');
+  const bad = names.filter((n) => !/\/(campaignAssets|adGroupAssets|customerAssets)\//.test(n));
+  if (bad.length) throw new Error(`🛑 ${bad.length} pozycji nie jest linkiem zasobu (campaignAssets/adGroupAssets/customerAssets):\n${bad.map((b) => `  • ${b}`).join('\n')}`);
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Wstrzymanie ${names.length} objaśnień...`);
+  if (dryRun) return { success: true, dryRun: true, entity: 'callout', count: names.length, plan: names };
+
+  try {
+    const customer = getCustomer(cleanCustomerId, loginCustomerId);
+    const mutations = names.map((n) => ({
+      entity: SITELINK_LINK_ENTITY[sitelinkLinkLevel(n)],
+      operation: 'update',
+      resource: { resource_name: n, status: 'PAUSED' },
+    }));
+    const responses = [];
+    for (const part of chunk(mutations)) responses.push(await customer.mutateResources(part));
+    return { success: true, dryRun: false, entity: 'callout', count: names.length, chunks: responses.length, resourceNames: mutatedResourceNames(responses) };
+  } catch (error) {
+    throw new Error(`Nie udało się wstrzymać objaśnień: ${unpackError(error)}`);
   }
 }

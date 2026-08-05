@@ -803,6 +803,156 @@ export async function getCurrentFinalUrls(customerId, entity, resourceNames, opt
  * @param {string} rn - e.g. customers/1/campaignAssets/2~3~SITELINK
  * @returns {'campaign'|'ad_group'|'customer'}
  */
+/**
+ * List the ad groups that already EXIST in the given campaigns (ENABLED or
+ * PAUSED — not removed), as `{campaignId, adGroupId, name, status}`.
+ *
+ * Serves two jobs: it lets `create-ad-groups` converge (skip a group whose name
+ * is already there) and it lets `add-keywords` resolve `campaign_id` +
+ * `ad_group_name` → adGroupId, so a keyword file can be written against names a
+ * human recognises instead of IDs that don't exist until the groups are created.
+ * A paused group counts as "exists" — a re-run must not resurrect what we
+ * deliberately paused.
+ *
+ * @param {string} customerId
+ * @param {Array<string|number>} campaignIds
+ * @param {{loginCustomerId?: string}} [opts]
+ * @returns {Promise<Array<{campaignId:string, adGroupId:string, name:string, status:number|string}>>}
+ */
+export async function getAdGroupsByCampaign(customerId, campaignIds, opts = {}) {
+  const clean = String(customerId).replace(/-/g, '');
+  const ids = [...new Set((campaignIds || []).map((c) => String(c).replace(/[^0-9]/g, '')).filter(Boolean))];
+  if (ids.length === 0) return [];
+  const rows = await runRawQuery(clean,
+    `SELECT campaign.id, ad_group.id, ad_group.name, ad_group.status
+     FROM ad_group
+     WHERE campaign.id IN (${ids.join(',')}) AND ad_group.status IN ('ENABLED', 'PAUSED')`,
+    { loginCustomerId: opts.loginCustomerId });
+  return rows.map((r) => ({
+    campaignId: String(r['campaign.id']),
+    adGroupId: String(r['ad_group.id']),
+    name: r['ad_group.name'] || '',
+    status: r['ad_group.status'],
+  }));
+}
+
+/**
+ * List the positive keywords that already EXIST in the given ad groups (ENABLED
+ * or PAUSED), as `{adGroupId, text, matchType}`. Lets `add-keywords` skip
+ * duplicates so re-running the same file is a no-op rather than an API error —
+ * Google rejects a duplicate (text + match type) within one ad group.
+ *
+ * `matchType` is normalised to the string form (EXACT/PHRASE/BROAD) because the
+ * raw query returns the enum as a number.
+ *
+ * @param {string} customerId
+ * @param {Array<string|number>} adGroupIds
+ * @param {{loginCustomerId?: string}} [opts]
+ * @returns {Promise<Array<{adGroupId:string, text:string, matchType:string}>>}
+ */
+export async function getExistingKeywords(customerId, adGroupIds, opts = {}) {
+  const clean = String(customerId).replace(/-/g, '');
+  const ids = [...new Set((adGroupIds || []).map((a) => String(a).replace(/[^0-9]/g, '')).filter(Boolean))];
+  if (ids.length === 0) return [];
+  const out = [];
+  // Chunked: the IN list is capped in practice, and a keyword pull can be wide.
+  for (let i = 0; i < ids.length; i += 200) {
+    const chunk = ids.slice(i, i + 200);
+    const rows = await runRawQuery(clean,
+      `SELECT ad_group.id, ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type
+       FROM ad_group_criterion
+       WHERE ad_group.id IN (${chunk.join(',')})
+         AND ad_group_criterion.type = 'KEYWORD'
+         AND ad_group_criterion.negative = false
+         AND ad_group_criterion.status IN ('ENABLED', 'PAUSED')`,
+      { loginCustomerId: opts.loginCustomerId });
+    for (const r of rows) {
+      out.push({
+        adGroupId: String(r['ad_group.id']),
+        text: r['ad_group_criterion.keyword.text'] || '',
+        matchType: String(enums.KeywordMatchType[r['ad_group_criterion.keyword.match_type']] ?? r['ad_group_criterion.keyword.match_type']),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * List the Responsive Search Ads that already EXIST in the given ad groups
+ * (ENABLED or PAUSED), as `{adGroupId, headlines, descriptions, finalUrls}`.
+ *
+ * Lets `add-ads` converge: an ad whose asset set and Final URL match one already
+ * in the group is skipped, so re-running the same file does not stack duplicate
+ * RSAs. Google *allows* near-identical ads in one ad group, which is exactly why
+ * this read matters — nothing on the API side would stop the duplication.
+ *
+ * @param {string} customerId
+ * @param {Array<string|number>} adGroupIds
+ * @param {{loginCustomerId?: string}} [opts]
+ * @returns {Promise<Array<{adGroupId:string, adId:string, adResourceName:string, headlines:string[], descriptions:string[], finalUrls:string[]}>>}
+ */
+export async function getExistingRsa(customerId, adGroupIds, opts = {}) {
+  const clean = String(customerId).replace(/-/g, '');
+  const ids = [...new Set((adGroupIds || []).map((a) => String(a).replace(/[^0-9]/g, '')).filter(Boolean))];
+  if (ids.length === 0) return [];
+  const out = [];
+  for (let i = 0; i < ids.length; i += 200) {
+    const chunk = ids.slice(i, i + 200);
+    const rows = await runRawQuery(clean,
+      `SELECT ad_group.id, ad_group_ad.ad.id, ad_group_ad.ad.resource_name,
+              ad_group_ad.ad.responsive_search_ad.headlines,
+              ad_group_ad.ad.responsive_search_ad.descriptions, ad_group_ad.ad.final_urls
+       FROM ad_group_ad
+       WHERE ad_group.id IN (${chunk.join(',')})
+         AND ad_group_ad.ad.type = 'RESPONSIVE_SEARCH_AD'
+         AND ad_group_ad.status IN ('ENABLED', 'PAUSED')`,
+      { loginCustomerId: opts.loginCustomerId });
+    for (const r of rows) {
+      out.push({
+        adGroupId: String(r['ad_group.id']),
+        adId: String(r['ad_group_ad.ad.id']),
+        adResourceName: r['ad_group_ad.ad.resource_name'],
+        headlines: (r['ad_group_ad.ad.responsive_search_ad.headlines'] || []).map((h) => h.text || ''),
+        descriptions: (r['ad_group_ad.ad.responsive_search_ad.descriptions'] || []).map((d) => d.text || ''),
+        finalUrls: r['ad_group_ad.ad.final_urls'] || [],
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * List CALLOUT assets already linked at account / campaign / ad-group level
+ * (ENABLED or PAUSED), as `{level, campaignId, adGroupId, text, resourceName}`.
+ * Lets `add-callouts` converge and gives `pause-callouts` the link resource
+ * names it needs.
+ *
+ * @param {string} customerId
+ * @param {{loginCustomerId?: string}} [opts]
+ */
+export async function getExistingCallouts(customerId, opts = {}) {
+  const clean = String(customerId).replace(/-/g, '');
+  const out = [];
+  const camp = await runRawQuery(clean,
+    `SELECT campaign.id, campaign_asset.resource_name, campaign_asset.status, asset.callout_asset.callout_text
+     FROM campaign_asset WHERE campaign_asset.field_type = 'CALLOUT' AND campaign_asset.status IN ('ENABLED', 'PAUSED')`,
+    { loginCustomerId: opts.loginCustomerId });
+  for (const r of camp) out.push({ level: 'campaign', campaignId: String(r['campaign.id']), adGroupId: null, text: r['asset.callout_asset.callout_text'] || '', status: r['campaign_asset.status'], resourceName: r['campaign_asset.resource_name'] });
+
+  const ag = await runRawQuery(clean,
+    `SELECT ad_group.id, ad_group_asset.resource_name, ad_group_asset.status, asset.callout_asset.callout_text
+     FROM ad_group_asset WHERE ad_group_asset.field_type = 'CALLOUT' AND ad_group_asset.status IN ('ENABLED', 'PAUSED')`,
+    { loginCustomerId: opts.loginCustomerId });
+  for (const r of ag) out.push({ level: 'ad_group', campaignId: null, adGroupId: String(r['ad_group.id']), text: r['asset.callout_asset.callout_text'] || '', status: r['ad_group_asset.status'], resourceName: r['ad_group_asset.resource_name'] });
+
+  const cust = await runRawQuery(clean,
+    `SELECT customer_asset.resource_name, customer_asset.status, asset.callout_asset.callout_text
+     FROM customer_asset WHERE customer_asset.field_type = 'CALLOUT' AND customer_asset.status IN ('ENABLED', 'PAUSED')`,
+    { loginCustomerId: opts.loginCustomerId });
+  for (const r of cust) out.push({ level: 'customer', campaignId: null, adGroupId: null, text: r['asset.callout_asset.callout_text'] || '', status: r['customer_asset.status'], resourceName: r['customer_asset.resource_name'] });
+  return out;
+}
+
 export function sitelinkLinkLevel(rn) {
   const s = String(rn);
   if (s.includes('/campaignAssets/')) return 'campaign';
@@ -832,7 +982,15 @@ export async function getExistingSitelinks(customerId, opts = {}) {
      WHERE asset.type = 'SITELINK' AND campaign_asset.status IN ('ENABLED', 'PAUSED')`,
     { loginCustomerId: opts.loginCustomerId });
   for (const r of campRows) {
-    out.push({ level: 'campaign', campaignId: String(r['campaign.id']), linkText: r['asset.sitelink_asset.link_text'] || '', finalUrl: (r['asset.final_urls'] || [])[0] || '' });
+    out.push({ level: 'campaign', campaignId: String(r['campaign.id']), adGroupId: null, linkText: r['asset.sitelink_asset.link_text'] || '', finalUrl: (r['asset.final_urls'] || [])[0] || '' });
+  }
+  const agRows = await runRawQuery(clean,
+    `SELECT ad_group.id, ad_group_asset.status, asset.sitelink_asset.link_text, asset.final_urls
+     FROM ad_group_asset
+     WHERE asset.type = 'SITELINK' AND ad_group_asset.status IN ('ENABLED', 'PAUSED')`,
+    { loginCustomerId: opts.loginCustomerId });
+  for (const r of agRows) {
+    out.push({ level: 'ad_group', campaignId: null, adGroupId: String(r['ad_group.id']), linkText: r['asset.sitelink_asset.link_text'] || '', finalUrl: (r['asset.final_urls'] || [])[0] || '' });
   }
   const custRows = await runRawQuery(clean,
     `SELECT customer_asset.status, asset.sitelink_asset.link_text, asset.final_urls
@@ -840,7 +998,7 @@ export async function getExistingSitelinks(customerId, opts = {}) {
      WHERE asset.type = 'SITELINK' AND customer_asset.status IN ('ENABLED', 'PAUSED')`,
     { loginCustomerId: opts.loginCustomerId });
   for (const r of custRows) {
-    out.push({ level: 'customer', campaignId: null, linkText: r['asset.sitelink_asset.link_text'] || '', finalUrl: (r['asset.final_urls'] || [])[0] || '' });
+    out.push({ level: 'customer', campaignId: null, adGroupId: null, linkText: r['asset.sitelink_asset.link_text'] || '', finalUrl: (r['asset.final_urls'] || [])[0] || '' });
   }
   return out;
 }
