@@ -12,6 +12,7 @@ Ads-Agent/                          ← package root (this folder)
 ├── node_modules/                   ← gitignored, created by `npm install`
 ├── CHANGELOG.md                    ← what landed and what it does (PL)
 ├── .gitignore
+├── Klienci/                        ← per-client data (config.json, context, reports)
 └── .claude/
     └── skills/
         ├── gads-connector/         ← Google Ads API connector (CLI + MCP)

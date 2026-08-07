@@ -22,10 +22,10 @@
  * Opcje:
  *   --account       alias z `.claude/accounts.json` albo 10-cyfrowy customer ID (wymagane)
  *   --accounts-dir  katalog, od którego szukamy `.claude/accounts.json` (domyślnie: bieżący)
- *   --out           folder raportu (domyślnie: ./raporty-wykluczenia/{alias})
- *   --kontekst      ścieżka do istniejącego kontekst.md (domyślnie: plik w folderze raportu)
- *   --typ           ecom | leadgen — nadpisuje wykrywanie automatyczne
- *   --cel-roas      docelowy ROAS (ecom) — punkt odniesienia zamiast średniej kampanii
+ *   --out           folder raportu (domyślnie: Klienci/{alias}/Optymalizacja)
+ *   --kontekst      ścieżka do kontekst.md (domyślnie: Klienci/{alias}/Kontekst/kontekst.md)
+ *   --typ           ecom | leadgen — nadpisuje config.json i wykrywanie automatyczne
+ *   --cel-roas      docelowy ROAS (ecom) — nadpisuje targetRoas z config.json
  *   --open          otwórz raport po wygenerowaniu (macOS)
  */
 
@@ -357,7 +357,20 @@ function parseFrontmatter(md) {
     return out;
 }
 
-function ensureKontekst(outputDir, accountName, sciezkaZFlagi) {
+// Cele i typ konta z `Klienci/<alias>/config.json`. Brak pliku albo błąd składni daje
+// pusty obiekt — config jest wygodą, nie warunkiem uruchomienia.
+function loadClientConfig(clientDir) {
+    const p = join(clientDir, 'config.json');
+    if (!existsSync(p)) return {};
+    try {
+        return JSON.parse(readFileSync(p, 'utf8'));
+    } catch {
+        console.log(`   ⚠ ${p} nie jest poprawnym JSON-em — pomijam.`);
+        return {};
+    }
+}
+
+function ensureKontekst(kontekstDir, accountName, sciezkaZFlagi) {
     if (sciezkaZFlagi) {
         const p = isAbsolute(sciezkaZFlagi) ? sciezkaZFlagi : resolve(process.cwd(), sciezkaZFlagi);
         if (!existsSync(p)) {
@@ -366,7 +379,7 @@ function ensureKontekst(outputDir, accountName, sciezkaZFlagi) {
         }
         return { text: readFileSync(p, 'utf8'), path: p, created: false };
     }
-    const p = join(outputDir, KONTEKST_FILE);
+    const p = join(kontekstDir, KONTEKST_FILE);
     if (!existsSync(p)) {
         writeFileSync(p, kontekstTemplate(accountName), 'utf8');
         return { text: '', path: p, created: true };   // szablon = brak realnego kontekstu
@@ -643,34 +656,40 @@ async function main() {
         return;
     }
 
-    // Folder raportu + pliki, które żyją między rundami
+    // Folder klienta: raporty w `Optymalizacja/`, opis oferty w `Kontekst/`. Obie flagi
+    // działają niezależnie — `--out` gdzie indziej nie przenosi kontekstu i odwrotnie.
+    const clientDir = resolve(process.cwd(), 'Klienci', String(account.key).toLowerCase());
     const outputDir = args.out
         ? (isAbsolute(args.out) ? args.out : resolve(process.cwd(), args.out))
-        : resolve(process.cwd(), 'raporty-wykluczenia', String(account.key).toLowerCase());
+        : join(clientDir, 'Optymalizacja');
     mkdirSync(outputDir, { recursive: true });
+    const kontekstDir = join(clientDir, 'Kontekst');
+    if (!args.kontekst) mkdirSync(kontekstDir, { recursive: true });
     const dateStr = formatDate(new Date());
 
-    const kontekst = ensureKontekst(outputDir, account.name, args.kontekst);
+    const kontekst = ensureKontekst(kontekstDir, account.name, args.kontekst);
     if (kontekst.created) console.log(`\n   ✓ Utworzono ${KONTEKST_FILE} — uzupełnij opis oferty, to najmocniej poprawia jakość oceny`);
     else if (!kontekst.text) console.log(`\n   ⚠ ${KONTEKST_FILE} jest pusty — ocena AI będzie zgadywaniem z nazwy konta`);
     const status = ensureStatusFile(outputDir, account.name);
     if (status.created) console.log(`   ✓ Utworzono ${STATUS_FILE} (pamięć między rundami)`);
 
-    // Typ konta i cel: flaga CLI > frontmatter kontekstu > wykrycie automatyczne.
+    // Typ konta i cel: flaga CLI > config.json > frontmatter kontekstu > wykrycie automatyczne.
     // Automat: konto raportujące wartość konwersji traktujemy jak ecommerce, bo tylko
     // tam ROAS jest sensowną miarą.
+    const cfg = loadClientConfig(clientDir);
     const fm = parseFrontmatter(kontekst.text || (existsSync(kontekst.path) ? readFileSync(kontekst.path, 'utf8') : ''));
     const wartoscKonwersji = st30.reduce((s, t) => s + (t.value || 0), 0);
-    const typ = String(args.typ || fm.typ || '').toLowerCase();
+    const typ = String(args.typ || cfg.businessType || fm.typ || '').toLowerCase();
     const isEcom = typ ? ['ecom', 'ecommerce'].includes(typ) : wartoscKonwersji > 0;
-    const celRoas = args['cel-roas'] ?? fm.celRoas ?? null;
+    const celRoas = args['cel-roas'] ?? cfg.targetRoas ?? fm.celRoas ?? null;
+    const branza = cfg.industry || fm.branza || '';
     console.log(`   Tryb oceny: ${isEcom ? 'ecommerce (ROAS)' : 'leadgen (koszt konwersji)'}${typ ? '' : ' — wykryty automatycznie'}`);
 
     // Warstwa 3b: hasła niepewne → plik do oceny; negatywy z poprzedniego przebiegu → analiza
     const uncertainTerms = collectUncertainTerms(st30, adGroupKeywords);
     const aiNegatives = loadAgentNegatives(outputDir, dateStr);
     const uncertain = writeUncertainTerms(outputDir, dateStr, uncertainTerms, {
-        accountName: account.name, isEcom, celRoas, branza: fm.branza || '',
+        accountName: account.name, isEcom, celRoas, branza,
         kontekstMd: kontekst.text, kontekstPath: kontekst.path,
         statusMd: status.text, statusPath: status.path
     });
@@ -716,7 +735,7 @@ async function main() {
     const html = buildReport({
         accountName: account.name,
         isEcom,
-        industry: fm.branza || '',
+        industry: branza,
         dates,
         benchOpis: maCel
             ? `cel ROAS ${fmt(cel, 2)} (z kontekstu)`

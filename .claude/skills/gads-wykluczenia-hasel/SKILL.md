@@ -47,8 +47,9 @@ node ".claude/skills/gads-wykluczenia-hasel/scripts/wykluczenia-hasel.js" --acco
 ```
 
 Uruchamiaj z korzenia pakietu (tam, gdzie `package.json`) — wtedy skrypt sam znajdzie
-`.claude/accounts.json`, a raport zapisze do `raporty-wykluczenia/{konto}/`. Folder
-raportu możesz zmienić flagą `--out`; pełna lista flag jest na końcu tej instrukcji.
+`.claude/accounts.json`. Raport trafia do `Klienci/{alias}/Optymalizacja/`, opis oferty
+czytany jest z `Klienci/{alias}/Kontekst/kontekst.md`, a cele z `Klienci/{alias}/config.json`.
+Obie ścieżki zmieniają flagi `--out` i `--kontekst`; pełna lista flag jest na końcu.
 
 Skrypt **tylko czyta** konto — nie potrzebuje uprawnień do zmian i niczego nie modyfikuje.
 
@@ -287,17 +288,17 @@ zostaje na nowe tematy.
 |---|---|
 | `--account` | alias z `.claude/accounts.json` albo 10-cyfrowy customer ID (wymagane) |
 | `--accounts-dir` | katalog, od którego szukamy `.claude/accounts.json` (domyślnie: bieżący) |
-| `--out` | folder raportu (domyślnie `./raporty-wykluczenia/{alias}`) |
-| `--kontekst` | ścieżka do istniejącego `kontekst.md` zamiast pliku w folderze raportu |
-| `--typ` | `ecom` \| `leadgen` — nadpisuje wykrywanie automatyczne |
-| `--cel-roas` | docelowy ROAS (ecom) — punkt odniesienia zamiast średniej kampanii |
+| `--out` | folder raportu (domyślnie `Klienci/{alias}/Optymalizacja`) |
+| `--kontekst` | ścieżka do `kontekst.md` (domyślnie `Klienci/{alias}/Kontekst/kontekst.md`) |
+| `--typ` | `ecom` \| `leadgen` — nadpisuje `config.json` i wykrywanie automatyczne |
+| `--cel-roas` | docelowy ROAS (ecom) — nadpisuje `targetRoas` z `config.json` |
 | `--open` | otwórz raport po wygenerowaniu (macOS) |
 
-**Typ konta** ustala się w kolejności: flaga → frontmatter `kontekst.md` → wykrycie
-automatyczne (konto raportujące wartość konwersji = ecommerce, bo tylko tam ROAS jest
-sensowną miarą).
+**Typ konta** ustala się w kolejności: flaga → `config.json` → frontmatter `kontekst.md`
+→ wykrycie automatyczne (konto raportujące wartość konwersji = ecommerce, bo tylko tam
+ROAS jest sensowną miarą).
 
-**Cel ROAS** z kontekstu wygrywa ze średnią własnej kampanii przy ocenie haseł. Powód:
+**Cel ROAS** (z `config.json` albo frontmattera) wygrywa ze średnią własnej kampanii przy ocenie haseł. Powód:
 przy porównaniu do średniej **własnej** kampanii połowa haseł jest poniżej niej
 z definicji, więc w kampanii brandowej sygnał nic nie znaczy — hasło z ROAS 6,3 przy
 celu 3,5 lądowało wśród kandydatów tylko dlatego, że Brand ma średnią 9.
