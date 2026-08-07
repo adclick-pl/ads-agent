@@ -18,6 +18,9 @@ import {
 } from './queries.js';
 import {
   updateCampaignStatus,
+  updateAdStatus,
+  updateAdGroupStatus,
+  updateKeywordStatus,
   updateCampaignBudget,
   addCampaignNegativeKeywords,
   addAccountNegativePlacements,
@@ -218,6 +221,19 @@ Akcje odczytu:
 
 Akcje zapisu (zawsze najpierw --dry-run!):
   update-status           Zmiana statusu kampanii (--campaign, --status).
+  update-ad-status        Wstrzymanie/wznowienie REKLAM po ID reklamy (tym z UI).
+                          Pojedynczo/lista: --ad=<ID[,ID]> --status=<ENABLED|PAUSED>;
+                          wsadowo: --input=mapa.csv (kolumny: ad_id,status).
+                          Zwalnia slot, gdy grupa ma limit 3 aktywnych RSA.
+  update-keyword-status   Wstrzymanie/wznowienie SŁÓW KLUCZOWYCH.
+                          --criterion=<adGroupId~criterionId[,...]> --status=<...>;
+                          wsadowo: --input=mapa.csv (kolumny: criterion,status).
+                          Odwracalna emerytura dla słowa — historia zostaje.
+  update-ad-group-status  Wstrzymanie/wznowienie GRUP REKLAM po ID grupy.
+                          Pojedynczo/lista: --ad-group=<ID[,ID]> --status=<...>;
+                          wsadowo: --input=mapa.csv (kolumny: ad_group_id,status).
+                          Tym wznawiasz grupę, której create-ad-groups nie ruszy
+                          (jest idempotentne i pomija istniejące).
   update-budget           Zmiana budżetu dziennego (--budget-id, --amount).
                           SafetyLimits blokuje skok > ${DEFAULT_MAX_BUDGET_CHANGE_PCT}% — użyj --force, by wymusić.
   add-negatives           Negatywne słowa kluczowe (--campaign, --keywords, --match-type).
@@ -545,6 +561,52 @@ async function main() {
       const status = args.status;
       if (!campaignId || !status) throw new Error('update-status requires --campaign=<ID> and --status=<ENABLED|PAUSED>');
       const result = await updateCampaignStatus(customerId, campaignId, status, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'update-ad-status' || action === 'update-ad-group-status') {
+      const isAd = action === 'update-ad-status';
+      const idKey = isAd ? 'adId' : 'adGroupId';
+      const flag = isAd ? 'ad' : 'ad-group';
+      const csvCols = isAd ? 'ad_id,status' : 'ad_group_id,status';
+      let items = [];
+      if (args.input) {
+        const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+        items = rows.map((r) => ({
+          [idKey]: r[isAd ? 'ad_id' : 'ad_group_id'] || r.id || '',
+          status: r.status || args.status || '',
+        }));
+      } else if (args[flag]) {
+        items = String(args[flag]).split(',').map((id) => ({ [idKey]: id.trim(), status: args.status || '' }));
+      }
+      if (items.length === 0) {
+        throw new Error(`${action} wymaga --${flag}=<ID[,ID]> --status=<ENABLED|PAUSED> albo --input=mapa.csv (kolumny: ${csvCols})`);
+      }
+      const result = isAd
+        ? await updateAdStatus(customerId, items, dryRun, loginCustomerId)
+        : await updateAdGroupStatus(customerId, items, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'update-keyword-status') {
+      let items = [];
+      if (args.input) {
+        const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+        items = rows.map((r) => ({
+          criterion: r.criterion || r.id || r.criterion_id || '',
+          status: r.status || args.status || '',
+        }));
+      } else if (args.criterion) {
+        items = String(args.criterion).split(',').map((c) => ({ criterion: c.trim(), status: args.status || '' }));
+      }
+      if (items.length === 0) {
+        throw new Error('update-keyword-status wymaga --criterion=<adGroupId~criterionId[,...]> --status=<ENABLED|PAUSED> albo --input=mapa.csv (kolumny: criterion,status)');
+      }
+      const bad = items.filter((i) => !String(i.criterion).includes('~'));
+      if (bad.length) {
+        throw new Error(`🛑 ${bad.length} pozycji bez formatu adGroupId~criterionId (np. 158815334092~300772940111). Samo ID kryterium nie identyfikuje słowa jednoznacznie.`);
+      }
+      const result = await updateKeywordStatus(customerId, items, dryRun, loginCustomerId);
       console.log(JSON.stringify(result, null, 2));
     }
 

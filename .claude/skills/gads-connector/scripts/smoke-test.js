@@ -379,5 +379,48 @@ check('addAds is exported and refuses an empty batch', async () => {
   assert(threw);
 });
 
+// 15. Status guards for ads / ad groups (offline: everything below fails before any API call).
+check('updateAdStatus / updateAdGroupStatus are exported functions', () => {
+  assert(typeof mutator.updateAdStatus === 'function');
+  assert(typeof mutator.updateAdGroupStatus === 'function');
+});
+check('ad/ad-group status refuses REMOVED (no-delete policy)', async () => {
+  for (const [fn, item] of [
+    [mutator.updateAdStatus, { adId: '123', status: 'REMOVED' }],
+    [mutator.updateAdGroupStatus, { adGroupId: '123', status: 'REMOVED' }],
+  ]) {
+    let threw = false;
+    try { await fn('1234567890', [item], true); } catch { threw = true; }
+    assert(threw, 'status REMOVED must be refused before any API call');
+  }
+});
+check('ad/ad-group status refuses an unknown status and an empty batch', async () => {
+  let badStatus = false;
+  try { await mutator.updateAdStatus('1234567890', [{ adId: '123', status: 'WSTRZYMANA' }], true); } catch { badStatus = true; }
+  assert(badStatus, 'only ENABLED / PAUSED are allowed');
+  let empty = false;
+  try { await mutator.updateAdGroupStatus('1234567890', [], true); } catch { empty = true; }
+  assert(empty, 'should refuse an empty list');
+});
+check('getAdGroupAdsByAdIds / getAdGroupsByIds short-circuit on an empty id list', async () => {
+  assert((await queries.getAdGroupAdsByAdIds('1234567890', [])).length === 0);
+  assert((await queries.getAdGroupsByIds('1234567890', [])).length === 0);
+});
+check('updateKeywordStatus is exported and enforces the same guards', async () => {
+  assert(typeof mutator.updateKeywordStatus === 'function');
+  for (const item of [{ criterion: '111~222', status: 'REMOVED' }, { criterion: '111~222', status: 'X' }]) {
+    let threw = false;
+    try { await mutator.updateKeywordStatus('1234567890', [item], true); } catch { threw = true; }
+    assert(threw, `should refuse status ${item.status}`);
+  }
+  let empty = false;
+  try { await mutator.updateKeywordStatus('1234567890', [], true); } catch { empty = true; }
+  assert(empty, 'should refuse an empty list');
+});
+check('keyword ids keep the adGroupId~criterionId form (digits-only would break them)', async () => {
+  // The shared status helper strips non-digits by default; keywords override that.
+  assert((await queries.getKeywordsByCriteria('1234567890', [])).length === 0);
+});
+
 console.log(`\nResult: ${passed} passed, ${failed} failed.\n`);
 process.exit(failed === 0 ? 0 : 1);

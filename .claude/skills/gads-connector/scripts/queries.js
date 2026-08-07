@@ -922,6 +922,168 @@ export async function getExistingRsa(customerId, adGroupIds, opts = {}) {
 }
 
 /**
+ * Resolve bare ad IDs to their AdGroupAd rows.
+ *
+ * Status lives on the AdGroupAd (the ad↔ad-group link), NOT on the Ad itself, so
+ * a status mutation needs `customers/X/adGroupAds/{adGroupId}~{adId}` — which you
+ * cannot build from an ad ID alone. This is the lookup that makes
+ * `update-ad-status` usable with the ad IDs shown in the Google Ads UI.
+ *
+ * REMOVED rows are excluded: they are gone, and offering to "re-enable" one would
+ * be a lie.
+ *
+ * @param {string} customerId
+ * @param {Array<string|number>} adIds
+ * @param {{loginCustomerId?: string}} [opts]
+ * @returns {Promise<Array<{adId: string, adGroupId: string, adGroupName: string, resourceName: string, status: string}>>}
+ */
+export async function getAdGroupAdsByAdIds(customerId, adIds, opts = {}) {
+  const clean = String(customerId).replace(/-/g, '');
+  const ids = [...new Set((adIds || []).map((a) => String(a).replace(/[^0-9]/g, '')).filter(Boolean))];
+  if (ids.length === 0) return [];
+  const out = [];
+  for (let i = 0; i < ids.length; i += 200) {
+    const part = ids.slice(i, i + 200);
+    const rows = await runRawQuery(clean,
+      `SELECT ad_group.id, ad_group.name, ad_group_ad.ad.id, ad_group_ad.resource_name, ad_group_ad.status
+       FROM ad_group_ad
+       WHERE ad_group_ad.ad.id IN (${part.join(',')})
+         AND ad_group_ad.status IN ('ENABLED', 'PAUSED')`,
+      { loginCustomerId: opts.loginCustomerId });
+    for (const r of rows) {
+      out.push({
+        adId: String(r['ad_group_ad.ad.id']),
+        adGroupId: String(r['ad_group.id']),
+        adGroupName: r['ad_group.name'] || '',
+        resourceName: r['ad_group_ad.resource_name'],
+        status: normaliseStatus(r['ad_group_ad.status']),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Look up ad groups by bare ID (name + current status), so a status mutation can
+ * show a real from→to diff instead of writing blind.
+ *
+ * @param {string} customerId
+ * @param {Array<string|number>} adGroupIds
+ * @param {{loginCustomerId?: string}} [opts]
+ * @returns {Promise<Array<{adGroupId: string, name: string, campaignId: string, campaignName: string, status: string}>>}
+ */
+export async function getAdGroupsByIds(customerId, adGroupIds, opts = {}) {
+  const clean = String(customerId).replace(/-/g, '');
+  const ids = [...new Set((adGroupIds || []).map((a) => String(a).replace(/[^0-9]/g, '')).filter(Boolean))];
+  if (ids.length === 0) return [];
+  const out = [];
+  for (let i = 0; i < ids.length; i += 200) {
+    const part = ids.slice(i, i + 200);
+    const rows = await runRawQuery(clean,
+      `SELECT ad_group.id, ad_group.name, ad_group.resource_name, ad_group.status, campaign.id, campaign.name
+       FROM ad_group
+       WHERE ad_group.id IN (${part.join(',')}) AND ad_group.status IN ('ENABLED', 'PAUSED')`,
+      { loginCustomerId: opts.loginCustomerId });
+    for (const r of rows) {
+      out.push({
+        adGroupId: String(r['ad_group.id']),
+        name: r['ad_group.name'] || '',
+        resourceName: r['ad_group.resource_name'],
+        campaignId: String(r['campaign.id']),
+        campaignName: r['campaign.name'] || '',
+        status: normaliseStatus(r['ad_group.status']),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Look up keywords by their composite `adGroupId~criterionId` key — the same key
+ * `update-keyword-url` already uses, and the only one that identifies a keyword
+ * unambiguously (criterion ids are only unique within an ad group).
+ *
+ * @param {string} customerId
+ * @param {Array<string>} criteria - e.g. ['112447007410~495997481489']
+ * @param {{loginCustomerId?: string}} [opts]
+ * @returns {Promise<Array<{criterion: string, adGroupId: string, adGroupName: string,
+ *   text: string, matchType: string, resourceName: string, status: string}>>}
+ */
+export async function getKeywordsByCriteria(customerId, criteria, opts = {}) {
+  const clean = String(customerId).replace(/-/g, '');
+  const pairs = [...new Set((criteria || []).map((c) => String(c).trim()).filter(Boolean))];
+  const ids = [...new Set(pairs.map((p) => p.split('~').pop().replace(/[^0-9]/g, '')).filter(Boolean))];
+  if (ids.length === 0) return [];
+  const MATCH = { 2: 'EXACT', 3: 'PHRASE', 4: 'BROAD' };
+  const out = [];
+  for (let i = 0; i < ids.length; i += 200) {
+    const part = ids.slice(i, i + 200);
+    const rows = await runRawQuery(clean,
+      `SELECT ad_group.id, ad_group.name, ad_group_criterion.criterion_id,
+              ad_group_criterion.resource_name, ad_group_criterion.status,
+              ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type
+       FROM ad_group_criterion
+       WHERE ad_group_criterion.criterion_id IN (${part.join(',')})
+         AND ad_group_criterion.type = 'KEYWORD'
+         AND ad_group_criterion.status IN ('ENABLED', 'PAUSED')`,
+      { loginCustomerId: opts.loginCustomerId });
+    for (const r of rows) {
+      const mt = r['ad_group_criterion.keyword.match_type'];
+      out.push({
+        criterion: `${r['ad_group.id']}~${r['ad_group_criterion.criterion_id']}`,
+        adGroupId: String(r['ad_group.id']),
+        adGroupName: r['ad_group.name'] || '',
+        text: r['ad_group_criterion.keyword.text'] || '',
+        matchType: typeof mt === 'number' ? (MATCH[mt] || String(mt)) : String(mt ?? ''),
+        resourceName: r['ad_group_criterion.resource_name'],
+        status: normaliseStatus(r['ad_group_criterion.status']),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Read a campaign's name, status and experiment type.
+ *
+ * `experimentType` matters for mutations: Google refuses to change the status,
+ * budget or dates of a DRAFT/EXPERIMENT ("trial") campaign with
+ * CANNOT_MODIFY_FOR_TRIAL_CAMPAIGN. Reading it lets a dry-run refuse honestly
+ * instead of reporting a success the commit cannot deliver.
+ *
+ * @param {string} customerId
+ * @param {string|number} campaignId
+ * @param {{loginCustomerId?: string}} [opts]
+ * @returns {Promise<{campaignId: string, name: string, status: string, experimentType: string}|null>}
+ */
+export async function getCampaignBasics(customerId, campaignId, opts = {}) {
+  const clean = String(customerId).replace(/-/g, '');
+  const id = String(campaignId).replace(/[^0-9]/g, '');
+  if (!id) return null;
+  const rows = await runRawQuery(clean,
+    `SELECT campaign.id, campaign.name, campaign.status, campaign.experiment_type
+     FROM campaign WHERE campaign.id = ${id}`,
+    { loginCustomerId: opts.loginCustomerId });
+  const r = rows[0];
+  if (!r) return null;
+  const EXP = { 2: 'BASE', 3: 'DRAFT', 4: 'EXPERIMENT' };
+  const raw = r['campaign.experiment_type'];
+  return {
+    campaignId: String(r['campaign.id']),
+    name: r['campaign.name'] || '',
+    status: normaliseStatus(r['campaign.status']),
+    experimentType: typeof raw === 'number' ? (EXP[raw] || String(raw)) : String(raw ?? ''),
+  };
+}
+
+/** Status enums come back as numbers from raw GAQL; map them to the string form. */
+function normaliseStatus(raw) {
+  const BY_NUM = { 2: 'ENABLED', 3: 'PAUSED', 4: 'REMOVED' };
+  if (typeof raw === 'number') return BY_NUM[raw] || String(raw);
+  return String(raw ?? '');
+}
+
+/**
  * List CALLOUT assets already linked at account / campaign / ad-group level
  * (ENABLED or PAUSED), as `{level, campaignId, adGroupId, text, resourceName}`.
  * Lets `add-callouts` converge and gives `pause-callouts` the link resource

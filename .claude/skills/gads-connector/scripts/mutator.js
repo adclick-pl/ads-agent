@@ -1,5 +1,5 @@
 import { getCustomer, unpackError } from './client.js';
-import { getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts } from './queries.js';
+import { getKeywordsByCriteria, getCampaignBasics, getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts, getAdGroupAdsByAdIds, getAdGroupsByIds } from './queries.js';
 import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText } from './safety.js';
 
 /**
@@ -327,12 +327,25 @@ export async function updateCampaignStatus(customerId, campaignId, status, dryRu
 
   console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Updating campaign ${cleanCampaignId} status to ${status}...`);
 
+  // Google refuses status/budget/date changes on DRAFT and EXPERIMENT ("trial")
+  // campaigns. Without this read the dry-run would report success for a write the
+  // API always rejects — a false green light is worse than no dry-run at all.
+  const basics = await getCampaignBasics(cleanCustomerId, cleanCampaignId, { loginCustomerId });
+  if (basics && basics.experimentType && basics.experimentType !== 'BASE') {
+    throw new Error(
+      `🛑 "${basics.name}" to kampania próbna (${basics.experimentType}) — Google nie pozwala zmieniać jej statusu, budżetu ani dat przez API ` +
+      `(CANNOT_MODIFY_FOR_TRIAL_CAMPAIGN). Zakończ lub usuń eksperyment w panelu: Kampanie → Eksperymenty.`
+    );
+  }
+
   if (dryRun) {
     return {
       success: true,
       dryRun: true,
       campaignId: cleanCampaignId,
       status,
+      currentStatus: basics?.status ?? null,
+      changed: basics ? basics.status !== status : null,
       resourceName
     };
   }
@@ -355,6 +368,174 @@ export async function updateCampaignStatus(customerId, campaignId, status, dryRu
   } catch (error) {
     throw new Error(`Failed to update campaign status: ${unpackError(error)}`);
   }
+}
+
+/**
+ * Shared guts of the two status mutations below. Reads the current state first so
+ * the dry-run can show a real from→to diff, and so a typo'd ID fails loudly
+ * instead of silently writing nothing.
+ *
+ * All-or-nothing, like every other batch action here: if ANY id can't be resolved
+ * the whole batch is refused. A half-applied status change across a set of ads is
+ * exactly the state that's hard to reason about afterwards.
+ *
+ * @param {object} cfg
+ * @param {string} cfg.label            - human label for messages ('reklam', 'grup reklam')
+ * @param {string} cfg.entity           - mutateResources entity ('AdGroupAd', 'AdGroup')
+ * @param {string} cfg.idKey            - key naming the id in items/results
+ * @param {Function} cfg.lookup         - async (ids) => rows with {resourceName, status, ...}
+ * @param {Function} cfg.describe       - row => extra fields for the plan output
+ * @param {Function} [cfg.normalizeId]  - id sanitiser; defaults to digits-only. Keywords
+ *                                        override it because their id is `adGroupId~criterionId`.
+ */
+async function applyStatusChange(cfg, customerId, items, dryRun, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  const normalizeId = cfg.normalizeId || ((s) => s.replace(/[^0-9]/g, ''));
+  const wanted = (items || [])
+    .map((it) => ({ id: normalizeId(String(it[cfg.idKey] ?? it.id ?? '')), status: String(it.status ?? '').trim().toUpperCase() }))
+    .filter((it) => it.id);
+  if (wanted.length === 0) throw new Error(`Brak pozycji do zmiany statusu (pusta lista ${cfg.label}).`);
+
+  // No-delete policy first: never let a status mutation become a deletion.
+  for (const it of wanted) {
+    assertNotRemoval(it.status);
+    if (!['ENABLED', 'PAUSED'].includes(it.status)) {
+      throw new Error(`Nieprawidłowy status "${it.status}" dla ${cfg.idKey}=${it.id}. Dozwolone: ENABLED, PAUSED.`);
+    }
+  }
+
+  const found = await cfg.lookup([...new Set(wanted.map((w) => w.id))], { loginCustomerId });
+  const byId = new Map(found.map((r) => [String(r[cfg.idKey]), r]));
+  const missing = wanted.filter((w) => !byId.has(w.id)).map((w) => w.id);
+  if (missing.length) {
+    throw new Error(`🛑 Nie znaleziono ${missing.length} z ${wanted.length} ${cfg.label} (albo są usunięte): ${missing.join(', ')}. Nic nie zmieniono.`);
+  }
+
+  const plan = wanted.map((w) => {
+    const row = byId.get(w.id);
+    return {
+      [cfg.idKey]: w.id,
+      ...cfg.describe(row),
+      from: row.status,
+      to: w.status,
+      changed: row.status !== w.status,
+      resourceName: row.resourceName,
+    };
+  });
+  // A lookup that forgets to return resource_name would otherwise send
+  // `resource_name: undefined` to the API — fail here instead, while nothing is written.
+  const noResource = plan.filter((p) => !p.resourceName).map((p) => p[cfg.idKey]);
+  if (noResource.length) {
+    throw new Error(`🛑 Brak resource_name dla ${noResource.length} pozycji (${noResource.join(', ')}) — błąd odczytu w ${cfg.entity}. Nic nie zmieniono.`);
+  }
+
+  const toChange = plan.filter((p) => p.changed);
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Zmiana statusu ${cfg.label}: ${toChange.length} do zmiany, ${plan.length - toChange.length} już w docelowym statusie...`);
+
+  if (dryRun) {
+    return { success: true, dryRun: true, entity: cfg.entity, toChange: toChange.length, unchanged: plan.length - toChange.length, plan };
+  }
+  if (toChange.length === 0) {
+    return { success: true, dryRun: false, entity: cfg.entity, changed: 0, unchanged: plan.length, plan };
+  }
+
+  try {
+    const customer = getCustomer(cleanCustomerId, loginCustomerId);
+    const mutations = toChange.map((p) => ({
+      entity: cfg.entity,
+      operation: 'update',
+      resource: { resource_name: p.resourceName, status: p.to },
+    }));
+    const responses = [];
+    for (const part of chunk(mutations)) responses.push(await customer.mutateResources(part));
+    return {
+      success: true,
+      dryRun: false,
+      entity: cfg.entity,
+      changed: toChange.length,
+      unchanged: plan.length - toChange.length,
+      chunks: responses.length,
+      plan,
+      resourceNames: mutatedResourceNames(responses),
+    };
+  } catch (error) {
+    throw new Error(`Nie udało się zmienić statusu ${cfg.label}: ${unpackError(error)}`);
+  }
+}
+
+/**
+ * Enable / pause ADS by bare ad ID (the id shown in the Google Ads UI).
+ *
+ * Pausing is the reversible retirement for an ad — the ad and its history stay,
+ * it just stops serving. This is also the only way to free a slot when an ad
+ * group has hit Google's cap of 3 ENABLED responsive search ads: pause an old
+ * creative, then `add-ads` the new one.
+ *
+ * @param {string} customerId
+ * @param {Array<{adId: string|number, status: 'ENABLED'|'PAUSED'}>} items
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>} Summary with a per-ad from→to plan
+ */
+export async function updateAdStatus(customerId, items, dryRun = false, loginCustomerId) {
+  return applyStatusChange({
+    label: 'reklam',
+    entity: 'AdGroupAd',
+    idKey: 'adId',
+    lookup: (ids, opts) => getAdGroupAdsByAdIds(customerId, ids, opts),
+    describe: (row) => ({ adGroupId: row.adGroupId, adGroupName: row.adGroupName }),
+  }, customerId, items, dryRun, loginCustomerId);
+}
+
+/**
+ * Enable / pause AD GROUPS by id. Complements `create-ad-groups`, which is
+ * idempotent and therefore cannot revive a group that already exists in a paused
+ * state — this is how you bring one back.
+ *
+ * @param {string} customerId
+ * @param {Array<{adGroupId: string|number, status: 'ENABLED'|'PAUSED'}>} items
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>} Summary with a per-group from→to plan
+ */
+export async function updateAdGroupStatus(customerId, items, dryRun = false, loginCustomerId) {
+  return applyStatusChange({
+    label: 'grup reklam',
+    entity: 'AdGroup',
+    idKey: 'adGroupId',
+    lookup: (ids, opts) => getAdGroupsByIds(customerId, ids, opts),
+    describe: (row) => ({ name: row.name, campaignId: row.campaignId, campaignName: row.campaignName }),
+  }, customerId, items, dryRun, loginCustomerId);
+}
+
+/**
+ * Enable / pause KEYWORDS by their `adGroupId~criterionId` key.
+ *
+ * The reversible way to retire a keyword — the criterion and its history stay, it
+ * just stops matching. Typical use: a broad keyword whose search terms show the
+ * spend going to queries you never wanted; pause it and keep the exact variants
+ * that actually convert.
+ *
+ * Caveat worth knowing before you use it: pausing ONE variant of a same-meaning
+ * pair (e.g. broad `netia internet` while broad `internet netia` stays enabled)
+ * usually just moves the traffic to its sibling rather than stopping it.
+ *
+ * @param {string} customerId
+ * @param {Array<{criterion: string, status: 'ENABLED'|'PAUSED'}>} items
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>} Summary with a per-keyword from→to plan
+ */
+export async function updateKeywordStatus(customerId, items, dryRun = false, loginCustomerId) {
+  return applyStatusChange({
+    label: 'słów kluczowych',
+    entity: 'AdGroupCriterion',
+    idKey: 'criterion',
+    normalizeId: (s) => s.replace(/[^0-9~]/g, ''),
+    lookup: (ids, opts) => getKeywordsByCriteria(customerId, ids, opts),
+    describe: (row) => ({ text: row.text, matchType: row.matchType, adGroupName: row.adGroupName }),
+  }, customerId, items, dryRun, loginCustomerId);
 }
 
 /**

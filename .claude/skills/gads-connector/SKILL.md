@@ -147,6 +147,12 @@ Every mutation supports `--dry-run`, which simulates the change and returns what
 # Pause / enable a campaign
 node scripts/cli.js --action=update-status --customer=1234567890 --campaign=987654321 --status=PAUSED --dry-run
 
+# Pause / enable ADS by bare ad ID (the id shown in the UI), single, list or CSV
+node scripts/cli.js --action=update-ad-status --customer=1234567890 --ad=670502653180,670502653181 --status=PAUSED --dry-run
+
+# Pause / enable AD GROUPS by id
+node scripts/cli.js --action=update-ad-group-status --customer=1234567890 --ad-group=112447007410 --status=ENABLED --dry-run
+
 # Change a daily budget (standard currency, not micros)
 node scripts/cli.js --action=update-budget --customer=1234567890 --budget-id=111222333 --amount=150.00 --dry-run
 
@@ -204,6 +210,40 @@ against Google's limits (`link_text` 25, descriptions 35, descriptions as a pair
 `pause-sitelinks` retires links (status `PAUSED`, kept not removed) — the data-
 preserving way to swap a whole set: `add-sitelinks` the new one, `pause-sitelinks`
 the old resource names.
+
+**Trial campaigns block `update-status` / `update-budget`.** Google rejects status,
+budget and date changes on DRAFT and EXPERIMENT campaigns
+(`CANNOT_MODIFY_FOR_TRIAL_CAMPAIGN`). `update-status` reads `campaign.experiment_type`
+up front and refuses in the **dry-run**, so you find out before the commit rather
+than after. Such a campaign can only be retired in the UI (Kampanie → Eksperymenty);
+an old finished experiment can sit `ENABLED` with zero traffic for years.
+
+**Status changes below campaign level (`update-ad-status`, `update-ad-group-status`,
+`update-keyword-status`).**
+`update-status` only moves campaigns; these two move ads and ad groups. Both take a
+single id, a comma-separated list, or `--input=map.csv` (`ad_id,status` /
+`ad_group_id,status`) — a per-row `status` column overrides `--status`. Both read the
+current state first, so `--dry-run` returns a real `from → to` diff with a `changed`
+flag, and rows already in the target status are reported as `unchanged` instead of
+being rewritten. All-or-nothing: an id that can't be resolved (typo, or REMOVED)
+refuses the whole batch. `REMOVED` is rejected by the no-delete policy, same as
+everywhere else.
+
+`update-keyword-status` takes `adGroupId~criterionId` (the same composite key as
+`update-keyword-url`) — a bare criterion id is refused, because criterion ids are
+only unique within an ad group. Note that pausing one variant of a same-meaning pair
+(broad `netia internet` while broad `internet netia` stays on) usually just moves the
+traffic to the sibling; check for reversed-word-order twins before concluding you
+stopped the spend.
+
+Three jobs these exist for:
+- **Freeing an RSA slot.** Google caps an ad group at **3 ENABLED responsive search
+  ads**; a 4th makes `add-ads` fail with `ENABLED_RESPONSIVE_SEARCH_CREATIVES_PER_AD_GROUP`,
+  and since the batch is atomic it takes every other ad in the same file down with it.
+  Pause an old creative first, then `add-ads`.
+- **Reviving a paused ad group.** `create-ad-groups` is idempotent and *skips* a group
+  whose name already exists (matching is case-insensitive — `Orange` finds `ORANGE`),
+  so it can never bring one back. `update-ad-group-status` is how you do that.
 
 **Building out a campaign (`create-ad-groups`, `add-keywords`).** The pair that
 turns a keyword research file into a live structure. `create-ad-groups` takes
