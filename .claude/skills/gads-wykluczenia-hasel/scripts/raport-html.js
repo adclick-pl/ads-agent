@@ -197,7 +197,14 @@ function candidateRow(c, isEcom, yearMap, pewny) {
            <td class="right">${fmt(cvr, 1)}%</td>`
         : `<td class="right">${t.conversions > 0 ? fmtMoney(t.cost / t.conversions) : '–'}</td>
            <td class="right">${fmt(cvr, 1)}%</td>`;
-    const uwagi = c.reasons.map(r => tag(r.text, poziomSygnalu(r, y) === 'pewny')).join('');
+    // Adnotacja o słowie kluczowym idzie PIERWSZA i zawsze na szaro: to ona tłumaczy,
+    // dlaczego hasło z pewnym sygnałem obok siedzi mimo wszystko w „do sprawdzenia".
+    const uwagi = [
+        ...(c.jestSlowemKluczowym
+            ? [tag('Hasło jest słowem kluczowym tej kampanii — wykluczenie je zabije; decyzja należy do człowieka', false)]
+            : []),
+        ...c.reasons.map(r => tag(r.text, poziomSygnalu(r, y) === 'pewny'))
+    ].join('');
     return `<tr class="${pewny ? 'st-red' : 'st-yellow'}">
         <td style="width:16px;padding-right:0"><span class="dot" style="background:${pewny ? '#ef4444' : '#eab308'}"></span></td>
         <td class="term-col">${esc(t.term)}</td>

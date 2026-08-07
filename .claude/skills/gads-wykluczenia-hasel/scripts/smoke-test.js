@@ -17,6 +17,7 @@ import {
     poziomSygnalu, poziomHasla, isDefendedByYear, isKnownTopic, knownTopicsFromStatus,
     buildCampExclusionCandidates, withYearSignal, splitCandidatesByYear, progKlikniec,
     yearKey, campStatsFromRows, averagesFromCampStats,
+    isSameAsKeyword, keywordsByCampaign,
 } from './analiza.js';
 import { buildReport } from './raport-html.js';
 import { setCurrency, getDates } from './format.js';
@@ -214,6 +215,62 @@ console.log('\nKandydaci i podział na kubełki');
         split.bronione.some(c => c.term === 'sezonowe'));
     ok('bronione nie trafia jednocześnie do wykluczeń',
         !split.pewne.concat(split.doSprawdzenia).some(c => c.term === 'sezonowe'));
+}
+
+// ── Ochrona hasła kupowanego świadomie ────────────────────────
+console.log('\nOchrona hasła kupowanego świadomie');
+{
+    eq('słowa kluczowe grup scalają się do kampanii',
+        keywordsByCampaign({ 'Kampania|||Grupa A': ['skup aut'], 'Kampania|||Grupa B': ['skup samochodów katowice'] }),
+        { 'Kampania': ['skup aut', 'skup samochodów katowice'] });
+
+    ok('hasło jest słowem kluczowym mimo braku ogonków',
+        isSameAsKeyword('skup samochodow katowice', ['skup samochodów katowice']));
+    // Granica: tolerancja jest 3-gramowa, więc krótkie słowa w silnej odmianie już
+    // nie łapią progu („katowicach"/„katowice" = 0,56). Świadomie nie dokładamy tu
+    // drugiego pojęcia podobieństwa — hasła wyszukiwania i słowa kluczowe stoją
+    // zwykle w mianowniku, a skutkiem chybienia jest wyłącznie brak degradacji,
+    // czyli zachowanie sprzed tej reguły.
+    ok('silna odmiana krótkiego słowa wypada poza tolerancję (znane ograniczenie)',
+        !isSameAsKeyword('skup samochodow katowicach', ['skup samochodów katowice']));
+    ok('hasło dokładające słowo NIE jest słowem kluczowym',
+        !isSameAsKeyword('skup samochodów katowice tanio', ['skup samochodów katowice']));
+    // Kluczowe rozróżnienie: „objęte dopasowaniem do wyrażenia" to NIE to samo co
+    // „jest słowem kluczowym". Inaczej słowo kluczowe `skup samochodów` chroniłoby
+    // każdy wariant z miastem, także te spoza zasięgu, których chcemy móc wyciąć.
+    ok('hasło objęte tylko dopasowaniem do wyrażenia NIE jest słowem kluczowym',
+        !isSameAsKeyword('skup samochodów warszawa', ['skup samochodów']));
+    ok('brak słów kluczowych nikogo nie chroni',
+        !isSameAsKeyword('skup samochodów katowice', []));
+
+    // Realny przypadek (SkupSamochodow.net, 2026-08-07): 242 zł przez rok bez ani jednej
+    // konwersji przy rocznym koszcie konwersji 68 zł, czyli 3,5× — sygnał pewny i wcale
+    // nie błędny. A hasło to rdzeń oferty, kupowany świadomie: wykluczenie zabiłoby
+    // własne słowo kluczowe na największe miasto w zasięgu.
+    const rdzen = term({ term: 'skup samochodów katowice', cost: 121, clicks: 18 });
+    const yearMap = new Map([[yearKey('Kampania', 'skup samochodów katowice'),
+        { clicks: 40, cost: 242, conversions: 0, value: 0 }]]);
+    const zRokiem = withYearSignal([], [rdzen], 68, null, false, yearMap, 0);
+    eq('sygnał roczny uznaje hasło za pewne, gdy nie jest słowem kluczowym',
+        splitCandidatesByYear(zRokiem, null, false, yearMap, []).pewne.map(c => c.term),
+        ['skup samochodów katowice']);
+
+    const chronione = splitCandidatesByYear(zRokiem, null, false, yearMap, ['skup samochodów katowice']);
+    eq('to samo hasło jako słowo kluczowe schodzi do „do sprawdzenia"',
+        chronione.doSprawdzenia.map(c => c.term), ['skup samochodów katowice']);
+    ok('…i nie ma go wśród pewnych', chronione.pewne.length === 0);
+    ok('…i dostaje flagę, żeby raport wyjaśnił degradację',
+        chronione.doSprawdzenia[0].jestSlowemKluczowym === true);
+    ok('…ale powody zostają, bo sygnał się nie mylił',
+        chronione.doSprawdzenia[0].reasons.length > 0);
+
+    // Ochrona obejmuje wszystkie sygnały, także ocenę AI: hasło kupione świadomie,
+    // które ocena uznaje za spoza oferty, to sprzeczność w koncie — do rozstrzygnięcia
+    // przez człowieka, nie do cichego wycięcia.
+    const ocena = new Map([['skup samochodów katowice', { powod: 'spoza oferty', serp: true, pewnosc: 95 }]]);
+    const kandAI = buildCampExclusionCandidates([rdzen], {}, 68, ocena, false, 0);
+    ok('ocena AI z wysoką pewnością też nie wykluczy słowa kluczowego',
+        splitCandidatesByYear(kandAI, null, false, new Map(), ['skup samochodów katowice']).pewne.length === 0);
 }
 
 // ── Średnie kampanii ──────────────────────────────────────────

@@ -227,6 +227,38 @@ export function isKnownTopic(term, topics) {
 }
 
 // ============================================================
+// OCHRONA — hasło kupowane świadomie
+// ============================================================
+
+// Słowa kluczowe całej KAMPANII, nie grupy reklam: wykluczające dodaje się per
+// kampania, więc negatyw zabije słowo kluczowe niezależnie od tego, w której
+// grupie ono siedzi.
+export function keywordsByCampaign(adGroupKeywords) {
+    const byCamp = {};
+    Object.entries(adGroupKeywords || {}).forEach(([key, kws]) => {
+        const camp = String(key).split('|||')[0];
+        (byCamp[camp] ||= []).push(...kws);
+    });
+    return byCamp;
+}
+
+// Czy hasło JEST słowem kluczowym kampanii — te same znaczące słowa, z tolerancją
+// polskiej fleksji (ten sam próg podobieństwa co przy tematach ze statusu).
+//
+// Świadomie tożsamość, a NIE „objęte dopasowaniem": słowo kluczowe do wyrażenia
+// `skup samochodów` pokrywa też „skup samochodów warszawa", które chcemy móc
+// wyciąć. Równość liczby słów załatwia obie strony naraz — hasło ani nie dokłada
+// obcego członu, ani nie gubi kwalifikatora.
+export function isSameAsKeyword(term, keywords) {
+    const t = getWordTokens(term);
+    if (!t.length || !keywords || !keywords.length) return false;
+    return keywords.some(kw => {
+        const k = getWordTokens(kw);
+        return k.length === t.length && k.every(w => maSlowo(t, w)) && t.every(w => maSlowo(k, w));
+    });
+}
+
+// ============================================================
 // SYGNAŁY
 // ============================================================
 
@@ -354,8 +386,15 @@ export function poziomSygnalu(reason, y) {
 
 // Hasło jest „pewne", gdy ma CHOĆ JEDEN pewny sygnał. Nie promujemy haseł przez
 // sumowanie samych heurystyk — trzy niepewne sygnały to nadal niepewność.
-export const poziomHasla = (reasons, y) =>
-    reasons.some(r => poziomSygnalu(r, y) === 'pewny') ? 'pewny' : 'sprawdz';
+//
+// Hasło, które JEST słowem kluczowym kampanii, nigdy nie dostaje „pewnego" — schodzi
+// do „do sprawdzenia". Nie dlatego, że sygnał się myli: rok bez konwersji przy 3×
+// koszcie konwersji to realny sygnał także tutaj. Zmienia się koszt błędu. Wycięcie
+// hasła z długiego ogona kosztuje kilka złotych, a wykluczenie własnego słowa
+// kluczowego zabija je w koncie (negatyw ma pierwszeństwo) i wyłącza cały segment,
+// który operator kupił świadomie. Taką decyzję podejmuje człowiek.
+export const poziomHasla = (reasons, y, jestSlowemKluczowym = false) =>
+    (!jestSlowemKluczowym && reasons.some(r => poziomSygnalu(r, y) === 'pewny')) ? 'pewny' : 'sprawdz';
 
 // ============================================================
 // DANE ROCZNE — obrona i klucz mapy
@@ -423,14 +462,16 @@ export function withYearSignal(candidates, skan, avgCPA, avgROAS, isEcom, yearMa
 
 // Trzy kubełki. „Bronione" nie trafiają do raportu jako tabela — wypadają z listy
 // wykluczeń i zostaje po nich licznik w podsumowaniu.
-export function splitCandidatesByYear(candidates, avgYear, isEcom, yearMap) {
+export function splitCandidatesByYear(candidates, avgYear, isEcom, yearMap, campKeywords = []) {
     const pewne = [];
     const doSprawdzenia = [];
     const bronione = [];
     candidates.forEach(c => {
         const y = yearOf(yearMap, c.row);
         if (isDefendedByYear(y, avgYear, isEcom)) { bronione.push(c); return; }
-        (poziomHasla(c.reasons, y) === 'pewny' ? pewne : doSprawdzenia).push(c);
+        const jestSK = isSameAsKeyword(c.term, campKeywords);
+        const kandydat = jestSK ? { ...c, jestSlowemKluczowym: true } : c;
+        (poziomHasla(c.reasons, y, jestSK) === 'pewny' ? pewne : doSprawdzenia).push(kandydat);
     });
     return { pewne, doSprawdzenia, bronione };
 }

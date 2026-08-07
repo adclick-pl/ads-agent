@@ -37,6 +37,7 @@ import { runRawQuery, getSearchTerms, resolveAccount } from './connector.js';
 import { fmt, fmtMoney, setCurrency, getDates, formatDate } from './format.js';
 import {
     collectUncertainTerms, buildCampExclusionCandidates, withYearSignal, splitCandidatesByYear,
+    keywordsByCampaign,
     buildYearBenchmarks, campStatsFromRows, averagesFromCampStats,
     knownTopicsFromStatus, isKnownTopic, progKlikniec, yearKey, AI_PEWNOSC_PROG,
 } from './analiza.js';
@@ -706,6 +707,7 @@ async function main() {
 
     // Podział na kubełki zostaje PER KAMPANIA — tak jak liczone są benchmarki, i tak
     // samo dodaje się wykluczające w koncie (kampania po kampanii, nie hurtem).
+    const campKeywords = keywordsByCampaign(adGroupKeywords);
     const wgKosztu = (a, b) => b.row.cost - a.row.cost;
     const kampanie = camps.map(c => {
         // Miernik sygnału rocznego to średnia kampanii z TEGO SAMEGO ROKU (fallback do
@@ -716,7 +718,7 @@ async function main() {
         const rokMetric = isEcom ? rokROAS : rokCPA;
 
         const zRokiem = withYearSignal(c.kandydaci, c.rocznySkan, rokCPA, rokROAS, isEcom, yearMap, c.minKlikniec, benchLabel);
-        const split = splitCandidatesByYear(zRokiem, rokMetric, isEcom, yearMap);
+        const split = splitCandidatesByYear(zRokiem, rokMetric, isEcom, yearMap, campKeywords[c.camp] || []);
         return {
             camp: c.camp, typ: c.typ, minKlikniec: c.minKlikniec, totals: c.totals,
             pewne: [...split.pewne].sort(wgKosztu),

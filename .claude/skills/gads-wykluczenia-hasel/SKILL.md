@@ -228,7 +228,8 @@ konta).
 | Dopasowanie semantyczne do słów kluczowych grupy | zawsze **do sprawdzenia** | Próg podobieństwa nie zna specyfiki tematu |
 | Ocena AI (warstwa 3b) | **pewny** od `pewnosc ≥ 80`, niżej do sprawdzenia | Pewność deklarowana przy zapisie oceny |
 
-Hasło trafia do „pewnych", gdy ma **choć jeden pewny sygnał**. Trzy niepewne sygnały to
+Hasło trafia do „pewnych", gdy ma **choć jeden pewny sygnał** — chyba że jest słowem
+kluczowym kampanii (patrz „Ochrona przez słowo kluczowe" niżej). Trzy niepewne sygnały to
 nadal niepewność — sumowanie heurystyk niczego nie promuje.
 
 **Ochrona przez historię.** Hasło słabe w 30 dniach, ale trzymające cel w skali roku
@@ -238,6 +239,22 @@ wynik: pojedyncza stara konwersja nie chroni hasła. Miernikiem jest średnia ka
 **z tego samego roku** — porównywanie roku hasła do średniej z 30 dni to błąd
 systematyczny: po dobrym miesiącu poprzeczka rośnie i produkuje fałszywe „pewne",
 po słabym wszystko ląduje w „bronione".
+
+**Ochrona przez słowo kluczowe.** Hasło, które **jest słowem kluczowym tej kampanii**,
+nigdy nie trafia do „pewnych" — schodzi do „do sprawdzenia" z adnotacją wyjaśniającą
+degradację, a same sygnały zostają widoczne. Nie dlatego, że sygnał się myli: rok bez
+konwersji przy 3× koszcie konwersji to realny sygnał także tutaj. Zmienia się **koszt
+błędu** — wycięcie hasła z długiego ogona kosztuje kilka złotych, a wykluczenie własnego
+słowa kluczowego zabija je w koncie (negatyw ma pierwszeństwo) i wyłącza segment kupowany
+świadomie. Taką decyzję podejmuje człowiek.
+
+Porównanie idzie do słów kluczowych **całej kampanii**, nie grupy reklam — wykluczające
+dodaje się per kampania. Liczy się **tożsamość** haseł (te same znaczące słowa, z tolerancją
+polskiej fleksji), a nie objęcie dopasowaniem: słowo kluczowe do wyrażenia `skup samochodów`
+pokrywa też „skup samochodów warszawa", które chcemy móc wyciąć. Ograniczenie tolerancji:
+przy krótkich słowach w silnej odmianie („katowicach" wobec „katowice") podobieństwo
+3-gramowe nie łapie progu i degradacja nie zadziała — skutkiem jest wtedy zachowanie sprzed
+tej reguły, nic gorszego.
 
 **Reguł słownikowych nie ma.** Listy „praca / za darmo / jak…" pisane pod ogół zderzają
 się z branżą klienta i mylą się częściej, niż trafiają: u sklepu ogrodniczego
