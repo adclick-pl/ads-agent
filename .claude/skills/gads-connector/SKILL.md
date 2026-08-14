@@ -133,48 +133,55 @@ Dates: `--days=N` computes the range in the account's timezone — taken from
 the machine's local time. In a raw GAQL query you can also use Google's own macros
 (`segments.date DURING LAST_30_DAYS`), which Google evaluates in the account timezone.
 
-### Write actions (mutations) — ALWAYS dry-run first
+### Write actions (mutations) — simulation is the default
 
-Every mutation supports `--dry-run`, which simulates the change and returns what
-*would* happen without touching the account.
+**Writes are opt-in.** Every mutating action runs as a simulation and returns what
+*would* happen; it touches the account only when you pass **`--commit`**. Reads are
+unaffected. This is enforced in the CLI, not by convention: the read-only actions are
+a closed set and everything else — including any action added later — needs
+`--commit`. A forgotten flag can therefore only ever produce a dry-run. A simulated
+run ends with a `🔒 SYMULACJA` line, so a dry-run can't be mistaken for a done deal.
 
 **Mandatory protocol:**
-1. Run the mutation with `--dry-run` and **show the user the simulated result**.
+1. Run the mutation (no flag needed — it simulates) and **show the user the result**.
 2. Wait for explicit user confirmation.
-3. Re-run the exact same command **without** `--dry-run` to commit.
+3. Re-run the exact same command **with `--commit`** to write.
+
+`--dry-run` still works and forces a simulation even alongside `--commit`; it is now
+redundant on its own, kept so older commands keep behaving safely.
 
 ```bash
 # Pause / enable a campaign
-node scripts/cli.js --action=update-status --customer=1234567890 --campaign=987654321 --status=PAUSED --dry-run
+node scripts/cli.js --action=update-status --customer=1234567890 --campaign=987654321 --status=PAUSED
 
 # Pause / enable ADS by bare ad ID (the id shown in the UI), single, list or CSV
-node scripts/cli.js --action=update-ad-status --customer=1234567890 --ad=670502653180,670502653181 --status=PAUSED --dry-run
+node scripts/cli.js --action=update-ad-status --customer=1234567890 --ad=670502653180,670502653181 --status=PAUSED
 
 # Pause / enable AD GROUPS by id
-node scripts/cli.js --action=update-ad-group-status --customer=1234567890 --ad-group=112447007410 --status=ENABLED --dry-run
+node scripts/cli.js --action=update-ad-group-status --customer=1234567890 --ad-group=112447007410 --status=ENABLED
 
 # Change a daily budget (standard currency, not micros)
-node scripts/cli.js --action=update-budget --customer=1234567890 --budget-id=111222333 --amount=150.00 --dry-run
+node scripts/cli.js --action=update-budget --customer=1234567890 --budget-id=111222333 --amount=150.00
 
 # Add campaign negative keywords (comma-separated; default broad match)
-node scripts/cli.js --action=add-negatives --customer=1234567890 --campaign=987654321 --keywords="darmowy,tani,za darmo" --dry-run
+node scripts/cli.js --action=add-negatives --customer=1234567890 --campaign=987654321 --keywords="darmowy,tani,za darmo"
 
 # Add account-level placement exclusions (display/PMax spam domains)
-node scripts/cli.js --action=add-negative-placements --customer=1234567890 --domains="spam.example,clickfarm.example" --dry-run
+node scripts/cli.js --action=add-negative-placements --customer=1234567890 --domains="spam.example,clickfarm.example"
 
 # Change an ad's Final URL — single ad (works for RSA; legacy text ads are immutable)
-node scripts/cli.js --action=update-ad-url --customer=1234567890 --ad=670502653180 --url="https://example.pl/kategoria/" --domain=example.pl --dry-run
+node scripts/cli.js --action=update-ad-url --customer=1234567890 --ad=670502653180 --url="https://example.pl/kategoria/" --domain=example.pl
 
 # Change a keyword's Final URL override — single keyword (--criterion=adGroupId~criterionId)
-node scripts/cli.js --action=update-keyword-url --customer=1234567890 --criterion=112447007410~495997481489 --url="https://example.pl/kategoria/" --domain=example.pl --dry-run
+node scripts/cli.js --action=update-keyword-url --customer=1234567890 --criterion=112447007410~495997481489 --url="https://example.pl/kategoria/" --domain=example.pl
 
 # Bulk Final URL swap (ads or keywords) from a CSV map — columns: id,final_url[,label]
 #   id = bare ad ID (ads) or adGroupId~criterionId (keywords), or a full resource_name
-node scripts/cli.js --action=update-ad-url --customer=1234567890 --input=urls.csv --domain=example.pl --dry-run
+node scripts/cli.js --action=update-ad-url --customer=1234567890 --input=urls.csv --domain=example.pl
 
 # Repoint a sitelink's Final URL (data-preserving: clone asset + relink + pause old link)
 #   --sitelink is the FULL link resource name; batch via --input (col: link_resource_name,final_url)
-node scripts/cli.js --action=update-sitelink-url --customer=1234567890 --sitelink="customers/1234567890/campaignAssets/111~222~SITELINK" --url="https://example.pl/kategoria/" --domain=example.pl --dry-run
+node scripts/cli.js --action=update-sitelink-url --customer=1234567890 --sitelink="customers/1234567890/campaignAssets/111~222~SITELINK" --url="https://example.pl/kategoria/" --domain=example.pl
 ```
 
 **Final URL updates (`update-ad-url`, `update-keyword-url`).** Built for site
@@ -254,8 +261,8 @@ creates `SEARCH_STANDARD` ad groups in an existing campaign. `add-keywords` take
 note `add-negatives` is a different action for exclusions.
 
 ```bash
-node scripts/cli.js --action=create-ad-groups --customer=1234567890 --input=groups.csv --dry-run
-node scripts/cli.js --action=add-keywords    --customer=1234567890 --input=keywords.csv --dry-run
+node scripts/cli.js --action=create-ad-groups --customer=1234567890 --input=groups.csv
+node scripts/cli.js --action=add-keywords    --customer=1234567890 --input=keywords.csv
 ```
 
 Both are **idempotent**: they read what already exists (ad group names in the
@@ -294,8 +301,10 @@ re-run with `--force` — but only after confirming the new amount with the user
    is permanent and irreversible — instead pause it (`--status=PAUSED`), or, if a
    true deletion is really needed, do it by hand in the Google Ads UI. Pausing is
    reversible; deleting is not.
-2. **Safety first.** Never commit a mutation without first showing a `--dry-run`
-   result and getting explicit user confirmation.
+2. **Safety first.** Never pass `--commit` without first showing the simulated
+   result and getting explicit user confirmation. The CLI makes simulation the
+   default so a slip can't write, but `--commit` is yours to type deliberately —
+   never as a reflex, and never on the same turn the user first sees the plan.
 3. **Standard currency, never micros.** Budgets and costs are always in standard
    units (e.g. `150.00`). The connector converts to/from micros internally — do not
    ask the user for, or print, micro-amounts.

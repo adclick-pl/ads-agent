@@ -1084,6 +1084,81 @@ function normaliseStatus(raw) {
 }
 
 /**
+ * List asset links of ONE field type that already exist at account / campaign /
+ * ad-group level (ENABLED or PAUSED). The three levels live in three different
+ * tables with the same shape, so every `add-*` action needs the same triple
+ * query — this is that query, once.
+ *
+ * `assetSelect` names the asset sub-field(s) to read; `identityOf` turns a raw row
+ * into the value the caller compares for idempotency (e.g. callout text, snippet
+ * header). Returns `{level, campaignId, adGroupId, status, resourceName, identity}`.
+ *
+ * @param {string} customerId
+ * @param {string} fieldType   e.g. 'CALLOUT', 'STRUCTURED_SNIPPET', 'PRICE'
+ * @param {string} assetSelect e.g. 'asset.callout_asset.callout_text'
+ * @param {(row: object) => string} identityOf
+ * @param {{loginCustomerId?: string}} [opts]
+ */
+export async function getExistingAssetLinks(customerId, fieldType, assetSelect, identityOf, opts = {}) {
+  const clean = String(customerId).replace(/-/g, '');
+  // AssetLinkStatus comes back as an enum number; callers reason about ENABLED vs
+  // PAUSED, and getting 3/4 the wrong way round silently inverts that decision.
+  const STATUS = { 2: 'ENABLED', 3: 'REMOVED', 4: 'PAUSED' };
+  const levels = [
+    ['campaign', 'campaign_asset', 'campaign.id'],
+    ['ad_group', 'ad_group_asset', 'ad_group.id'],
+    ['customer', 'customer_asset', null],
+  ];
+  const out = [];
+  for (const [level, table, idField] of levels) {
+    const cols = [idField, `${table}.resource_name`, `${table}.status`, assetSelect].filter(Boolean).join(', ');
+    const rows = await runRawQuery(clean,
+      `SELECT ${cols} FROM ${table}
+       WHERE ${table}.field_type = '${fieldType}' AND ${table}.status IN ('ENABLED', 'PAUSED')`,
+      { loginCustomerId: opts.loginCustomerId });
+    for (const r of rows) {
+      out.push({
+        level,
+        campaignId: level === 'campaign' ? String(r['campaign.id']) : null,
+        adGroupId: level === 'ad_group' ? String(r['ad_group.id']) : null,
+        status: STATUS[r[`${table}.status`]] ?? String(r[`${table}.status`]),
+        resourceName: r[`${table}.resource_name`],
+        identity: identityOf(r),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Structured snippets already on the account, keyed by HEADER per parent — one
+ * "Typy" block per level is the sane unit, so a re-run of the same header is
+ * skipped rather than stacking a second block.
+ *
+ * @param {string} customerId
+ * @param {{loginCustomerId?: string}} [opts]
+ */
+export async function getExistingStructuredSnippets(customerId, opts = {}) {
+  return getExistingAssetLinks(customerId, 'STRUCTURED_SNIPPET',
+    'asset.structured_snippet_asset.header',
+    (r) => String(r['asset.structured_snippet_asset.header'] ?? '').trim().toLowerCase(), opts);
+}
+
+/**
+ * Price extensions already on the account, keyed by price TYPE per parent
+ * (PRODUCT_TIERS, SERVICES, …). Google serves one price extension per level, so
+ * adding a second of the same type is almost always a mistake.
+ *
+ * @param {string} customerId
+ * @param {{loginCustomerId?: string}} [opts]
+ */
+export async function getExistingPriceAssets(customerId, opts = {}) {
+  return getExistingAssetLinks(customerId, 'PRICE',
+    'asset.price_asset.type',
+    (r) => String(r['asset.price_asset.type'] ?? ''), opts);
+}
+
+/**
  * List CALLOUT assets already linked at account / campaign / ad-group level
  * (ENABLED or PAUSED), as `{level, campaignId, adGroupId, text, resourceName}`.
  * Lets `add-callouts` converge and gives `pause-callouts` the link resource

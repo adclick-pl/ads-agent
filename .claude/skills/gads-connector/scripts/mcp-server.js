@@ -136,7 +136,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             customerId: { type: 'string', description: '10-digit Google Ads account ID.' },
             campaignId: { type: 'string', description: 'Google Ads campaign numerical ID.' },
             status: { type: 'string', enum: ['ENABLED', 'PAUSED'], description: 'New campaign status.' },
-            dryRun: { type: 'boolean', description: 'If true, simulates the mutation (default: false).' }
+            commit: { type: 'boolean', description: 'Must be true to actually write to the account. Omitted or false = simulation only.' },
+            dryRun: { type: 'boolean', description: 'Force a simulation; wins over commit. Writes are opt-in, so this is the default.' }
           },
           required: ['customerId', 'campaignId', 'status']
         }
@@ -150,7 +151,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             customerId: { type: 'string', description: '10-digit Google Ads account ID.' },
             budgetId: { type: 'string', description: 'Google Ads budget numerical ID.' },
             amountStandard: { type: 'number', description: 'New budget amount in standard float currency.' },
-            dryRun: { type: 'boolean', description: 'If true, simulates the mutation (default: false).' },
+            commit: { type: 'boolean', description: 'Must be true to actually write to the account. Omitted or false = simulation only.' },
+            dryRun: { type: 'boolean', description: 'Force a simulation; wins over commit. Writes are opt-in, so this is the default.' },
             force: { type: 'boolean', description: 'Override the SafetyLimits block for a large budget change (default: false).' }
           },
           required: ['customerId', 'budgetId', 'amountStandard']
@@ -169,7 +171,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               items: { type: 'string' }, 
               description: 'Array of negative keyword text. Default broad match. For other matches pass objects or parse them in mutator.' 
             },
-            dryRun: { type: 'boolean', description: 'If true, simulates the mutation (default: false).' }
+            commit: { type: 'boolean', description: 'Must be true to actually write to the account. Omitted or false = simulation only.' },
+            dryRun: { type: 'boolean', description: 'Force a simulation; wins over commit. Writes are opt-in, so this is the default.' }
           },
           required: ['customerId', 'campaignId', 'keywords']
         }
@@ -186,7 +189,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               items: { type: 'string' }, 
               description: 'Array of domain strings to exclude (e.g. ["spam.net", "clickfarm.org"]).' 
             },
-            dryRun: { type: 'boolean', description: 'If true, simulates the mutation (default: false).' }
+            commit: { type: 'boolean', description: 'Must be true to actually write to the account. Omitted or false = simulation only.' },
+            dryRun: { type: 'boolean', description: 'Force a simulation; wins over commit. Writes are opt-in, so this is the default.' }
           },
           required: ['customerId', 'domains']
         }
@@ -194,6 +198,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     ]
   };
 });
+
+/**
+ * Writes are opt-in here too (same rule as the CLI's `--commit`): a mutation runs
+ * as a simulation unless the caller explicitly passes `commit: true`. An omitted
+ * argument can then only ever produce a dry-run, never a live change. `dryRun`
+ * still forces a simulation and wins over `commit`.
+ */
+function isDryRun(args) {
+  return !args?.commit || !!args?.dryRun;
+}
 
 // Handle Tool Executions
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -232,16 +246,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         data = await runRawQuery(args.customerId, args.query);
         break;
       case 'gads_update_campaign_status':
-        data = await updateCampaignStatus(args.customerId, args.campaignId, args.status, !!args.dryRun);
+        data = await updateCampaignStatus(args.customerId, args.campaignId, args.status, isDryRun(args));
         break;
       case 'gads_update_budget':
-        data = await updateCampaignBudget(args.customerId, args.budgetId, args.amountStandard, !!args.dryRun, undefined, { force: !!args.force });
+        data = await updateCampaignBudget(args.customerId, args.budgetId, args.amountStandard, isDryRun(args), undefined, { force: !!args.force });
         break;
       case 'gads_add_negative_keywords':
-        data = await addCampaignNegativeKeywords(args.customerId, args.campaignId, args.keywords, !!args.dryRun);
+        data = await addCampaignNegativeKeywords(args.customerId, args.campaignId, args.keywords, isDryRun(args));
         break;
       case 'gads_add_negative_placements':
-        data = await addAccountNegativePlacements(args.customerId, args.domains, !!args.dryRun);
+        data = await addAccountNegativePlacements(args.customerId, args.domains, isDryRun(args));
         break;
       default:
         throw new Error(`Tool not found: ${name}`);

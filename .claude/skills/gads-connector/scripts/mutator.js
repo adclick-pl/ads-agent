@@ -1,6 +1,6 @@
 import { getCustomer, unpackError } from './client.js';
-import { getKeywordsByCriteria, getCampaignBasics, getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts, getAdGroupAdsByAdIds, getAdGroupsByIds } from './queries.js';
-import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText } from './safety.js';
+import { getKeywordsByCriteria, getCampaignBasics, getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts, getExistingStructuredSnippets, getExistingPriceAssets, getAdGroupAdsByAdIds, getAdGroupsByIds } from './queries.js';
+import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkPriceOfferings } from './safety.js';
 
 /**
  * Entity metadata for Final URL updates. Maps our short entity key to the
@@ -1178,10 +1178,27 @@ export async function addKeywords(customerId, items, dryRun = false, loginCustom
 }
 
 /**
+ * Split an optional pin marker off a headline: `"Krówki z logo|H1"` → pinned to
+ * position 1. Without a marker the headline rotates freely, which is the default
+ * Google prefers. The marker is stripped before validation, so it never counts
+ * toward the 30-character limit.
+ */
+const HEADLINE_PIN_FIELDS = { H1: 'HEADLINE_1', H2: 'HEADLINE_2', H3: 'HEADLINE_3' };
+function splitHeadlinePin(raw) {
+  const s = String(raw ?? '').trim();
+  const m = s.match(/^(.*?)\s*\|\s*(H[123])$/i);
+  return m ? { text: m[1].trim(), pin: HEADLINE_PIN_FIELDS[m[2].toUpperCase()] } : { text: s, pin: null };
+}
+
+/**
  * Add Responsive Search Ads to existing ad groups.
  *
  * Ad groups are addressed by `adGroupId` or by `campaignId` + `adGroupName`, same
  * as `addKeywords` — so an ad file can be written before the groups exist.
+ *
+ * A headline may carry a pin marker (`"tekst|H1"`) to lock it to headline
+ * position 1, 2 or 3. Pins are ignored by the content signature below, so an
+ * ad differing only in pinning counts as already present.
  *
  * Idempotent by CONTENT, not by name: an ad is skipped when the target group
  * already holds an RSA with the same headline set, description set and Final URL.
@@ -1206,7 +1223,8 @@ export async function addAds(customerId, items, dryRun = false, loginCustomerId,
   const problems = [];
   const rows = items.map((it, i) => {
     const ref = it.label || it.adGroupName || `wiersz ${i + 1}`;
-    const headlines = (it.headlines || []).map((h) => String(h ?? '').trim()).filter(Boolean);
+    const headlineAssets = (it.headlines || []).map(splitHeadlinePin).filter((h) => h.text);
+    const headlines = headlineAssets.map((h) => h.text);
     const descriptions = (it.descriptions || []).map((d) => String(d ?? '').trim()).filter(Boolean);
     const rsa = checkRsaTexts({ headlines, descriptions, path1: it.path1, path2: it.path2 });
     if (!rsa.valid) rsa.reasons.forEach((r) => problems.push(`${ref}: ${r}`));
@@ -1220,7 +1238,7 @@ export async function addAds(customerId, items, dryRun = false, loginCustomerId,
     const adGroupName = String(it.adGroupName ?? '').trim();
     if (!adGroupId && !(campaignId && adGroupName)) problems.push(`${ref}: podaj ad_group_id albo campaign_id + ad_group_name.`);
 
-    return { adGroupId, campaignId, adGroupName, headlines, descriptions, finalUrl,
+    return { adGroupId, campaignId, adGroupName, headlines, headlineAssets, descriptions, finalUrl,
              path1: String(it.path1 ?? '').trim(), path2: String(it.path2 ?? '').trim(), label: ref };
   });
   if (problems.length) {
@@ -1283,7 +1301,7 @@ export async function addAds(customerId, items, dryRun = false, loginCustomerId,
     const customer = getCustomer(cleanCustomerId, loginCustomerId);
     const mutations = toCreate.map((r) => {
       const rsa = {
-        headlines: r.headlines.map((t) => ({ text: t })),
+        headlines: r.headlineAssets.map((h) => (h.pin ? { text: h.text, pinned_field: h.pin } : { text: h.text })),
         descriptions: r.descriptions.map((t) => ({ text: t })),
       };
       if (r.path1) rsa.path1 = r.path1;
@@ -1336,7 +1354,8 @@ export async function updateAdAssets(customerId, items, dryRun = false, loginCus
   const problems = [];
   const rows = items.map((it, i) => {
     const ref = it.label || it.adGroupName || `wiersz ${i + 1}`;
-    const headlines = (it.headlines || []).map((h) => String(h ?? '').trim()).filter(Boolean);
+    const headlineAssets = (it.headlines || []).map(splitHeadlinePin).filter((h) => h.text);
+    const headlines = headlineAssets.map((h) => h.text);
     const descriptions = (it.descriptions || []).map((d) => String(d ?? '').trim()).filter(Boolean);
     const rsa = checkRsaTexts({ headlines, descriptions, path1: it.path1, path2: it.path2 });
     if (!rsa.valid) rsa.reasons.forEach((r) => problems.push(`${ref}: ${r}`));
@@ -1347,7 +1366,7 @@ export async function updateAdAssets(customerId, items, dryRun = false, loginCus
     if (!adId && !adGroupId && !(campaignId && adGroupName)) {
       problems.push(`${ref}: podaj ad_id, ad_group_id albo campaign_id + ad_group_name.`);
     }
-    return { adId, adGroupId, campaignId, adGroupName, headlines, descriptions,
+    return { adId, adGroupId, campaignId, adGroupName, headlines, headlineAssets, descriptions,
              path1: String(it.path1 ?? '').trim(), path2: String(it.path2 ?? '').trim(), label: ref };
   });
   if (problems.length) {
@@ -1418,7 +1437,7 @@ export async function updateAdAssets(customerId, items, dryRun = false, loginCus
     const customer = getCustomer(cleanCustomerId, loginCustomerId);
     const mutations = toUpdate.map((r) => {
       const rsa = {
-        headlines: r.headlines.map((t) => ({ text: t })),
+        headlines: r.headlineAssets.map((h) => (h.pin ? { text: h.text, pinned_field: h.pin } : { text: h.text })),
         descriptions: r.descriptions.map((t) => ({ text: t })),
       };
       if (r.path1) rsa.path1 = r.path1;
@@ -1549,14 +1568,36 @@ export async function addCallouts(customerId, items, dryRun = false, loginCustom
  * @param {string} [loginCustomerId]
  */
 export async function pauseCallouts(customerId, linkResourceNames, dryRun = false, loginCustomerId) {
+  return pauseAssetLinks(customerId, linkResourceNames, dryRun, loginCustomerId, { entity: 'callout', label: 'objaśnień' });
+}
+
+/**
+ * Pause ANY asset link by its `*_asset` resource name — callouts, structured
+ * snippets, price extensions, images. Retiring an asset is the same operation
+ * whatever the asset is: flip the LINK to PAUSED and leave the asset itself
+ * alone. The link and its history stay, the extension just stops serving.
+ *
+ * This is also the answer to "delete this extension": the connector never
+ * removes, and a paused link does not serve, so the visible effect is identical
+ * and the change is reversible.
+ *
+ * @param {string} customerId
+ * @param {Array<string>} linkResourceNames
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @param {{entity?: string, label?: string}} [opts]
+ */
+export async function pauseAssetLinks(customerId, linkResourceNames, dryRun = false, loginCustomerId, opts = {}) {
   const cleanCustomerId = String(customerId).replace(/-/g, '');
+  const entity = opts.entity || 'asset';
+  const label = opts.label || 'rozszerzeń';
   const names = [...new Set((linkResourceNames || []).map((n) => String(n).trim()).filter(Boolean))];
-  if (names.length === 0) throw new Error('Brak objaśnień do wstrzymania (pusta lista).');
+  if (names.length === 0) throw new Error(`Brak ${label} do wstrzymania (pusta lista).`);
   const bad = names.filter((n) => !/\/(campaignAssets|adGroupAssets|customerAssets)\//.test(n));
   if (bad.length) throw new Error(`🛑 ${bad.length} pozycji nie jest linkiem zasobu (campaignAssets/adGroupAssets/customerAssets):\n${bad.map((b) => `  • ${b}`).join('\n')}`);
 
-  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Wstrzymanie ${names.length} objaśnień...`);
-  if (dryRun) return { success: true, dryRun: true, entity: 'callout', count: names.length, plan: names };
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Wstrzymanie ${names.length} ${label}...`);
+  if (dryRun) return { success: true, dryRun: true, entity, count: names.length, plan: names };
 
   try {
     const customer = getCustomer(cleanCustomerId, loginCustomerId);
@@ -1567,8 +1608,272 @@ export async function pauseCallouts(customerId, linkResourceNames, dryRun = fals
     }));
     const responses = [];
     for (const part of chunk(mutations)) responses.push(await customer.mutateResources(part));
-    return { success: true, dryRun: false, entity: 'callout', count: names.length, chunks: responses.length, resourceNames: mutatedResourceNames(responses) };
+    return { success: true, dryRun: false, entity, count: names.length, chunks: responses.length, resourceNames: mutatedResourceNames(responses) };
   } catch (error) {
-    throw new Error(`Nie udało się wstrzymać objaśnień: ${unpackError(error)}`);
+    throw new Error(`Nie udało się wstrzymać ${label}: ${unpackError(error)}`);
   }
 }
+
+/**
+ * Resolve the level / parent of asset-link rows and validate that combination.
+ * Every `add-*` extension action addresses its target the same way — account,
+ * campaign id, or ad group (by id, or by campaign + name) — so the checking and
+ * the name→id lookup live here once.
+ *
+ * Mutates `rows` in place (fills `adGroupId`) and pushes any complaint onto
+ * `problems`, matching the "collect everything, then refuse the whole batch"
+ * contract the other mutators use.
+ *
+ * @param {string} cleanCustomerId
+ * @param {Array<object>} rows
+ * @param {string[]} problems
+ * @param {string} [loginCustomerId]
+ */
+async function resolveAssetLinkTargets(cleanCustomerId, rows, problems, loginCustomerId) {
+  for (const r of rows) {
+    if (!['customer', 'campaign', 'ad_group'].includes(r.level)) problems.push(`${r.label}: level musi być "customer", "campaign" lub "ad_group".`);
+    if (r.level === 'campaign' && !r.campaignId) problems.push(`${r.label}: level=campaign wymaga campaign_id.`);
+    if (r.level === 'ad_group' && !r.adGroupId && !(r.campaignId && r.adGroupName)) problems.push(`${r.label}: level=ad_group wymaga ad_group_id albo campaign_id + ad_group_name.`);
+  }
+  if (problems.length) return;
+
+  const needGroup = rows.filter((r) => r.level === 'ad_group' && !r.adGroupId);
+  if (!needGroup.length) return;
+  const groups = await getAdGroupsByCampaign(cleanCustomerId, needGroup.map((r) => r.campaignId), { loginCustomerId });
+  const byKey = new Map(groups.map((g) => [`${g.campaignId}|${g.name.toLowerCase()}`, g.adGroupId]));
+  const unresolved = new Set();
+  for (const r of needGroup) {
+    const id = byKey.get(`${r.campaignId}|${r.adGroupName.toLowerCase()}`);
+    if (id) r.adGroupId = id; else unresolved.add(`kampania ${r.campaignId} → grupa "${r.adGroupName}"`);
+  }
+  if (unresolved.size) throw new Error(`🛑 Nie znaleziono ${unresolved.size} grup(y) reklam, nic nie zapisano:\n${[...unresolved].map((u) => `  • ${u}`).join('\n')}`);
+}
+
+/** Build the level-appropriate link mutation for a freshly created asset. */
+function assetLinkMutation(cleanCustomerId, row, assetRef, fieldType) {
+  const link = { asset: assetRef, field_type: fieldType, status: 'ENABLED' };
+  if (row.level === 'campaign') return { entity: 'CampaignAsset', operation: 'create', resource: { ...link, campaign: `customers/${cleanCustomerId}/campaigns/${row.campaignId}` } };
+  if (row.level === 'ad_group') return { entity: 'AdGroupAsset', operation: 'create', resource: { ...link, ad_group: `customers/${cleanCustomerId}/adGroups/${row.adGroupId}` } };
+  return { entity: 'CustomerAsset', operation: 'create', resource: link };
+}
+
+/**
+ * Add STRUCTURED SNIPPET assets ("fragmenty strukturalne") at account, campaign
+ * or ad-group level.
+ *
+ * Snippet assets are immutable like callouts and sitelinks — changing a value
+ * means creating a new asset and pausing the old link (`pause-assets`).
+ *
+ * Idempotent by HEADER per parent: a campaign that already has a "Typy" block
+ * (ENABLED or PAUSED) is skipped, so a re-run neither duplicates nor resurrects
+ * something deliberately paused. Change the values by pausing and re-adding.
+ *
+ * The header must be a header Google supports for the account language — Polish
+ * accounts use "Typy", "Usługi", "Marki", "Style", "Modele" and so on. A wrong
+ * header comes back as an API error, because the supported list is
+ * language-specific and changes.
+ *
+ * @param {string} customerId
+ * @param {Array<{level: 'customer'|'campaign'|'ad_group', campaignId?: string|number,
+ *                adGroupId?: string|number, adGroupName?: string,
+ *                header: string, values: string[], label?: string}>} items
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>}
+ */
+export async function addStructuredSnippets(customerId, items, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  if (!Array.isArray(items) || items.length === 0) throw new Error('Brak fragmentów do dodania (pusta lista).');
+
+  const problems = [];
+  const rows = items.map((it, i) => {
+    const header = String(it.header ?? '').trim();
+    const values = (it.values || []).map((v) => String(v ?? '').trim()).filter(Boolean);
+    const ref = it.label || header || `wiersz ${i + 1}`;
+    const check = checkStructuredSnippet({ header, values });
+    if (!check.valid) check.reasons.forEach((r) => problems.push(`${ref}: ${r}`));
+    return {
+      level: String(it.level ?? '').trim().toLowerCase(),
+      campaignId: String(it.campaignId ?? '').replace(/[^0-9]/g, ''),
+      adGroupId: String(it.adGroupId ?? '').replace(/[^0-9]/g, ''),
+      adGroupName: String(it.adGroupName ?? '').trim(),
+      header, values, label: ref,
+    };
+  });
+  await resolveAssetLinkTargets(cleanCustomerId, rows, problems, loginCustomerId);
+  if (problems.length) {
+    throw new Error(`🛑 Zablokowano — ${problems.length} problem(ów) walidacji, nic nie zapisano:\n${problems.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  const parentOf = (r) => r.level === 'campaign' ? r.campaignId : r.level === 'ad_group' ? r.adGroupId : 'acct';
+  const keyOf = (r) => `${r.level}:${parentOf(r)}|${r.header.toLowerCase()}`;
+  let existing = new Set();
+  try {
+    const current = await getExistingStructuredSnippets(cleanCustomerId, { loginCustomerId });
+    existing = new Set(current.map((c) => `${c.level}:${c.level === 'campaign' ? c.campaignId : c.level === 'ad_group' ? c.adGroupId : 'acct'}|${c.identity}`));
+  } catch { existing = new Set(); }
+
+  const toCreate = [];
+  const skipped = [];
+  const seenInFile = new Set();
+  for (const r of rows) {
+    const k = keyOf(r);
+    if (existing.has(k)) { skipped.push({ ...r, reason: 'fragment z tym nagłówkiem już jest na tym poziomie' }); continue; }
+    if (seenInFile.has(k)) { skipped.push({ ...r, reason: 'duplikat w pliku wejściowym' }); continue; }
+    seenInFile.add(k);
+    toCreate.push(r);
+  }
+
+  const plan = {
+    toCreate: toCreate.map((r) => ({ level: r.level, parent: parentOf(r), header: r.header, values: r.values })),
+    skipped: skipped.map((r) => ({ level: r.level, parent: parentOf(r), header: r.header, reason: r.reason })),
+  };
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Fragmenty strukturalne: do utworzenia ${toCreate.length}, pominięte ${skipped.length}...`);
+  if (dryRun) return { success: true, dryRun: true, entity: 'structured_snippet', toCreate: toCreate.length, skipped: skipped.length, plan };
+  if (toCreate.length === 0) return { success: true, dryRun: false, entity: 'structured_snippet', created: 0, skipped: skipped.length, plan, resourceNames: [] };
+
+  try {
+    const customer = getCustomer(cleanCustomerId, loginCustomerId);
+    const mutations = [];
+    toCreate.forEach((r, i) => {
+      const assetRef = `customers/${cleanCustomerId}/assets/${-(i + 1)}`;
+      mutations.push({ entity: 'Asset', operation: 'create', resource: { resource_name: assetRef, structured_snippet_asset: { header: r.header, values: r.values } } });
+      mutations.push(assetLinkMutation(cleanCustomerId, r, assetRef, 'STRUCTURED_SNIPPET'));
+    });
+    const responses = [];
+    for (const part of chunk(mutations)) responses.push(await customer.mutateResources(part));
+    return { success: true, dryRun: false, entity: 'structured_snippet', created: toCreate.length, skipped: skipped.length, chunks: responses.length, plan, resourceNames: mutatedResourceNames(responses) };
+  } catch (error) {
+    throw new Error(`Nie udało się dodać fragmentów strukturalnych: ${unpackError(error)}`);
+  }
+}
+
+/**
+ * Add PRICE assets ("rozszerzenia cenowe") at account, campaign or ad-group level.
+ *
+ * One item = one price extension carrying 3–8 offerings. Prices are given in
+ * STANDARD currency (71.00), never micros — the conversion happens here, same
+ * contract as `update-budget`.
+ *
+ * Idempotent by price TYPE per parent (PRODUCT_TIERS, SERVICES, …): Google serves
+ * one price extension per level, so a second of the same type is almost always a
+ * mistake and is skipped.
+ *
+ * Every offering's Final URL is validated, and with `opts.domain` must stay on
+ * that host — one bad URL refuses the whole batch, so nothing half-applies.
+ *
+ * @param {string} customerId
+ * @param {Array<{level: 'customer'|'campaign'|'ad_group', campaignId?: string|number,
+ *                adGroupId?: string|number, adGroupName?: string,
+ *                priceType?: string, priceQualifier?: string, language?: string, unit?: string,
+ *                currency?: string, label?: string,
+ *                offerings: Array<{header: string, description: string, price: number|string,
+ *                                  finalUrl: string, unit?: string, currency?: string}>}>} items
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @param {{domain?: string}} [opts]
+ * @returns {Promise<object>}
+ */
+export async function addPriceAssets(customerId, items, dryRun = false, loginCustomerId, opts = {}) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  if (!Array.isArray(items) || items.length === 0) throw new Error('Brak cenników do dodania (pusta lista).');
+
+  const problems = [];
+  const rows = items.map((it, i) => {
+    const ref = it.label || `cennik ${i + 1}`;
+    const offerings = (it.offerings || []).map((o) => ({
+      header: String(o.header ?? '').trim(),
+      description: String(o.description ?? '').trim(),
+      price: Number(String(o.price ?? '').replace(',', '.')),
+      currency: String(o.currency || it.currency || 'PLN').trim().toUpperCase(),
+      unit: String(o.unit || it.unit || '').trim().toUpperCase(),
+      finalUrl: String(o.finalUrl ?? '').trim(),
+    }));
+    const check = checkPriceOfferings(offerings);
+    if (!check.valid) check.reasons.forEach((r) => problems.push(`${ref}: ${r}`));
+    for (const o of offerings) {
+      const urlCheck = validateFinalUrl(o.finalUrl, { domain: opts.domain });
+      if (!urlCheck.valid) problems.push(`${ref} / "${o.header}": ${urlCheck.reason}`);
+    }
+    return {
+      level: String(it.level ?? '').trim().toLowerCase(),
+      campaignId: String(it.campaignId ?? '').replace(/[^0-9]/g, ''),
+      adGroupId: String(it.adGroupId ?? '').replace(/[^0-9]/g, ''),
+      adGroupName: String(it.adGroupName ?? '').trim(),
+      priceType: String(it.priceType || 'PRODUCT_TIERS').trim().toUpperCase(),
+      priceQualifier: String(it.priceQualifier || 'FROM').trim().toUpperCase(),
+      language: String(it.language || 'pl').trim(),
+      offerings, label: ref,
+    };
+  });
+  await resolveAssetLinkTargets(cleanCustomerId, rows, problems, loginCustomerId);
+  if (problems.length) {
+    throw new Error(`🛑 Zablokowano — ${problems.length} problem(ów) walidacji, nic nie zapisano:\n${problems.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  const parentOf = (r) => r.level === 'campaign' ? r.campaignId : r.level === 'ad_group' ? r.adGroupId : 'acct';
+  // Only an ENABLED price extension blocks a new one: Google serves one per level,
+  // so a live duplicate is a real conflict — but a PAUSED one is exactly what you
+  // retire before adding its replacement, and must not stand in the way.
+  let existing = new Set();
+  try {
+    const current = await getExistingPriceAssets(cleanCustomerId, { loginCustomerId });
+    existing = new Set(current
+      .filter((c) => c.status === 'ENABLED')
+      .map((c) => `${c.level}:${c.level === 'campaign' ? c.campaignId : c.level === 'ad_group' ? c.adGroupId : 'acct'}|${c.identity}`));
+  } catch { existing = new Set(); }
+
+  const toCreate = [];
+  const skipped = [];
+  for (const r of rows) {
+    // The API reports the type as an enum number; compare on both spellings so a
+    // pre-existing PRODUCT_TIERS block is recognised either way.
+    const keys = [`${r.level}:${parentOf(r)}|${r.priceType}`, `${r.level}:${parentOf(r)}|${PRICE_TYPE_ENUM[r.priceType] ?? ''}`];
+    if (keys.some((k) => existing.has(k))) { skipped.push({ ...r, reason: `aktywny cennik typu ${r.priceType} już jest na tym poziomie — najpierw wstrzymaj stary (pause-assets)` }); continue; }
+    toCreate.push(r);
+  }
+
+  const plan = {
+    toCreate: toCreate.map((r) => ({ level: r.level, parent: parentOf(r), priceType: r.priceType, priceQualifier: r.priceQualifier,
+      offerings: r.offerings.map((o) => `${o.header} — ${o.price.toFixed(2)} ${o.currency} → ${o.finalUrl}`) })),
+    skipped: skipped.map((r) => ({ level: r.level, parent: parentOf(r), priceType: r.priceType, reason: r.reason })),
+  };
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Cenniki: do utworzenia ${toCreate.length}, pominięte ${skipped.length}...`);
+  if (dryRun) return { success: true, dryRun: true, entity: 'price', toCreate: toCreate.length, skipped: skipped.length, plan };
+  if (toCreate.length === 0) return { success: true, dryRun: false, entity: 'price', created: 0, skipped: skipped.length, plan, resourceNames: [] };
+
+  try {
+    const customer = getCustomer(cleanCustomerId, loginCustomerId);
+    const mutations = [];
+    toCreate.forEach((r, i) => {
+      const assetRef = `customers/${cleanCustomerId}/assets/${-(i + 1)}`;
+      const priceAsset = {
+        type: r.priceType,
+        price_qualifier: r.priceQualifier,
+        language_code: r.language,
+        price_offerings: r.offerings.map((o) => {
+          const offering = {
+            header: o.header,
+            description: o.description,
+            price: { currency_code: o.currency, amount_micros: Math.round(o.price * 1_000_000) },
+            final_url: o.finalUrl,
+          };
+          if (o.unit) offering.unit = o.unit;
+          return offering;
+        }),
+      };
+      mutations.push({ entity: 'Asset', operation: 'create', resource: { resource_name: assetRef, price_asset: priceAsset } });
+      mutations.push(assetLinkMutation(cleanCustomerId, r, assetRef, 'PRICE'));
+    });
+    const responses = [];
+    for (const part of chunk(mutations)) responses.push(await customer.mutateResources(part));
+    return { success: true, dryRun: false, entity: 'price', created: toCreate.length, skipped: skipped.length, chunks: responses.length, plan, resourceNames: mutatedResourceNames(responses) };
+  } catch (error) {
+    throw new Error(`Nie udało się dodać cenników: ${unpackError(error)}`);
+  }
+}
+
+/** PriceExtensionType name → enum number, for comparing against what the API returns. */
+const PRICE_TYPE_ENUM = { BRANDS: 2, EVENTS: 3, LOCATIONS: 4, NEIGHBORHOODS: 5, PRODUCT_CATEGORIES: 6, PRODUCT_TIERS: 7, SERVICES: 8, SERVICE_CATEGORIES: 9, SERVICE_TIERS: 10 };

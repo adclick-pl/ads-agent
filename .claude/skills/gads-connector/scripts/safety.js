@@ -230,6 +230,74 @@ export function checkCalloutText(text) {
   return { valid: reasons.length === 0, reasons };
 }
 
+/** Google Ads limits for a structured snippet ("fragment strukturalny"). */
+export const SNIPPET_LIMITS = { headerChars: 25, valueChars: 25, minValues: 3, maxValues: 10 };
+
+/**
+ * Validate a structured snippet. Like callouts, snippet assets are immutable —
+ * fixing one means creating a new asset and pausing the old link.
+ *
+ * The header must be one of Google's supported headers FOR THE ACCOUNT LANGUAGE
+ * (Polish accounts use "Typy", "Usługi", "Marki", "Style", "Modele", …). We do not
+ * hardcode that list — it changes and is language-specific — so a wrong header
+ * surfaces as an API error rather than a local one.
+ *
+ * @param {{header: string, values: string[]}} snippet
+ * @returns {{valid: boolean, reasons: string[]}}
+ */
+export function checkStructuredSnippet({ header, values }) {
+  const len = (s) => [...String(s ?? '')].length;
+  const reasons = [];
+  const h = String(header ?? '').trim();
+  const vs = (values || []).map((v) => String(v ?? '').trim()).filter(Boolean);
+
+  if (!h) reasons.push('Pusty nagłówek fragmentu.');
+  if (len(h) > SNIPPET_LIMITS.headerChars) reasons.push(`Nagłówek ma ${len(h)} znaków (limit ${SNIPPET_LIMITS.headerChars}).`);
+  if (vs.length < SNIPPET_LIMITS.minValues) reasons.push(`Za mało wartości: ${vs.length} (min ${SNIPPET_LIMITS.minValues}).`);
+  if (vs.length > SNIPPET_LIMITS.maxValues) reasons.push(`Za dużo wartości: ${vs.length} (max ${SNIPPET_LIMITS.maxValues}).`);
+  for (const v of vs) if (len(v) > SNIPPET_LIMITS.valueChars) reasons.push(`Wartość ${len(v)} zn. (limit ${SNIPPET_LIMITS.valueChars}): "${v}"`);
+  const dup = vs.length - new Set(vs.map((v) => v.toLowerCase())).size;
+  if (dup) reasons.push(`${dup} zduplikowana(ych) wartość(ci) w jednym fragmencie.`);
+
+  return { valid: reasons.length === 0, reasons };
+}
+
+/** Google Ads limits for a price extension ("rozszerzenie cenowe"). */
+export const PRICE_LIMITS = { headerChars: 25, descriptionChars: 25, minOfferings: 3, maxOfferings: 8 };
+
+/**
+ * Validate the offerings of one price extension. Google rejects the whole asset
+ * if a single offering is malformed, so everything is checked before the write.
+ * Prices are in standard currency here — the mutator converts to micros.
+ *
+ * @param {Array<{header: string, description: string, price: number|string, finalUrl: string}>} offerings
+ * @returns {{valid: boolean, reasons: string[]}}
+ */
+export function checkPriceOfferings(offerings) {
+  const len = (s) => [...String(s ?? '')].length;
+  const reasons = [];
+  const list = offerings || [];
+
+  if (list.length < PRICE_LIMITS.minOfferings) reasons.push(`Za mało pozycji cennika: ${list.length} (min ${PRICE_LIMITS.minOfferings}).`);
+  if (list.length > PRICE_LIMITS.maxOfferings) reasons.push(`Za dużo pozycji cennika: ${list.length} (max ${PRICE_LIMITS.maxOfferings}).`);
+
+  for (const o of list) {
+    const h = String(o.header ?? '').trim();
+    const d = String(o.description ?? '').trim();
+    if (!h) reasons.push('Pozycja cennika bez nagłówka.');
+    if (len(h) > PRICE_LIMITS.headerChars) reasons.push(`Nagłówek pozycji ${len(h)} zn. (limit ${PRICE_LIMITS.headerChars}): "${h}"`);
+    if (!d) reasons.push(`Pozycja "${h}" bez opisu.`);
+    if (len(d) > PRICE_LIMITS.descriptionChars) reasons.push(`Opis pozycji ${len(d)} zn. (limit ${PRICE_LIMITS.descriptionChars}): "${d}"`);
+    const p = Number(String(o.price ?? '').replace(',', '.'));
+    if (!Number.isFinite(p) || p <= 0) reasons.push(`Pozycja "${h}": cena musi być liczbą dodatnią w walucie standardowej (dostałem "${o.price}").`);
+  }
+
+  const dup = list.length - new Set(list.map((o) => String(o.header ?? '').trim().toLowerCase())).size;
+  if (dup) reasons.push(`${dup} zduplikowany(ch) nagłówek(ów) pozycji — Google wymaga unikalnych.`);
+
+  return { valid: reasons.length === 0, reasons };
+}
+
 /** Google Ads hard limit for an ad group name. */
 export const AD_GROUP_NAME_LIMIT = 255;
 

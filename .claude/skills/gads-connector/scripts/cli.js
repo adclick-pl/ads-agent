@@ -36,6 +36,9 @@ import {
   updateAdAssets,
   addCallouts,
   pauseCallouts,
+  pauseAssetLinks,
+  addStructuredSnippets,
+  addPriceAssets,
 } from './mutator.js';
 import { resolveAccount, loadAccounts } from './accounts.js';
 import { rowsToCsv, parseCsv } from './csv.js';
@@ -219,7 +222,7 @@ Akcje odczytu:
                           rozwiązywane dla poziomu grupy i kampanii).
   raw-query               Własne zapytanie GAQL (wymaga --query).
 
-Akcje zapisu (zawsze najpierw --dry-run!):
+Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
   update-status           Zmiana statusu kampanii (--campaign, --status).
   update-ad-status        Wstrzymanie/wznowienie REKLAM po ID reklamy (tym z UI).
                           Pojedynczo/lista: --ad=<ID[,ID]> --status=<ENABLED|PAUSED>;
@@ -265,10 +268,27 @@ Akcje zapisu (zawsze najpierw --dry-run!):
   pause-callouts          Wstrzymuje objaśnienia — dane zostają. Callout jest niezmienialny,
                           więc "edycja" = add-callouts nowego + pause-callouts starego.
                           --input=mapa.csv (kolumna link_resource_name) lub --links="rn1,rn2".
+  pause-assets            To samo dla DOWOLNEGO rozszerzenia (fragment, cennik, obraz,
+                          sitelink, callout) — wstrzymuje link, zasób zostaje.
+                          --input=mapa.csv (kolumna link_resource_name) lub --links="rn1,rn2".
+  add-structured-snippets Dodaje fragmenty strukturalne na poziomie konta/kampanii/grupy.
+                          Idempotentne po NAGŁÓWKU na danym poziomie. --input=mapa.csv
+                          (kolumny: level,campaign_id|ad_group_id|ad_group_name,header,
+                          value1..value10 albo values="a|b|c"). Nagłówek musi być z listy
+                          Google dla języka konta (PL: Typy, Usługi, Marki, Style, Modele...).
+  add-price-assets        Dodaje rozszerzenia cenowe. Jeden wiersz CSV = jedna pozycja
+                          cennika; wiersze z tym samym "group" tworzą jedno rozszerzenie
+                          (3-8 pozycji). Ceny w walucie standardowej, NIE w mikro.
+                          Idempotentne po TYPIE cennika na danym poziomie. --input=mapa.csv
+                          (kolumny: group,level,campaign_id,price_type,price_qualifier,
+                          language,unit,currency,header,description,price,final_url).
   add-ads                 Dodaje reklamy RSA do grup reklam. Idempotentne po TREŚCI: pomija
                           reklamę o tym samym zestawie nagłówków/tekstów i Final URL. Tylko
                           --input=mapa.csv (kolumny: [ad_group_id|campaign_id+ad_group_name],
                           final_url,headline1..15,description1..4[,path1,path2]).
+                          Przypięcie nagłówka: dopisz "|H1", "|H2" albo "|H3" na końcu
+                          komórki (np. "Krówki z logo|H1"). Marker nie liczy się do
+                          limitu 30 znaków. Bez markera nagłówek rotuje swobodnie.
   update-ad-assets        Podmienia nagłówki/teksty ISTNIEJĄCEJ reklamy RSA (to samo ID reklamy,
                           nic nie jest wstrzymywane). Grupa musi mieć dokładnie jedną RSA albo
                           podaj ad_id. --input=mapa.csv (kolumny jak w add-ads, bez final_url).
@@ -292,7 +312,11 @@ Opcje:
   --max-inline-rows=<n>       Próg dla --auto (domyślnie ${DEFAULT_INLINE_THRESHOLD}).
   --output=<plik.csv>         WYMUŚ zapis do CSV (omija context window) — zwraca ścieżkę + liczbę wierszy.
   --json                      WYMUŚ czysty JSON na stdout (niezależnie od liczby wierszy).
-  --dry-run                   Symulacja mutacji (bez zmian na koncie).
+  --commit                    ZATWIERDŹ mutację (zapis na koncie). Bez tej flagi każda
+                              akcja zapisu jest tylko symulacją — zapomnienie flagi nigdy
+                              nie zmienia konta.
+  --dry-run                   Wymuś symulację (nadpisuje --commit). Domyślne dla akcji zapisu,
+                              więc zwykle zbędne — zostawione dla starych komend.
   --force                     Wymuś mutację mimo blokady SafetyLimits (skok budżetu > ${DEFAULT_MAX_BUDGET_CHANGE_PCT}%).
   --ad=<adId>                 ID reklamy dla update-ad-url (pojedynczo).
   --criterion=<agId~critId>   Zasób słowa kluczowego dla update-keyword-url (pojedynczo).
@@ -310,7 +334,8 @@ Przykłady:
   node scripts/cli.js --action=keyword-ideas --customer=1234567890 --url="https://example.com/sklep" --geo=2616 --language=1030 --auto
   node scripts/cli.js --action=get-campaigns --customer=1234567890 --days=30 --json
   node scripts/cli.js --action=raw-query --account=client-one --query="SELECT campaign.name, metrics.cost_micros FROM campaign WHERE segments.date DURING LAST_30_DAYS" --json
-  node scripts/cli.js --action=update-budget --customer=1234567890 --budget-id=111222333 --amount=150.00 --dry-run
+  node scripts/cli.js --action=update-budget --customer=1234567890 --budget-id=111222333 --amount=150.00
+  node scripts/cli.js --action=update-budget --customer=1234567890 --budget-id=111222333 --amount=150.00 --commit
 `);
 }
 
@@ -357,7 +382,19 @@ async function main() {
 
   const { customerId, loginCustomerId, timezone, name } = resolveTarget();
   const days = args.days ? Number(args.days) : 30;
-  const dryRun = !!args['dry-run'];
+
+  // Writes are opt-in, reads are free. The read-only actions are a closed set;
+  // ANYTHING else — including an action added later — counts as a mutation and
+  // runs as a simulation unless `--commit` is passed. That way a forgotten flag
+  // can only ever produce a dry-run, never a live change, and committing has to
+  // be a deliberate act. `--dry-run` stays valid (and wins over `--commit`).
+  const READ_ONLY_ACTIONS = new Set([
+    'test-connection', 'list-accessible', 'list-accounts', 'get-campaigns', 'get-keywords',
+    'get-search-terms', 'get-pmax-search-terms', 'keyword-ideas', 'get-budgets',
+    'get-change-history', 'raw-query',
+  ]);
+  const isMutation = !READ_ONLY_ACTIONS.has(action);
+  const dryRun = isMutation && (!args.commit || !!args['dry-run']);
   const jsonMode = !!args.json;
 
   // Resolve the timezone for --days date ranges. Prefer the value from
@@ -763,6 +800,81 @@ async function main() {
       console.log(JSON.stringify(result, null, 2));
     }
 
+    else if (action === 'pause-assets') {
+      let names = [];
+      if (args.input) {
+        const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+        names = rows.map((r) => r.link_resource_name || r.resource_name || r.id).filter(Boolean);
+      } else if (args.links) {
+        names = String(args.links).split(',').map((s) => s.trim()).filter(Boolean);
+      }
+      if (names.length === 0) throw new Error('pause-assets wymaga --input=mapa.csv (kolumna link_resource_name) albo --links="rn1,rn2"');
+      const result = await pauseAssetLinks(customerId, names, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'add-structured-snippets') {
+      if (!args.input) throw new Error('add-structured-snippets wymaga --input=mapa.csv (kolumny: level,campaign_id,ad_group_name|ad_group_id,header,value1..10)');
+      const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+      if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
+      const items = rows.map((r, i) => {
+        // Values arrive either as value1..value10 columns or one `values` cell
+        // separated by "|" — a CSV cell cannot hold commas without quoting, and
+        // the pipe form is what a person actually types by hand.
+        const numbered = Array.from({ length: 10 }, (_, k) => r[`value${k + 1}`]).filter((v) => v && v.trim());
+        const packed = String(r.values ?? '').split('|').map((s) => s.trim()).filter(Boolean);
+        return {
+          level: r.level,
+          campaignId: r.campaign_id || r.campaign || '',
+          adGroupId: r.ad_group_id || '',
+          adGroupName: r.ad_group_name || r.ad_group || '',
+          header: r.header,
+          values: numbered.length ? numbered : packed,
+          label: `${r.header} (wiersz ${i + 2})`,
+        };
+      });
+      const result = await addStructuredSnippets(customerId, items, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'add-price-assets') {
+      if (!args.input) throw new Error('add-price-assets wymaga --input=mapa.csv (kolumny: group,level,campaign_id,price_type,price_qualifier,language,unit,currency,header,description,price,final_url)');
+      const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+      if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
+      // One CSV row = one offering; rows sharing `group` become one price
+      // extension. Without a `group` column every row for the same parent+type
+      // is folded into a single extension, which is what a plain file means.
+      const byGroup = new Map();
+      rows.forEach((r, i) => {
+        const key = r.group || `${r.level}|${r.campaign_id || ''}|${r.ad_group_id || r.ad_group_name || ''}|${r.price_type || 'PRODUCT_TIERS'}`;
+        if (!byGroup.has(key)) {
+          byGroup.set(key, {
+            level: r.level,
+            campaignId: r.campaign_id || r.campaign || '',
+            adGroupId: r.ad_group_id || '',
+            adGroupName: r.ad_group_name || r.ad_group || '',
+            priceType: r.price_type || '',
+            priceQualifier: r.price_qualifier || '',
+            language: r.language || '',
+            unit: r.unit || '',
+            currency: r.currency || '',
+            offerings: [],
+            label: `cennik "${key}" (od wiersza ${i + 2})`,
+          });
+        }
+        byGroup.get(key).offerings.push({
+          header: r.header,
+          description: r.description,
+          price: r.price,
+          currency: r.currency || '',
+          unit: r.unit || '',
+          finalUrl: r.final_url || r.url,
+        });
+      });
+      const result = await addPriceAssets(customerId, [...byGroup.values()], dryRun, loginCustomerId, { domain: args.domain });
+      console.log(JSON.stringify(result, null, 2));
+    }
+
     else if (action === 'add-ads') {
       if (!args.input) throw new Error('add-ads wymaga --input=mapa.csv (kolumny: [ad_group_id|campaign_id+ad_group_name],final_url,headline1..15,description1..4)');
       const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
@@ -811,6 +923,12 @@ async function main() {
       console.error(`❌ Nieznana akcja: ${action}`);
       printHelp();
       process.exit(1);
+    }
+
+    // Make the simulation impossible to mistake for a completed change.
+    if (isMutation && dryRun) {
+      console.log(`\n🔒 SYMULACJA — nic nie zapisano na koncie ${name || customerId}.`);
+      console.log(`   Aby zatwierdzić, powtórz tę samą komendę z flagą --commit (bez --dry-run).`);
     }
   } catch (error) {
     if (jsonMode) {
