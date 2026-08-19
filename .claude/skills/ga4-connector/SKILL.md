@@ -198,6 +198,17 @@ Dodatkowo: wiersze obecne **tylko w okresie odniesienia** też trafiają do wyni
 podstrona, która po migracji zniknęła) — z `_Δ%` równym −100. Gdy czegoś nie było
 wcześniej, `_Δ%` jest puste, a nie mylące „+100%".
 
+**`--limit` działa po scaleniu, nie w zapytaniu.** Przy porównaniu oba okna pobierane są
+w całości i dopiero scalony zestaw jest przycinany; nagłówek pokazuje wtedy „wierszy: 4
+z 12". Gdyby limit szedł do API, GA4 przyciąłby **każde okno osobno**: wiersz z top-N
+okna bieżącego, który w oknie odniesienia jest N+1, nie zostałby pobrany i wyrenderował
+się jako `0` — nie do odróżnienia od prawdziwego zera. Dzięki temu **`_ref` równe 0
+zawsze znaczy „naprawdę zero", a nie „nie pobrałem tego wiersza"**.
+
+Kosztem jest pobranie pełnych okien. Przy wymiarach o dużej liczności (np.
+`landingPagePlusQueryString` na roku danych) porównanie będzie wolniejsze niż zwykły
+raport z `--limit` — to świadomy wybór na rzecz poprawności liczb.
+
 `--compare` **nie łączy się z wymiarem czasu** (`date`, `yearMonth`, …) — porównujemy
 dwa okresy, więc wiersze muszą być po czymś innym. Konektor odmówi z wyjaśnieniem.
 

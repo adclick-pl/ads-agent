@@ -282,11 +282,18 @@ async function reportMaybeCompare({ dimensions, metrics, order }) {
   assertNoTimeDimension(dimensions);
   const ref = parseCompareRange(spec);
 
+  // --limit NIE może iść do API przy porównaniu. GA4 przycina każde okno OSOBNO,
+  // a scalenie jest później: wiersz mieszczący się w top-N okna bieżącego, który
+  // w oknie odniesienia jest N+1, w ogóle nie zostałby pobrany i wyrenderowałby
+  // się jako 0 — nie do odróżnienia od prawdziwego zera. Oba okna pobieramy więc
+  // w całości, a limit stosujemy dopiero po scaleniu.
+  const { limit, ...pelneOkna } = base;
+
   const [a, b] = await Promise.all([
-    ga4.report(base),
+    ga4.report(pelneOkna),
     // Okno odniesienia zawsze jako jawny zakres — `days`/`include-today` z
     // głównego zapytania nie mogą go przesunąć.
-    ga4.report({ ...base, days: undefined, includeToday: false, from: ref.startDate, to: ref.endDate }),
+    ga4.report({ ...pelneOkna, days: undefined, includeToday: false, from: ref.startDate, to: ref.endDate }),
   ]);
 
   const baseDays = daysInRange(a.dateRange.startDate, a.dateRange.endDate);
@@ -295,9 +302,13 @@ async function reportMaybeCompare({ dimensions, metrics, order }) {
     baseRows: a.rows, refRows: b.rows, dimensions, metrics, baseDays, refDays,
   });
 
+  // Dopiero teraz przycinamy — na scalonym, kompletnym zestawie. rowCount zostaje
+  // pełny, więc nagłówek pokazuje „wierszy: 4 z 17" i widać, że coś odcięto.
+  const przyciete = limit ? rows.slice(0, limit) : rows;
+
   return {
     ...a,
-    rows,
+    rows: przyciete,
     rowCount: rows.length,
     compareRange: b.dateRange,
     days: { badany: baseDays, odniesienia: refDays },
