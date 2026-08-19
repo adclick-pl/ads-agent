@@ -16,6 +16,7 @@ Ads-Agent/                          ← package root (this folder)
 └── .claude/
     └── skills/
         ├── gads-connector/         ← Google Ads API connector (CLI + MCP)
+        ├── ga4-connector/          ← Google Analytics 4 connector (CLI, read-only)
         ├── gads-reklamy/           ← Google Ads RSA ad writer (Polish, no setup)
         └── gads-wykluczenia-hasel/ ← negative keyword finder (report + copy-paste lists)
         #   …more skills added here over time
@@ -61,6 +62,7 @@ Getting the Google Ads API credentials is covered step by step in
 |---|---|
 | `gads-connector` | Connect to and manage Google Ads accounts (read + mutations) via CLI and MCP. Needs the Google Ads API credentials from [`ONBOARDING.md`](ONBOARDING.md). |
 | `gads-reklamy` | Write effective Google Ads RSA ads in Polish via a guided 4-step process (data → company & competitor research → ad angles for approval → headlines/descriptions). Pure prompting — **no setup or credentials needed**, works the moment you open the folder in Claude Code. |
+| `ga4-connector` | Read **Google Analytics 4**: reports (channels, campaigns, landing pages, products, monthly cohorts, realtime) and property configuration (data streams, key events, custom dimensions, attribution settings, Google Ads links). Read-only — the OAuth scope is `analytics.readonly`, so it can never change a client's property. **No npm dependencies**; reuses the Google Ads OAuth client, so setup is two APIs to enable plus one consent. Supports several Google logins side by side via token profiles. |
 | `gads-wykluczenia-hasel` | Find **negative keywords**: an HTML report, per campaign, splitting wasteful search terms into "certain — exclude" and "check by hand", each with 30-day and 12-month numbers plus a plain-language reason, and copy-paste-ready lists. Combines four signals (30-day spend, a full year without conversions, keyword-match distance, and an AI relevance verdict that knows your offer). Read-only — it never changes the account. Needs `gads-connector` configured. |
 
 *(More skills will be added to `.claude/skills/` over time. What each release

@@ -9,7 +9,11 @@
     "connector:smoke": "node .claude/skills/gads-connector/scripts/smoke-test.js",
     "connector:auth": "node .claude/skills/gads-connector/scripts/auth.js",
     "connector:test": "node .claude/skills/gads-connector/scripts/cli.js --action=test-connection",
-    "connector:mcp": "node .claude/skills/gads-connector/scripts/mcp-server.js"
+    "connector:mcp": "node .claude/skills/gads-connector/scripts/mcp-server.js",
+    "ga4:smoke": "node .claude/skills/ga4-connector/scripts/smoke-test.js",
+    "ga4:auth": "node .claude/skills/ga4-connector/scripts/auth.js --step=url",
+    "ga4:auth-listen": "node .claude/skills/ga4-connector/scripts/auth.js --step=listen",
+    "ga4:test": "node .claude/skills/ga4-connector/scripts/cli.js --action=test-connection"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

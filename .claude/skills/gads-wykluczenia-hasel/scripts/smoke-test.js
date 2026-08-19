@@ -243,7 +243,7 @@ console.log('\nOchrona hasła kupowanego świadomie');
     ok('brak słów kluczowych nikogo nie chroni',
         !isSameAsKeyword('skup samochodów katowice', []));
 
-    // Realny przypadek (SkupSamochodow.net, 2026-08-07): 242 zł przez rok bez ani jednej
+    // Realny przypadek z konta klienta (2026-08-07): 242 zł przez rok bez ani jednej
     // konwersji przy rocznym koszcie konwersji 68 zł, czyli 3,5× — sygnał pewny i wcale
     // nie błędny. A hasło to rdzeń oferty, kupowany świadomie: wykluczenie zabiłoby
     // własne słowo kluczowe na największe miasto w zasięgu.

@@ -230,8 +230,8 @@ check('resolveAccount(undefined) does not throw', () => {
 
 // 10. Final URL update helpers (validation, resource-name building, CSV parsing).
 check('validateFinalUrl accepts a well-formed https URL', () => {
-  const r = safety.validateFinalUrl('https://flexizone.pl/podloze-pod-plac-zabaw/');
-  assert(r.valid && r.host === 'flexizone.pl', JSON.stringify(r));
+  const r = safety.validateFinalUrl('https://zielonyogrod.example/podloze-pod-plac-zabaw/');
+  assert(r.valid && r.host === 'zielonyogrod.example', JSON.stringify(r));
 });
 check('validateFinalUrl rejects empty / non-http', () => {
   assert(!safety.validateFinalUrl('').valid);
@@ -239,8 +239,8 @@ check('validateFinalUrl rejects empty / non-http', () => {
   assert(!safety.validateFinalUrl('not a url').valid);
 });
 check('validateFinalUrl domain lock rejects off-domain (www ignored)', () => {
-  assert(safety.validateFinalUrl('https://www.flexizone.pl/x/', { domain: 'flexizone.pl' }).valid);
-  assert(!safety.validateFinalUrl('https://evil.example/x/', { domain: 'flexizone.pl' }).valid);
+  assert(safety.validateFinalUrl('https://www.zielonyogrod.example/x/', { domain: 'zielonyogrod.example' }).valid);
+  assert(!safety.validateFinalUrl('https://evil.example/x/', { domain: 'zielonyogrod.example' }).valid);
 });
 check('buildFinalUrlResourceName builds from bare ID and passes through full names', () => {
   assert(mutator.buildFinalUrlResourceName('123-456-7890', 'ad', '999') === 'customers/1234567890/ads/999');
@@ -255,14 +255,39 @@ check('buildFinalUrlResourceName rejects unknown entity / empty id', () => {
   assert(t1 && t2);
 });
 check('parseCsv reads header + quoted cells with commas', () => {
-  const rows = csv.parseCsv('id,final_url,label\n999,https://flexizone.pl/a/,"grupa, x"\n11~22,https://flexizone.pl/b/,kw\n');
+  const rows = csv.parseCsv('id,final_url,label\n999,https://zielonyogrod.example/a/,"grupa, x"\n11~22,https://zielonyogrod.example/b/,kw\n');
   assert(rows.length === 2, `got ${rows.length}`);
-  assert(rows[0].id === '999' && rows[0].final_url === 'https://flexizone.pl/a/' && rows[0].label === 'grupa, x', JSON.stringify(rows[0]));
+  assert(rows[0].id === '999' && rows[0].final_url === 'https://zielonyogrod.example/a/' && rows[0].label === 'grupa, x', JSON.stringify(rows[0]));
   assert(rows[1].id === '11~22', JSON.stringify(rows[1]));
 });
 check('parseCsv skips blank trailing lines and returns [] for empty input', () => {
   assert(csv.parseCsv('id,final_url\n\n').length === 0);
   assert(csv.parseCsv('').length === 0);
+});
+check('parseCsv preserves header case (camelCase survives)', () => {
+  const rows = csv.parseCsv('date,sessionDefaultChannelGroup,sessions\n20260620,Paid Search,117\n');
+  assert(Object.keys(rows[0]).includes('sessionDefaultChannelGroup'), JSON.stringify(Object.keys(rows[0])));
+  assert(rows[0].sessionDefaultChannelGroup === 'Paid Search');
+});
+check('parseCsv reads are case-insensitive in both directions', () => {
+  const rows = csv.parseCsv('ID,Final_URL\n999,https://x.pl/\n');
+  assert(rows[0].id === '999', 'lowercase access to uppercase header');
+  assert(rows[0].final_url === 'https://x.pl/');
+  assert(rows[0].ID === '999', 'original spelling still works');
+  const ga = csv.parseCsv('landingPage,screenPageViews\n/kontakt,42\n');
+  assert(ga[0].landingpage === '/kontakt', 'lowercase access to camelCase header');
+  assert(ga[0].screenPageViews === '42');
+});
+check('parseCsv rows round-trip through rowsToCsv without duplicate columns', () => {
+  const rows = csv.parseCsv('landingPage,sessions\n/a,5\n');
+  const out = csv.rowsToCsv(rows);
+  assert(out.split('\n')[0] === 'landingPage,sessions', out);
+});
+check('field() resolves aliases case-insensitively and skips empties', () => {
+  const [row] = csv.parseCsv('Link_Resource_Name,final_url,label\nrn1,,opis\n');
+  assert(csv.field(row, 'link_resource_name') === 'rn1');
+  assert(csv.field(row, 'final_url', 'url') === undefined, 'empty cell must not win');
+  assert(csv.field(row, 'nope', 'label') === 'opis');
 });
 
 // 11. Sitelink link-level detection (routes the right GAQL table for URL swaps).
@@ -420,6 +445,28 @@ check('updateKeywordStatus is exported and enforces the same guards', async () =
 check('keyword ids keep the adGroupId~criterionId form (digits-only would break them)', async () => {
   // The shared status helper strips non-digits by default; keywords override that.
   assert((await queries.getKeywordsByCriteria('1234567890', [])).length === 0);
+});
+
+
+// 13. Ad-text length must follow Google's rule for keyword insertion.
+check('adTextLength counts {Keyword:...} by its default text', () => {
+  assert(safety.adTextLength('{Keyword:Nawierzchnie na plac zabaw}') === 26, String(safety.adTextLength('{Keyword:Nawierzchnie na plac zabaw}')));
+  assert(safety.adTextLength('{KeyWord:Gumowe Nawierzchnie}') === 19);
+  assert(safety.adTextLength('Zwykly naglowek') === 15);
+});
+check('checkRsaTexts accepts a headline whose literal form exceeds 30 but default fits', () => {
+  const r = safety.checkRsaTexts({
+    headlines: ['{Keyword:Nawierzchnie na plac zabaw}', 'Plyty SBR', 'Gumowe plyty'],
+    descriptions: ['Opis jeden', 'Opis dwa'],
+  });
+  assert(r.valid, JSON.stringify(r.reasons));
+});
+check('checkRsaTexts still rejects a genuinely too-long headline', () => {
+  const r = safety.checkRsaTexts({
+    headlines: ['{Keyword:Ten domyslny tekst jest zdecydowanie za dlugi}', 'A', 'B'],
+    descriptions: ['x', 'y'],
+  });
+  assert(!r.valid);
 });
 
 console.log(`\nResult: ${passed} passed, ${failed} failed.\n`);

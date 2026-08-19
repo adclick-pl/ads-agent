@@ -272,6 +272,43 @@ instalacji — wszystko inne jest gotowe. Powiedz użytkownikowi, żeby wrócił
 napisał *„Mam klucz API, kontynuujmy onboarding"*, gdy Google zatwierdzi dostęp,
 a wtedy ponów ten krok.
 
+## Krok 6 (opcjonalny) — Google Analytics 4
+
+Rób ten krok tylko, jeśli użytkownik chce też danych z GA4. Google Ads działa bez niego.
+
+**6.1. Włącz dwa API** w **tym samym** projekcie Google Cloud, w którym powstał klient
+OAuth z kroku 3 — nie zakładaj nowego projektu:
+
+- https://console.cloud.google.com/apis/library/analyticsdata.googleapis.com
+- https://console.cloud.google.com/apis/library/analyticsadmin.googleapis.com
+
+Jeśli któregoś zabraknie, konektor zwróci gotowy link aktywacyjny z numerem projektu.
+
+**6.2. Autoryzuj.** Konektor używa tego samego `client_id`/`client_secret` co Google Ads
+(z `~/google-ads.yaml`), ale **własnego tokena** — zakres jest inny (`analytics.readonly`),
+więc nie wolno nadpisać tokena Adsów.
+
+```bash
+npm run ga4:auth
+```
+
+Podaj użytkownikowi wypisany link, **uruchom nasłuch w tle** (`npm run ga4:auth-listen`)
+i poczekaj, aż potwierdzi kliknięcie. Logować ma się kontem Google, które ma dostęp do
+usług GA4 klientów.
+
+**6.3. Sprawdź:**
+
+```bash
+npm run ga4:test
+node .claude/skills/ga4-connector/scripts/cli.js --action=properties
+```
+
+Druga komenda wypisze wszystkie usługi widoczne dla tego konta razem z ich ID. Jeśli
+część usług należy do innego konta Google, autoryzuj je jako osobny profil
+(`--profile=<nazwa>`) — opis w `.claude/skills/ga4-connector/SKILL.md`.
+
+---
+
 ## Po instalacji
 
 - Poproś użytkownika, żeby raz zamknął i ponownie otworzył ten projekt w Claude
@@ -280,6 +317,10 @@ a wtedy ponów ten krok.
 - Pogratuluj i krótko powiedz, co dalej: od teraz użytkownik może prosić Cię
   (Claude) o dane z konta Google Ads lub o zmiany, a szczegóły działania opisuje
   `.claude/skills/gads-connector/SKILL.md`.
+- Jeśli robiłeś krok 6, wspomnij o `ga4-connector`: dane z Google Analytics 4
+  (kanały, kampanie, strony docelowe, produkty, kohorty) i konfiguracja usługi
+  (strumienie, kluczowe zdarzenia, atrybucja, połączenie z Ads). **Tylko odczyt** —
+  nie zmieni klientowi ustawień. Szczegóły: `.claude/skills/ga4-connector/SKILL.md`.
 - Wspomnij, że w paczce jest też drugi skill — `gads-reklamy` (pisanie reklam
   Google Ads / RSA po polsku). **Nie wymaga żadnej konfiguracji ani dostępu do
   API** — działa od razu; wystarczy poprosić o napisanie reklam i podać URL
@@ -298,6 +339,8 @@ a wtedy ponów ten krok.
 | `PERMISSION_DENIED` | Sprawdź `login_customer_id` (numer MCC) i czy konto Google ma dostęp do tego konta Ads. |
 | Autoryzacja OAuth blokowana („Access blocked" / „nie zweryfikowano aplikacji" dla danego konta) | Logujesz się kontem, którego **nie ma** na liście **Test users** (3.3), albo aplikacja nie jest opublikowana. Dodaj to konto jako Test user **lub** kliknij **Publish app**. Konto musi mieć dostęp do MCC. |
 | `DEVELOPER_TOKEN_NOT_APPROVED` | Token czeka na zatwierdzenie przez Google albo jest używany na realnym koncie przed uzyskaniem Basic access. |
+| GA4: `has not been used` / `is disabled` | Nie włączono Analytics Data albo Analytics Admin API (krok 6.1). Konektor podaje gotowy link — kliknij „Włącz" i odczekaj minutę. |
+| GA4: 403 przy konkretnej usłudze | Zalogowane konto nie ma do niej dostępu. `--action=properties` pokaże, co widzi. Usługa na innym koncie Google → autoryzuj ją jako osobny profil (`--profile=`). |
 | `Missing required ... configuration` | Plik `~/google-ads.yaml` nie został wypełniony lub nie został znaleziony. |
 | Błędy importu modułów | Uruchom `npm install` w folderze paczki. |
 | `node` nie jest rozpoznawane | Otwórz **nowy** terminal po instalacji Node.js (albo zrestartuj komputer na Windows). |

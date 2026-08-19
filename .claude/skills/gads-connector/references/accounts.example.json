@@ -4,6 +4,8 @@
   "_fields": {
     "name": "Human-readable account name, shown in --list-accounts. Can be used to select the account (--account=\"Example Client One\").",
     "id": "The 10-digit Google Ads customer ID (dashes optional). This is the account that gets queried/changed.",
+    "ga4PropertyId": "Numeric GA4 property id for the same client (with or without the properties/ prefix). Read by ga4-connector, so --property=<key|name|alias> resolves the same way --account does here. Optional — omit for clients without GA4.",
+    "ga4Profile": "Name of the ga4-connector token profile (Google login) that can see this property. Only needed when the property belongs to a different Google account than your default login — authorize it with `auth.js --step=url --profile=<name>`. Optional; omit to use the default login.",
     "login_customer_id": "The MCC (manager) account ID this account sits under. Required for agency setups so child-account queries don't fail with PERMISSION_DENIED. Omit for a standalone account.",
     "currency": "Account currency code (e.g. USD, EUR, PLN). Informational only — shown in --list-accounts.",
     "timezone": "IANA timezone (e.g. Europe/Warsaw). Used so --days date ranges are computed in the account's local time.",
@@ -15,6 +17,7 @@
   "example-client-one": {
     "name": "Example Client One",
     "id": "1234567890",
+    "ga4PropertyId": "123456789",
     "login_customer_id": "1112223334",
     "currency": "USD",
     "timezone": "Europe/London",

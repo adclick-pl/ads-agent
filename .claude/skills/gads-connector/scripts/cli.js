@@ -322,7 +322,7 @@ Opcje:
   --criterion=<agId~critId>   Zasób słowa kluczowego dla update-keyword-url (pojedynczo).
   --sitelink=<resource_name>  Pełny resource_name linku sitelink dla update-sitelink-url (pojedynczo).
   --input=<mapa.csv>          Plik wsadowy dla update-*-url (kolumny: id/resource_name,final_url).
-  --domain=<flexizone.pl>     Blokada domeny: odrzuć Final URL spoza tej domeny (guardrail).
+  --domain=<zielonyogrod.example>     Blokada domeny: odrzuć Final URL spoza tej domeny (guardrail).
 
 Przykłady:
   node scripts/cli.js --action=list-accessible --auto

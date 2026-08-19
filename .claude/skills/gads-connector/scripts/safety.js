@@ -171,6 +171,24 @@ export const RSA_LIMITS = {
 };
 
 /**
+ * Character count as GOOGLE measures it for ad text limits.
+ *
+ * Keyword-insertion placeholders — `{Keyword:Nawierzchnie na plac zabaw}` and its
+ * case variants (`KeyWord`, `KEYWord`) — count only as their DEFAULT text, which
+ * is what serves when no keyword fits. Counting the raw string instead rejects
+ * perfectly legal ads: the literal form is ~9 characters longer than what Google
+ * sees, so a valid 26-character default reads as 35 and the whole batch is
+ * blocked. Hit for real when cloning existing ads that use insertion.
+ *
+ * @param {string} s
+ * @returns {number} effective length
+ */
+export function adTextLength(s) {
+  const expanded = String(s ?? '').replace(/\{\s*keyword\s*:\s*([^}]*)\}/gi, '$1');
+  return [...expanded].length;
+}
+
+/**
  * Validate a Responsive Search Ad before it is written.
  *
  * Pure guardrail (no network). Google rejects the whole mutate batch on a single
@@ -182,11 +200,14 @@ export const RSA_LIMITS = {
  * so an ad that looks like it has 15 assets can serve with fewer, which quietly
  * weakens the ad strength you thought you had.
  *
+ * Lengths are measured with `adTextLength`, so keyword insertion is counted the
+ * way Google counts it.
+ *
  * @param {{headlines: string[], descriptions: string[], path1?: string, path2?: string}} ad
  * @returns {{valid: boolean, reasons: string[]}}
  */
 export function checkRsaTexts(ad) {
-  const len = (s) => [...String(s ?? '')].length;
+  const len = adTextLength;
   const reasons = [];
   const hs = (ad.headlines || []).map((h) => String(h ?? '').trim()).filter(Boolean);
   const ds = (ad.descriptions || []).map((d) => String(d ?? '').trim()).filter(Boolean);
