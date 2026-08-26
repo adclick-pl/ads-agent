@@ -138,6 +138,13 @@ są opóźnione o **2–3 dni**, więc świeży zakres bywa pusty — to nie jes
 `--data-state=all` dokłada dane świeże i niepełne (dobre do „czy dziś coś się dzieje",
 złe do porównań). Przy zerowej liczbie wierszy konektor sam o tym przypomina.
 
+**Wiersz bez wyświetleń nie ma pozycji ani CTR.** Przy `--dimensions=date` API dopełnia
+dni bez wyświetleń zerami — a „pozycja 0" nie istnieje (pozycje zaczynają się od 1)
+i wciągnięta do średniej zaniża każdy wynik, wyglądając przy tym wiarygodnie. Konektor
+zwraca w takich wierszach `null` (w tabeli `–`, w CSV pusta komórka), więc średnia
+z kolumny `pozycja` jest poprawna z konstrukcji. Licząc cokolwiek na pozycji z surowego
+`--json`, i tak filtruj `wyswietlenia > 0`.
+
 ## Filtry
 
 Łącz średnikiem (AND). Filtrować można po `query`, `page`, `country`, `device`,

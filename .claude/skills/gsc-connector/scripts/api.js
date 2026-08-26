@@ -326,6 +326,30 @@ export function dateRange({ days, from, to, now = Date.now() } = {}) {
   return { startDate: back(Number(days || 90)), endDate: back(1) };
 }
 
+/**
+ * One API row -> named columns.
+ *
+ * Position and CTR exist only where something was shown. When grouping by date
+ * the API zero-fills days without impressions, and a zero-filled row carries
+ * position 0 — a value GSC itself cannot produce (positions start at 1). Left
+ * as a number, it silently drags down every average computed on the column, and
+ * the result looks plausible. So a zero-impression row gets null, not zero:
+ * null survives to --json, renders as "–" in the table and as an empty CSV
+ * cell, and any consumer averaging positions skips it by construction.
+ */
+export function flattenRow(r, dims) {
+  const o = {};
+  dims.forEach((d, i) => {
+    o[d] = r.keys?.[i] ?? '';
+  });
+  const imp = r.impressions ?? 0;
+  o.klikniecia = r.clicks ?? 0;
+  o.wyswietlenia = imp;
+  o.ctr = imp ? Number((((r.ctr ?? 0) * 100).toFixed(2))) : null;
+  o.pozycja = imp ? Number((r.position ?? 0).toFixed(1)) : null;
+  return o;
+}
+
 // ---------------------------------------------------------------------------
 // Search Console API
 // ---------------------------------------------------------------------------
@@ -422,17 +446,7 @@ export async function searchAnalytics({
   }
 
   // Flatten keys into named columns so the output is a plain table.
-  const flat = rows.map((r) => {
-    const o = {};
-    dims.forEach((d, i) => {
-      o[d] = r.keys?.[i] ?? '';
-    });
-    o.klikniecia = r.clicks ?? 0;
-    o.wyswietlenia = r.impressions ?? 0;
-    o.ctr = Number((((r.ctr ?? 0) * 100).toFixed(2)));
-    o.pozycja = Number((r.position ?? 0).toFixed(1));
-    return o;
-  });
+  const flat = rows.map((r) => flattenRow(r, dims));
 
   return {
     site: id,

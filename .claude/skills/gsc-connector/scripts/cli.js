@@ -156,11 +156,14 @@ function table(rows, limit = showRows) {
   const fmt = (v) => {
     if (typeof v === 'number') return Number.isInteger(v) ? String(v) : v.toFixed(2);
     if (Array.isArray(v)) return v.join(', ');
-    const s = v === null || v === undefined ? '' : String(v);
+    // null = "wartość nie istnieje" (np. pozycja w dniu bez wyświetleń) — pokazana
+    // wprost jako kreska, żeby nie wyglądała jak zero ani jak pusta komórka.
+    if (v === null || v === undefined) return '–';
+    const s = String(v);
     return s.length > 60 ? s.slice(0, 57) + '...' : s;
   };
   const widths = cols.map((c) => Math.max(c.length, ...shown.map((r) => fmt(r[c]).length)));
-  const numeric = cols.map((c) => shown.every((r) => typeof r[c] === 'number'));
+  const numeric = cols.map((c) => shown.every((r) => typeof r[c] === 'number' || r[c] === null || r[c] === undefined));
   const line = (cells) =>
     cells.map((cell, i) => (numeric[i] ? cell.padStart(widths[i]) : cell.padEnd(widths[i]))).join('  ');
 
@@ -470,6 +473,9 @@ ZAKRES DAT
   --from=2026-01-01 --to=2026-01-31
   Dane ostateczne są opóźnione o 2–3 dni. --data-state=all dokłada świeże,
   niepełne dane (dobre do „czy dziś coś się dzieje”, złe do porównań).
+  Wiersz bez wyświetleń (np. dzień dopełniony zerami przy --dimensions=date)
+  nie ma pozycji ani CTR — konektor zwraca tam null (w tabeli „–”), bo
+  „pozycja 0” nie istnieje i zaniżałaby każdą średnią.
 
 FILTRY (łącz średnikiem = AND; tylko query, page, country, device, searchAppearance)
   --filter="page=~/blog/"            zawiera

@@ -10,7 +10,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { parseFilter, dateRange, summarizeInspection, isoDay, assertQueryShape } from './api.js';
+import { parseFilter, dateRange, summarizeInspection, isoDay, assertQueryShape, flattenRow } from './api.js';
 import {
   normalizeSite, looksLikeBareDomain, isSiteLike, siteHost, resolveTarget,
   proposeAlias, assertProfileName, rememberSite, loadAccounts, tokenPath,
@@ -132,6 +132,37 @@ check('sam --from: koniec nadal wczoraj', () =>
   eq(dateRange({ from: '2026-08-01', now: NOW }), { startDate: '2026-08-01', endDate: '2026-08-25' })
 );
 check('isoDay tnie do dnia', () => eq(isoDay(NOW), '2026-08-26'));
+
+// ---------------------------------------------------------------------------
+console.log('\nSpłaszczanie wierszy (pozycja 0 nie istnieje):');
+check('wiersz z ruchem: liczby jak w API', () =>
+  eq(flattenRow({ keys: ['2026-08-01'], clicks: 3, impressions: 40, ctr: 0.075, position: 4.26 }, ['date']), {
+    date: '2026-08-01',
+    klikniecia: 3,
+    wyswietlenia: 40,
+    ctr: 7.5,
+    pozycja: 4.3,
+  })
+);
+check('dzień dopełniony zerami: pozycja i CTR = null, NIE 0', () =>
+  eq(flattenRow({ keys: ['2026-08-02'], clicks: 0, impressions: 0, ctr: 0, position: 0 }, ['date']), {
+    date: '2026-08-02',
+    klikniecia: 0,
+    wyswietlenia: 0,
+    ctr: null,
+    pozycja: null,
+  })
+);
+check('średnia pozycji liczona wprost z kolumny jest poprawna z konstrukcji', () => {
+  const rows = [
+    flattenRow({ keys: ['a'], clicks: 1, impressions: 10, ctr: 0.1, position: 2 }, ['date']),
+    flattenRow({ keys: ['b'], clicks: 0, impressions: 0, ctr: 0, position: 0 }, ['date']),
+    flattenRow({ keys: ['c'], clicks: 1, impressions: 10, ctr: 0.1, position: 4 }, ['date']),
+  ];
+  const zPozycja = rows.filter((r) => r.pozycja !== null);
+  const srednia = zPozycja.reduce((s, r) => s + r.pozycja, 0) / zPozycja.length;
+  eq(srednia, 3, 'zero-wiersz wciągnięty do średniej dałby 2 zamiast 3');
+});
 
 // ---------------------------------------------------------------------------
 console.log('\nInspekcja URL:');
