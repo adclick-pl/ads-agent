@@ -7,6 +7,47 @@ restarcie sesji. Szczegóły każdego skilla: `.claude/skills/<skill>/SKILL.md`.
 
 ---
 
+## 2026-08-26
+
+### Dodane
+
+- **Nowy skill `gsc-connector`** — dane z Google Search Console, **tylko do odczytu**.
+  Zakres OAuth to `webmasters.readonly`, więc konektor nie jest w stanie zgłosić
+  sitemapy, poprosić o indeksowanie ani niczego zmienić w property klienta.
+
+  Dane z wyszukiwarki: `query` — kliknięcia, wyświetlenia, CTR i pozycja w dowolnym
+  przekroju (fraza, strona, kraj, urządzenie, data, wygląd w wynikach), z filtrami
+  i eksportem do CSV. Indeksowanie: `inspect` (pojedynczy URL — czy w indeksie, jaki
+  canonical wybrał Google, skąd zna ten adres), `inspect-batch` (próbka URL-i z pliku)
+  oraz `sitemaps`. Do tego `diagnose` — sitemapy, ruch i werdykt strony głównej w jednym
+  wywołaniu, i `sites`, które wypisuje wszystkie property widoczne dla loginu.
+
+  ```bash
+  npm run gsc:auth                                  # autoryzacja (patrz ONBOARDING krok 7)
+  node ".claude/skills/gsc-connector/scripts/cli.js" --action=sites
+  node ".claude/skills/gsc-connector/scripts/cli.js" --action=query --site=zielonyogrod --days=90 --dimensions=page
+  ```
+
+  **Bez zależności npm** — działa na wbudowanym `fetch` (Node 18+). Klienta OAuth bierze
+  z konektora Google Ads, więc cała konfiguracja to włączenie **jednego** API w tym samym
+  projekcie GCP i jedna zgoda. Token trzyma osobno (`~/.ads-agent/gsc-token.json`).
+
+  Dwie rzeczy, które konektor robi za Ciebie, bo bez nich Search Console myli:
+
+  - **`sc-domain:example.com` i `https://example.com/` to dwa różne obiekty.** O formę,
+    której konto nie posiada, Google pyta się **403** — jak o brak uprawnień. Przy 403/404
+    konektor dopytuje API i wypisuje, co ten login naprawdę ma dla tej domeny.
+  - **Dane ostateczne są opóźnione o 2–3 dni.** Świeży zakres bywa pusty i wygląda jak
+    spadek ruchu; przy zerze wierszy konektor mówi to wprost i podpowiada `--data-state=all`.
+
+  Property wskazujesz aliasem konta z `.claude/accounts.json` (nowe pola `gscSite`
+  i `gscProfile`), więc `--site=zielonyogrod` celuje w tego samego klienta co
+  `--account=zielonyogrod` w Adsach i `--property=zielonyogrod` w GA4. Obsługuje kilka
+  loginów Google obok siebie przez profile tokenów — w Search Console to reguła, nie
+  wyjątek, bo dostęp nadaje właściciel strony.
+
+---
+
 ## 2026-08-18
 
 ### Dodane

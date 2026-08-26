@@ -309,6 +309,45 @@ część usług należy do innego konta Google, autoryzuj je jako osobny profil
 
 ---
 
+## Krok 7 (opcjonalny) — Google Search Console
+
+Rób ten krok tylko, jeśli użytkownik chce też danych o SEO: pozycji i kliknięć z
+wyszukiwarki albo diagnozy indeksowania. Google Ads działa bez niego.
+
+**7.1. Włącz API** w **tym samym** projekcie Google Cloud, w którym powstał klient
+OAuth z kroku 3:
+
+- https://console.cloud.google.com/apis/library/searchconsole.googleapis.com
+
+**7.2. Autoryzuj.** Konektor używa tego samego `client_id`/`client_secret` co Google Ads,
+ale **własnego tokena** — zakres jest inny (`webmasters.readonly`).
+
+```bash
+npm run gsc:auth
+```
+
+Podaj użytkownikowi wypisany link, **uruchom nasłuch w tle** (`npm run gsc:auth-listen`)
+i poczekaj, aż potwierdzi kliknięcie. Logować ma się kontem Google, które ma dostęp do
+property w Search Console.
+
+**7.3. Sprawdź:**
+
+```bash
+npm run gsc:test
+node .claude/skills/gsc-connector/scripts/cli.js --action=sites
+```
+
+Druga komenda wypisze wszystkie property widoczne dla tego konta razem z poziomem
+uprawnień. Zwróć uwagę na zapis: `sc-domain:example.com` (property domenowa) i
+`https://example.com/` (prefiks URL) to **dwa różne obiekty** — trzeba używać dokładnie
+tego, co wypisała ta lista, inaczej Google odpowiada 403.
+
+W Search Console dostęp nadaje właściciel strony, więc jeden login rzadko widzi wszystkich
+klientów. Pozostałe konta autoryzuj jako osobne profile (`--profile=<nazwa>`) — opis
+w `.claude/skills/gsc-connector/SKILL.md`.
+
+---
+
 ## Po instalacji
 
 - Poproś użytkownika, żeby raz zamknął i ponownie otworzył ten projekt w Claude
