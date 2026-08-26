@@ -76,10 +76,19 @@ Property spoza rejestru: po udanym zapytaniu konektor zaproponuje gotową komend
 `--action=remember`. **Uruchamiaj ją tylko po potwierdzeniu użytkownika** — alias staje
 się selektorem dla wszystkich trzech konektorów, więc to decyzja nazewnicza.
 
+**Świeże repo bez rejestru:** `.claude/accounts.json` nie istnieje, dopóki go nie
+założysz — do tego czasu property podajesz pełnym zapisem, a konektor po `--action=sites`
+sam zaproponuje start rejestru. Zaproponuj użytkownikowi jego założenie: pierwszy
+`--action=remember` tworzy plik, kolejne dopisują property po jednej. Pełny format pól
+(także dla Adsów i GA4) opisuje
+`.claude/skills/gads-connector/references/accounts.example.json` — przy okazji zapisu
+warto od razu uzupełnić `id` (konto Ads) i `ga4PropertyId`, żeby alias działał wszędzie.
+
 ## Kilka kont Google
 
-W Search Console dostęp nadaje właściciel strony, więc jeden login prawie nigdy nie widzi
-wszystkich klientów — częściej niż w GA4. Profil = osobny plik tokena:
+`--action=sites` pokazuje, co widzi autoryzowany login. Jeśli lista zawiera wszystkich
+klientów — pomiń ten rozdział. Gdy jakiejś property brakuje, autoryzuj login, który ją
+widzi, jako profil (osobny plik tokena):
 
 ```bash
 node scripts/auth.js --step=url --profile=firma2   # autoryzacja drugiego konta

@@ -42,9 +42,9 @@ restarcie sesji. Szczegóły każdego skilla: `.claude/skills/<skill>/SKILL.md`.
 
   Property wskazujesz aliasem konta z `.claude/accounts.json` (nowe pola `gscSite`
   i `gscProfile`), więc `--site=zielonyogrod` celuje w tego samego klienta co
-  `--account=zielonyogrod` w Adsach i `--property=zielonyogrod` w GA4. Obsługuje kilka
-  loginów Google obok siebie przez profile tokenów — w Search Console to reguła, nie
-  wyjątek, bo dostęp nadaje właściciel strony.
+  `--account=zielonyogrod` w Adsach i `--property=zielonyogrod` w GA4. Gdy property są
+  rozrzucone po kilku loginach Google, każdy login autoryzujesz jako osobny profil tokena;
+  przy jednym loginie widzącym wszystko profile są zbędne.
 
 ---
 

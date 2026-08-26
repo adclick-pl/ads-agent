@@ -131,10 +131,10 @@ export function oauthClient() {
 // ---------------------------------------------------------------------------
 // Token profiles
 //
-// One Google login rarely sees every client's property — in Search Console even
-// less often than in GA4, because access is granted per property by whoever owns
-// the site. A profile is a named token file, so several logins coexist instead
-// of overwriting each other. No profile = the default token, unchanged.
+// For when client properties are split across several Google logins: a profile
+// is a named token file, so logins coexist instead of overwriting each other.
+// No profile = the default token, unchanged — one login seeing everything never
+// touches this.
 // ---------------------------------------------------------------------------
 export const TOKEN_DIR = path.join(os.homedir(), '.ads-agent');
 

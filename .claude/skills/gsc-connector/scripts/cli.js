@@ -329,6 +329,29 @@ const ACTIONS = {
 };
 
 /**
+ * After a successful `sites` run in a repo with no registry: say how to start one.
+ *
+ * `sites` is the natural FIRST command in a fresh checkout, and without this the
+ * run succeeds silently — the only mention of the registry sits in --help, which
+ * nobody reads after a command that worked. Proposal only: the write itself goes
+ * through --action=remember and needs the user's word.
+ */
+function zaproponujRejestr(listaSites) {
+  if (accountsFile()) return;
+  const pierwsza = listaSites?.[0]?.site;
+  const profil = profileArg();
+  console.log(`\n💡 Rejestru kont (.claude/accounts.json) jeszcze nie ma — dlatego property`);
+  console.log('   trzeba podawać pełnym zapisem. Po założeniu rejestru wystarczy alias,');
+  console.log('   wspólny z konektorami Google Ads i GA4 (--site=zielonyogrod).');
+  console.log('   Rejestr powstaje przy pierwszym zapisie — po jednej property, za potwierdzeniem:');
+  console.log(
+    `   node scripts/cli.js --action=remember --site="${pierwsza || 'sc-domain:zielonyogrod.example'}" --as=<alias>` +
+      (profil ? ` --profile=${profil}` : '')
+  );
+  console.log('   Pełny format pól: .claude/skills/gads-connector/references/accounts.example.json');
+}
+
+/**
  * After a successful property-scoped run: if the property was given literally
  * and is not in the registry, PROPOSE remembering it. Proposal only — the write
  * needs the user's word. Never allowed to break the command it follows.
@@ -435,8 +458,9 @@ REJESTR — jedyny zapis konektora
                       Uruchamiaj TYLKO po potwierdzeniu użytkownika.
 
 KILKA KONT GOOGLE
-  W Search Console dostęp nadaje właściciel strony, więc jeden login prawie nigdy
-  nie widzi wszystkich klientów. Profil = osobny plik tokena.
+  --action=sites pokazuje, co widzi autoryzowany login. Widzi wszystko — profile
+  są zbędne. Brakuje property — autoryzuj login, który ją widzi, jako profil
+  (osobny plik tokena).
   node scripts/auth.js --step=url --profile=firma2      # autoryzacja drugiego konta
   --profile=firma2                                      # wymuś login w dowolnej akcji
   W rejestrze pole "gscProfile": "firma2" przypisuje login do klienta na stałe.
@@ -481,11 +505,13 @@ if (!run) {
 }
 
 try {
-  emit(await run());
+  const result = await run();
+  emit(result);
   if (action !== 'remember' && !outFile && !asJson) {
     // A proposal must never turn a successful report into a failure.
     try {
-      zaproponujZapamietanie();
+      if (action === 'sites') zaproponujRejestr(result);
+      else zaproponujZapamietanie();
     } catch {
       /* ignore */
     }

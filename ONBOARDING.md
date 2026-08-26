@@ -342,9 +342,16 @@ uprawnień. Zwróć uwagę na zapis: `sc-domain:example.com` (property domenowa)
 `https://example.com/` (prefiks URL) to **dwa różne obiekty** — trzeba używać dokładnie
 tego, co wypisała ta lista, inaczej Google odpowiada 403.
 
-W Search Console dostęp nadaje właściciel strony, więc jeden login rzadko widzi wszystkich
-klientów. Pozostałe konta autoryzuj jako osobne profile (`--profile=<nazwa>`) — opis
-w `.claude/skills/gsc-connector/SKILL.md`.
+Sprawdź na tej liście, czy login widzi wszystkich klientów. Jeśli tak — gotowe. Jeśli
+części brakuje, brakujące konta autoryzuj jako osobne profile (`--profile=<nazwa>`) —
+opis w `.claude/skills/gsc-connector/SKILL.md`.
+
+**7.4. Zaproponuj rejestr kont.** Jeśli `.claude/accounts.json` jeszcze nie istnieje,
+zaproponuj użytkownikowi jego założenie — wtedy zamiast pełnego zapisu property wystarczy
+alias (`--site=zielonyogrod`), wspólny z konektorami Google Ads i GA4. Format opisuje
+`.claude/skills/gads-connector/references/accounts.example.json`; najprostsza droga to
+`--action=remember` (tworzy rejestr przy pierwszym zapisie), po jednej property naraz
+i tylko za potwierdzeniem użytkownika, bo alias to decyzja nazewnicza.
 
 ---
 
