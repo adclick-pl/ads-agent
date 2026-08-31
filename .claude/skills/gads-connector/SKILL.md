@@ -291,6 +291,127 @@ read the current amount to verify the scale. The block is reported in the
 `safety.pctChange`) without committing. To push a deliberate large change through,
 re-run with `--force` — but only after confirming the new amount with the user.
 
+**Promotions (`add-promotion-assets`).** Puts a discount strip ("7 € off orders
+over 59 €") under a text ad. Takes `--input=map.csv`; every row needs a
+`final_url` — the API rejects a promotion asset without one — plus a
+`promotion_target` of at most 25 characters naming what the promotion covers
+("Todo el pedido", "Cały asortyment").
+
+```bash
+node scripts/cli.js --action=add-promotion-assets --customer=1234567890 --input=promos.csv
+#  promos.csv: level,campaign_id,promotion_target,money_amount_off,currency,orders_over_amount,language,final_url
+#              campaign,1234567890,Cały asortyment,7,EUR,59,pl,https://zielonyogrod.example/
+```
+
+Give **either** `percent_off` **or** `money_amount_off` + `currency`, never both and
+never neither. `orders_over_amount` (the minimum order value) rides on the same
+currency as the discount and must exceed it. Optional: `discount_modifier=UP_TO`,
+`occasion`, and a `start_date`/`end_date` pair — supply both dates or neither;
+omitting them runs the promotion until you retire it.
+
+Idempotent on **target + discount per level**, deliberately not on the target alone:
+one account legitimately runs "Todo el pedido" at different discounts per market, and
+keying on the target would silently skip the second one as a duplicate.
+
+Promotion assets are **immutable**, like callouts. Changing a live promotion means
+adding the replacement and then retiring the old link with `pause-assets` — in that
+order, so the ads are never left without one. Note this is a Google Ads asset and has
+nothing to do with a **Merchant Center promotion**: the asset decorates text ads, the
+Merchant one decorates Shopping and free listings. An account that wants the discount
+in both places has to set it up in both.
+
+### Demand Gen — five steps, in order
+
+Demand Gen needs more pieces than a Search ad group, so it is split into five
+idempotent actions instead of one. Run them in order; each is safe to re-run,
+which is how you recover from a batch that died half-way.
+
+```bash
+# 1. Film → asset on the account. Accepts a bare ID or any YouTube URL form.
+node scripts/cli.js --action=add-youtube-assets --account=zielonyogrod --input=film.csv
+#    film.csv:  video,name
+#               https://www.youtube.com/shorts/AbCdEfGhIjK,Ogrod wiosna
+
+# 2. Ad group in an existing Demand Gen campaign.
+node scripts/cli.js --action=create-demand-gen-ad-groups --account=zielonyogrod --input=grupy.csv
+#    grupy.csv: campaign_id,ad_group_name,status,channel_strategy
+#               1234567890,Taras - zestaw,PAUSED,ALL_CHANNELS
+
+# 3. Clone targeting from a sibling group. Read `notCopied` in the result.
+node scripts/cli.js --action=copy-ad-group-targeting --account=zielonyogrod --input=target.csv
+#    target.csv: source_ad_group_id,target_ad_group_id
+
+# 4. The video responsive ad itself.
+node scripts/cli.js --action=add-demand-gen-ads --account=zielonyogrod --input=reklamy.csv --domain=zielonyogrod.example
+
+# 5. Product feed, restricted to chosen products.
+node scripts/cli.js --action=add-listing-groups --account=zielonyogrod --input=produkty.csv
+#    produkty.csv: ad_group_id,product_item_ids
+#                  111222333,1001|1002|1003
+```
+
+**Channels are a protobuf oneof.** Set `channel_strategy`
+(`ALL_CHANNELS` or `ALL_OWNED_AND_OPERATED_CHANNELS`) **or** `channels`
+(`youtube_shorts`, `youtube_in_feed`, `youtube_in_stream`, `discover`, `gmail`,
+`display`) — never both; the connector blocks the batch if you do. Leave both
+empty and the group inherits the campaign default.
+
+**`ad_group.type` is deliberately not set.** `AdGroupType` has no Demand Gen
+member — the campaign's channel type defines the group. The connector refuses a
+campaign that is not Demand Gen, because that mistake can only be undone by hand.
+
+**Assets are never deduplicated by Google.** Asking twice for the same video
+yields two assets for one film, and assets cannot be deleted — which is why
+`add-youtube-assets` reads the account first and skips what is already there, and
+why `add-demand-gen-ads` resolves the video by ID and refuses to create one.
+
+**The CTA is an asset, not an inline enum.** `add-demand-gen-ads` reuses an
+existing call-to-action asset when there is one and creates it only when missing.
+Allowed names: `LEARN_MORE`, `SHOP_NOW`, `BUY_NOW`, `ORDER_NOW`, `SIGN_UP`,
+`BOOK_NOW`, `GET_QUOTE`, `CONTACT_US`, `SUBSCRIBE`, `DOWNLOAD`, `DONATE_NOW`,
+`PLAY_NOW`, `SEE_MORE`, `START_NOW`, `VISIT_SITE`, `WATCH_NOW`, `APPLY_NOW`.
+
+**The product tree always carries an excluded "everything else" node.** Without
+it the whole catalogue would run alongside the ad. `add-listing-groups` builds
+root + one node per product + that exclusion, in a single request per ad group
+(temporary resource names only resolve inside one mutate). It **refuses an ad
+group that already has a feed** — changing one means removing criteria, and this
+connector does not delete. Do that in the UI.
+
+**The simulation is checked by Google, not just locally.** All four structural
+actions (`create-demand-gen-ad-groups`, `copy-ad-group-targeting`,
+`add-demand-gen-ads`, `add-listing-groups`) re-send their batch with
+`validate_only`, so a dry run reports `apiValidated: true` only when Google
+itself accepted the structure. If it did not, `apiError` carries the reason and
+nothing was written. This is not decoration: it is what caught `ad.name` being
+REQUIRED for Demand Gen ads and the audience-grouped restriction above.
+
+A dry run of `add-demand-gen-ads` never creates assets, so a CTA that has no
+asset yet is validated *without* the button and listed in `ctaToCreate`; the
+`--commit` run creates it.
+
+**`copy-ad-group-targeting` depends on which targeting mode the group uses.**
+Read the result's `audienceGrouped` flag and `notCopied` list before assuming
+anything moved.
+
+* **Audience grouped** (`use_audience_grouped = true`, the modern Demand Gen
+  shape): the entire targeting — **demographics included** — lives inside one
+  account-level Audience resource, and the ad group just points at it. Google
+  rejects every other criterion in that mode, so the action copies **only** that
+  single `audience` reference and lists the rest as `notCopied`. Loose criteria
+  do still *read* out of such a group over GAQL; they are leftovers from before
+  the switch and cannot be re-created. Only one audience is allowed per ad group,
+  so a target that already has one is left alone.
+* **Not grouped**: age, gender, income, parental status, interests,
+  custom/combined audiences and user lists are rebuilt individually.
+
+In both modes, criteria whose value reads back as `UNKNOWN`/`UNSPECIFIED` are
+skipped — Google rejects them on create, and passing one through would fail the
+whole batch.
+
+A silently half-copied audience spends money in places nobody chose, which is why
+this action reports what it left behind instead of quietly succeeding.
+
 ## Hard rules for the agent
 
 1. **NEVER delete / remove Google Ads resources — in any form.** The connector does

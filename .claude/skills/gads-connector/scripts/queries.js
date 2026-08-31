@@ -1190,6 +1190,39 @@ export async function getExistingCallouts(customerId, opts = {}) {
   return out;
 }
 
+/**
+ * PROMOTION assets already linked at account / campaign / ad-group level
+ * (ENABLED or PAUSED). Identity is the promotion target PLUS the discount, because
+ * one account legitimately runs the same target ("Todo el pedido") with different
+ * discounts across markets — comparing on the target alone would skip a real
+ * promotion as a duplicate.
+ *
+ * @param {string} customerId
+ * @param {{loginCustomerId?: string}} [opts]
+ */
+export async function getExistingPromotions(customerId, opts = {}) {
+  return getExistingAssetLinks(customerId, 'PROMOTION',
+    'asset.promotion_asset.promotion_target, asset.promotion_asset.percent_off, asset.promotion_asset.money_amount_off.amount_micros, asset.promotion_asset.money_amount_off.currency_code',
+    (r) => promotionIdentity(
+      r['asset.promotion_asset.promotion_target'],
+      r['asset.promotion_asset.percent_off'],
+      r['asset.promotion_asset.money_amount_off.amount_micros'],
+      r['asset.promotion_asset.money_amount_off.currency_code']),
+    opts);
+}
+
+/**
+ * One comparable string for a promotion's target + discount. Used on both sides of
+ * the idempotency check, so the CSV row and the API row have to agree here or a
+ * re-run creates a duplicate.
+ */
+export function promotionIdentity(target, percentMicros, moneyMicros, currency) {
+  const t = String(target ?? '').trim().toLowerCase();
+  const pct = percentMicros ? `p${Number(percentMicros)}` : '';
+  const money = moneyMicros ? `m${Number(moneyMicros)}${String(currency ?? '').toUpperCase()}` : '';
+  return `${t}|${pct}${money}`;
+}
+
 export function sitelinkLinkLevel(rn) {
   const s = String(rn);
   if (s.includes('/campaignAssets/')) return 'campaign';
@@ -1301,4 +1334,270 @@ export async function getSitelinkLinkDetails(customerId, linkResourceNames, opts
       (r) => ({ level: 'customer', linkResourceName: r['customer_asset.resource_name'], parent: null, linkStatus: r['customer_asset.status'], ...assetOf(r) }));
   }
   return map;
+}
+
+/**
+ * Criterion types that `copy-ad-group-targeting` knows how to rebuild, mapped to
+ * the GAQL field holding the value and the resource key used when re-creating.
+ *
+ * Deliberately narrow: these are the types a Demand Gen ad group actually uses.
+ * Anything else is reported as skipped rather than silently dropped — a
+ * half-copied audience is worse than an explicit "I did not copy this".
+ */
+export const COPYABLE_CRITERION_TYPES = {
+  10: { key: 'age_range', field: 'ad_group_criterion.age_range.type', value: 'type', label: 'przedział wieku', group: 'demographic' },
+  11: { key: 'gender', field: 'ad_group_criterion.gender.type', value: 'type', label: 'płeć', group: 'demographic' },
+  12: { key: 'income_range', field: 'ad_group_criterion.income_range.type', value: 'type', label: 'przedział dochodu', group: 'demographic' },
+  13: { key: 'parental_status', field: 'ad_group_criterion.parental_status.type', value: 'type', label: 'status rodzicielski', group: 'demographic' },
+  16: { key: 'user_list', field: 'ad_group_criterion.user_list.user_list', value: 'user_list', label: 'lista odbiorców', group: 'segment' },
+  24: { key: 'user_interest', field: 'ad_group_criterion.user_interest.user_interest_category', value: 'user_interest_category', label: 'zainteresowanie', group: 'segment' },
+  32: { key: 'custom_audience', field: 'ad_group_criterion.custom_audience.custom_audience', value: 'custom_audience', label: 'odbiorcy niestandardowi', group: 'segment' },
+  33: { key: 'combined_audience', field: 'ad_group_criterion.combined_audience.combined_audience', value: 'combined_audience', label: 'odbiorcy łączeni', group: 'segment' },
+  35: { key: 'audience', field: 'ad_group_criterion.audience.audience', value: 'audience', label: 'odbiorcy', group: 'audience' },
+};
+
+/**
+ * Look up YouTube video assets already on the account, keyed by video ID.
+ *
+ * Assets are account-scoped and Google happily creates a second asset for a
+ * video that already has one, leaving two IDs for the same film. Reading first
+ * is what makes `add-youtube-assets` idempotent.
+ *
+ * @param {string} customerId
+ * @param {Array<string>} videoIds - bare YouTube IDs (e.g. `dQw4w9WgXcQ`)
+ * @param {{loginCustomerId?: string}} [opts]
+ * @returns {Promise<Array<{assetId:string, videoId:string, name:string}>>}
+ */
+export async function getExistingYoutubeAssets(customerId, videoIds, opts = {}) {
+  const clean = String(customerId).replace(/-/g, '');
+  const ids = [...new Set((videoIds || []).map((v) => String(v).trim()).filter(Boolean))];
+  if (ids.length === 0) return [];
+  const out = [];
+  for (let i = 0; i < ids.length; i += 100) {
+    const part = ids.slice(i, i + 100).map((v) => `'${v.replace(/'/g, "\\'")}'`);
+    const rows = await runRawQuery(clean,
+      `SELECT asset.id, asset.name, asset.youtube_video_asset.youtube_video_id
+       FROM asset
+       WHERE asset.type = 'YOUTUBE_VIDEO'
+         AND asset.youtube_video_asset.youtube_video_id IN (${part.join(',')})`,
+      { loginCustomerId: opts.loginCustomerId });
+    for (const r of rows) {
+      out.push({
+        assetId: String(r['asset.id']),
+        videoId: r['asset.youtube_video_asset.youtube_video_id'] || '',
+        name: r['asset.name'] || '',
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * List the Demand Gen ads already in the given ad groups.
+ *
+ * Used for idempotency in `add-demand-gen-ads`: an ad carrying the same video
+ * and the same Final URL in the same group is treated as already present, so a
+ * re-run does not stack near-identical ads that then split delivery.
+ *
+ * @param {string} customerId
+ * @param {Array<string|number>} adGroupIds
+ * @param {{loginCustomerId?: string}} [opts]
+ * @returns {Promise<Array<{adGroupId:string, adId:string, name:string, finalUrls:string[], videoAssets:string[], status:string}>>}
+ */
+export async function getExistingDemandGenAds(customerId, adGroupIds, opts = {}) {
+  const clean = String(customerId).replace(/-/g, '');
+  const ids = [...new Set((adGroupIds || []).map((a) => String(a).replace(/[^0-9]/g, '')).filter(Boolean))];
+  if (ids.length === 0) return [];
+  const out = [];
+  for (let i = 0; i < ids.length; i += 200) {
+    const part = ids.slice(i, i + 200);
+    const rows = await runRawQuery(clean,
+      `SELECT ad_group.id, ad_group_ad.ad.id, ad_group_ad.ad.name, ad_group_ad.ad.final_urls,
+              ad_group_ad.status, ad_group_ad.ad.demand_gen_video_responsive_ad.videos
+       FROM ad_group_ad
+       WHERE ad_group.id IN (${part.join(',')}) AND ad_group_ad.status != 'REMOVED'`,
+      { loginCustomerId: opts.loginCustomerId });
+    for (const r of rows) {
+      const videos = r['ad_group_ad.ad.demand_gen_video_responsive_ad.videos'];
+      const list = Array.isArray(videos) ? videos : (videos ? [videos] : []);
+      out.push({
+        adGroupId: String(r['ad_group.id']),
+        adId: String(r['ad_group_ad.ad.id'] ?? ''),
+        name: r['ad_group_ad.ad.name'] || '',
+        finalUrls: r['ad_group_ad.ad.final_urls'] || [],
+        // Each entry is an AdVideoAsset; we only need the asset resource name.
+        videoAssets: list.map((v) => String(v?.asset ?? v ?? '')).filter(Boolean),
+        status: r['ad_group_ad.status'],
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Read the product-feed (listing group) tree of the given ad groups.
+ *
+ * `add-listing-groups` needs this for two reasons: to skip ad groups that
+ * already have a tree (rebuilding one means deleting criteria, which the
+ * no-delete policy forbids), and to report what is there so the operator can
+ * decide in the UI instead.
+ *
+ * @param {string} customerId
+ * @param {Array<string|number>} adGroupIds
+ * @param {{loginCustomerId?: string}} [opts]
+ * @returns {Promise<Array<{adGroupId:string, criterionId:string, type:number, negative:boolean, itemId:string|null, parentCriterionId:string|null}>>}
+ */
+export async function getExistingListingGroups(customerId, adGroupIds, opts = {}) {
+  const clean = String(customerId).replace(/-/g, '');
+  const ids = [...new Set((adGroupIds || []).map((a) => String(a).replace(/[^0-9]/g, '')).filter(Boolean))];
+  if (ids.length === 0) return [];
+  const out = [];
+  for (let i = 0; i < ids.length; i += 200) {
+    const part = ids.slice(i, i + 200);
+    const rows = await runRawQuery(clean,
+      `SELECT ad_group.id, ad_group_criterion.criterion_id, ad_group_criterion.negative,
+              ad_group_criterion.listing_group.type,
+              ad_group_criterion.listing_group.parent_ad_group_criterion,
+              ad_group_criterion.listing_group.case_value.product_item_id.value
+       FROM ad_group_criterion
+       WHERE ad_group.id IN (${part.join(',')})
+         AND ad_group_criterion.type = 'LISTING_GROUP'
+         AND ad_group_criterion.status != 'REMOVED'`,
+      { loginCustomerId: opts.loginCustomerId });
+    for (const r of rows) {
+      const parent = r['ad_group_criterion.listing_group.parent_ad_group_criterion'] || '';
+      out.push({
+        adGroupId: String(r['ad_group.id']),
+        criterionId: String(r['ad_group_criterion.criterion_id']),
+        type: r['ad_group_criterion.listing_group.type'],
+        negative: Boolean(r['ad_group_criterion.negative']),
+        itemId: r['ad_group_criterion.listing_group.case_value.product_item_id.value'] ?? null,
+        parentCriterionId: parent ? String(parent).split('~').pop() : null,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Read the copyable targeting criteria of one ad group.
+ *
+ * Returns both what can be rebuilt (`criteria`) and what cannot (`skipped`), so
+ * the caller can surface the gap. Listing groups are excluded on purpose — the
+ * product feed is its own action with its own tree semantics.
+ *
+ * @param {string} customerId
+ * @param {string|number} adGroupId
+ * @param {{loginCustomerId?: string}} [opts]
+ * @returns {Promise<{criteria: Array<object>, skipped: Array<{type:number, count:number}>}>}
+ */
+export async function getAdGroupTargetingCriteria(customerId, adGroupId, opts = {}) {
+  const clean = String(customerId).replace(/-/g, '');
+  const id = String(adGroupId).replace(/[^0-9]/g, '');
+  if (!id) return { criteria: [], skipped: [] };
+
+  const valueFields = Object.values(COPYABLE_CRITERION_TYPES).map((m) => m.field);
+  const rows = await runRawQuery(clean,
+    `SELECT ad_group_criterion.criterion_id, ad_group_criterion.type,
+            ad_group_criterion.negative, ad_group_criterion.status,
+            ad_group.audience_setting.use_audience_grouped,
+            ${valueFields.join(', ')}
+     FROM ad_group_criterion
+     WHERE ad_group.id = ${id}
+       AND ad_group_criterion.type != 'LISTING_GROUP'
+       AND ad_group_criterion.status != 'REMOVED'`,
+    { loginCustomerId: opts.loginCustomerId });
+
+  // An ad group with no criteria at all returns no rows, so the flag has to be
+  // read separately — a brand-new group is exactly the copy target we care about.
+  let useAudienceGrouped = rows.length ? Boolean(rows[0]['ad_group.audience_setting.use_audience_grouped']) : false;
+  if (!rows.length) {
+    const meta = await runRawQuery(clean,
+      `SELECT ad_group.audience_setting.use_audience_grouped FROM ad_group WHERE ad_group.id = ${id}`,
+      { loginCustomerId: opts.loginCustomerId });
+    useAudienceGrouped = Boolean(meta[0]?.['ad_group.audience_setting.use_audience_grouped']);
+  }
+
+  const criteria = [];
+  const skippedCounts = new Map();
+  for (const r of rows) {
+    const type = r['ad_group_criterion.type'];
+    const meta = COPYABLE_CRITERION_TYPES[type];
+    if (!meta) {
+      skippedCounts.set(type, (skippedCounts.get(type) || 0) + 1);
+      continue;
+    }
+    const raw = r[meta.field];
+    if (raw === null || raw === undefined || raw === '') {
+      skippedCounts.set(type, (skippedCounts.get(type) || 0) + 1);
+      continue;
+    }
+    criteria.push({
+      type,
+      key: meta.key,
+      valueField: meta.value,
+      value: raw,
+      label: meta.label,
+      group: meta.group,
+      negative: Boolean(r['ad_group_criterion.negative']),
+    });
+  }
+  return {
+    criteria,
+    useAudienceGrouped,
+    skipped: [...skippedCounts.entries()].map(([type, count]) => ({ type, count })),
+  };
+}
+
+/**
+ * Channel type + name of the given campaigns, for guardrails.
+ *
+ * `create-demand-gen-ad-groups` uses it to refuse a campaign that is not a
+ * Demand Gen campaign: an ad group created in a Search campaign with Demand Gen
+ * settings is a mess that has to be cleaned up by hand (no-delete policy).
+ *
+ * @param {string} customerId
+ * @param {Array<string|number>} campaignIds
+ * @param {{loginCustomerId?: string}} [opts]
+ * @returns {Promise<Map<string,{name:string, channelType:number}>>} keyed by campaign ID
+ */
+export async function getCampaignChannelTypes(customerId, campaignIds, opts = {}) {
+  const clean = String(customerId).replace(/-/g, '');
+  const ids = [...new Set((campaignIds || []).map((c) => String(c).replace(/[^0-9]/g, '')).filter(Boolean))];
+  const out = new Map();
+  if (ids.length === 0) return out;
+  const rows = await runRawQuery(clean,
+    `SELECT campaign.id, campaign.name, campaign.advertising_channel_type
+     FROM campaign WHERE campaign.id IN (${ids.join(',')})`,
+    { loginCustomerId: opts.loginCustomerId });
+  for (const r of rows) {
+    out.set(String(r['campaign.id']), {
+      name: r['campaign.name'] || '',
+      channelType: r['campaign.advertising_channel_type'],
+    });
+  }
+  return out;
+}
+
+/**
+ * Find the account's existing call-to-action assets, keyed by CTA enum value.
+ * Lets `add-demand-gen-ads` reuse one instead of minting a duplicate asset for
+ * every ad that wants the same button.
+ *
+ * @param {string} customerId
+ * @param {{loginCustomerId?: string}} [opts]
+ * @returns {Promise<Map<number,string>>} CTA enum value → asset resource name
+ */
+export async function getCallToActionAssets(customerId, opts = {}) {
+  const clean = String(customerId).replace(/-/g, '');
+  const rows = await runRawQuery(clean,
+    `SELECT asset.resource_name, asset.call_to_action_asset.call_to_action
+     FROM asset WHERE asset.type = 'CALL_TO_ACTION'`,
+    { loginCustomerId: opts.loginCustomerId });
+  const out = new Map();
+  for (const r of rows) {
+    const cta = r['asset.call_to_action_asset.call_to_action'];
+    if (cta !== null && cta !== undefined && !out.has(cta)) out.set(cta, String(r['asset.resource_name']));
+  }
+  return out;
 }

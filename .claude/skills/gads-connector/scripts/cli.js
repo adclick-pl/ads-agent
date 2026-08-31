@@ -35,10 +35,16 @@ import {
   addAds,
   updateAdAssets,
   addCallouts,
+  addPromotionAssets,
   pauseCallouts,
   pauseAssetLinks,
   addStructuredSnippets,
   addPriceAssets,
+  addYoutubeAssets,
+  createDemandGenAdGroups,
+  copyAdGroupTargeting,
+  addDemandGenAds,
+  addListingGroups,
 } from './mutator.js';
 import { resolveAccount, loadAccounts } from './accounts.js';
 import { rowsToCsv, parseCsv } from './csv.js';
@@ -289,6 +295,47 @@ Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
                           Przypięcie nagłówka: dopisz "|H1", "|H2" albo "|H3" na końcu
                           komórki (np. "Krówki z logo|H1"). Marker nie liczy się do
                           limitu 30 znaków. Bez markera nagłówek rotuje swobodnie.
+  --- Demand Gen (kampanie DemGen; kolejność jak niżej) ---
+  add-youtube-assets      1/5. Dodaje film YouTube jako ZASÓB konta. Idempotentne po ID filmu
+                          (Google NIE deduplikuje — dwa wywołania = dwa zasoby na ten sam film,
+                          a zasobów nie da się usunąć). Przyjmuje ID albo dowolny URL
+                          (watch?v=, youtu.be, /shorts/, /embed/). Zwraca asset_id do kroku 4.
+                          --input=mapa.csv (kolumny: video[,name]).
+  create-demand-gen-ad-groups
+                          2/5. Tworzy grupy reklam w istniejących kampaniach DEMAND GEN.
+                          Odmawia, gdy kampania nie jest DemGen. Idempotentne po nazwie.
+                          Kanały ustawiasz JEDNYM z dwóch pól (to oneof w API):
+                            channel_strategy=ALL_CHANNELS | ALL_OWNED_AND_OPERATED_CHANNELS
+                            channels=youtube_shorts|youtube_in_feed|youtube_in_stream|discover|gmail|display
+                          Puste oba = grupa dziedziczy domyślne kampanii.
+                          --input=mapa.csv (kolumny: campaign_id,ad_group_name[,status]
+                          [,channel_strategy|channels]).
+  copy-ad-group-targeting 3/5. Klonuje targetowanie z istniejącej grupy na nową. Zachowanie
+                          zależy od trybu grupy DOCELOWEJ (pole "audienceGrouped" w wyniku):
+                            • audience grouped (typowe dla DemGen) — całe targetowanie, RAZEM
+                              z demografią, siedzi w zasobie Audience; kopiowane jest wyłącznie
+                              to jedno przypisanie odbiorców, reszta trafia do "notCopied".
+                            • bez grupowania — wiek, płeć, dochód, status rodzicielski,
+                              zainteresowania, odbiorcy własni/łączeni i listy pojedynczo.
+                          Pomija wartości UNKNOWN/UNSPECIFIED (Google ich nie przyjmuje).
+                          Niczego nie gubi po cichu — ZAWSZE czytaj "notCopied".
+                          Idempotentne (pomija kryteria już obecne na celu).
+                          --input=mapa.csv (kolumny: source_ad_group_id,target_ad_group_id).
+  add-demand-gen-ads      4/5. Tworzy reklamy wideo responsywne Demand Gen. Film musi już być
+                          zasobem konta (krok 1) — ta akcja go NIE tworzy. API wymaga filmu,
+                          logo i nazwy firmy. CTA jest zasobem, nie enumem: brakujące zasoby CTA
+                          tworzy sama i współdzieli między wierszami. Idempotentne po
+                          (grupa + film + Final URL). --input=mapa.csv (kolumny: ad_group_id,
+                          final_url,video,logo_asset_id,business_name,headline1..5,
+                          long_headline1..5,description1..5[,cta,status,name]).
+  add-listing-groups      5/5. Podpina kanał produktowy do grupy DemGen, zawężony do wskazanych
+                          produktów — buduje drzewo: korzeń + po jednym węźle na produkt +
+                          węzeł "wszystko inne" jako WYKLUCZONY (bez niego poszedłby cały
+                          katalog). Odmawia, gdy grupa ma już kanał produktowy — przebudowa
+                          wymaga usuwania kryteriów, a konektor nie usuwa (zrób to w UI).
+                          --input=mapa.csv (kolumny: ad_group_id,product_item_ids — ID rozdziel
+                          | ; lub przecinkiem, albo jeden wiersz na produkt).
+
   update-ad-assets        Podmienia nagłówki/teksty ISTNIEJĄCEJ reklamy RSA (to samo ID reklamy,
                           nic nie jest wstrzymywane). Grupa musi mieć dokładnie jedną RSA albo
                           podaj ad_id. --input=mapa.csv (kolumny jak w add-ads, bez final_url).
@@ -875,6 +922,32 @@ async function main() {
       console.log(JSON.stringify(result, null, 2));
     }
 
+    else if (action === 'add-promotion-assets') {
+      if (!args.input) throw new Error('add-promotion-assets wymaga --input=mapa.csv (kolumny: level,campaign_id|ad_group_id|ad_group_name,promotion_target,percent_off|money_amount_off,currency,orders_over_amount,discount_modifier,occasion,language,final_url,start_date,end_date)');
+      const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+      if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
+      const items = rows.map((r, i) => ({
+        level: r.level,
+        campaignId: r.campaign_id || r.campaign || '',
+        adGroupId: r.ad_group_id || '',
+        adGroupName: r.ad_group_name || r.ad_group || '',
+        promotionTarget: r.promotion_target || r.target,
+        percentOff: r.percent_off,
+        moneyAmountOff: r.money_amount_off,
+        currency: r.currency,
+        ordersOverAmount: r.orders_over_amount,
+        discountModifier: r.discount_modifier,
+        occasion: r.occasion,
+        language: r.language,
+        finalUrl: r.final_url || r.url,
+        startDate: r.start_date,
+        endDate: r.end_date,
+        label: `${r.promotion_target || r.target || 'promocja'} (wiersz ${i + 2})`,
+      }));
+      const result = await addPromotionAssets(customerId, items, dryRun, loginCustomerId, { domain: args.domain });
+      console.log(JSON.stringify(result, null, 2));
+    }
+
     else if (action === 'add-ads') {
       if (!args.input) throw new Error('add-ads wymaga --input=mapa.csv (kolumny: [ad_group_id|campaign_id+ad_group_name],final_url,headline1..15,description1..4)');
       const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
@@ -916,6 +989,86 @@ async function main() {
         };
       });
       const result = await updateAdAssets(customerId, items, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'add-youtube-assets') {
+      if (!args.input) throw new Error('add-youtube-assets wymaga --input=mapa.csv (kolumny: video[,name])');
+      const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+      if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
+      const items = rows.map((r, i) => ({
+        video: r.video || r.video_id || r.url || r.youtube_video_id,
+        name: r.name || '',
+        label: `${r.video || r.video_id || r.url || ''} (wiersz ${i + 2})`,
+      }));
+      const result = await addYoutubeAssets(customerId, items, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'create-demand-gen-ad-groups') {
+      if (!args.input) throw new Error('create-demand-gen-ad-groups wymaga --input=mapa.csv (kolumny: campaign_id,ad_group_name[,status][,channel_strategy|channels])');
+      const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+      if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
+      const items = rows.map((r, i) => ({
+        campaignId: r.campaign_id || r.campaign,
+        name: r.ad_group_name || r.ad_group || r.name,
+        status: r.status || 'ENABLED',
+        strategy: r.channel_strategy || '',
+        // "shorts|in_feed" or "shorts,in_feed" — both read naturally in a CSV cell.
+        channels: String(r.channels || '').split(/[|;,]/).map((c) => c.trim()).filter(Boolean),
+        label: `${r.ad_group_name || r.ad_group || r.name} (wiersz ${i + 2})`,
+      }));
+      const result = await createDemandGenAdGroups(customerId, items, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'copy-ad-group-targeting') {
+      if (!args.input) throw new Error('copy-ad-group-targeting wymaga --input=mapa.csv (kolumny: source_ad_group_id,target_ad_group_id)');
+      const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+      if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
+      const items = rows.map((r, i) => ({
+        sourceAdGroupId: r.source_ad_group_id || r.source,
+        targetAdGroupId: r.target_ad_group_id || r.target,
+        label: `${r.source_ad_group_id || r.source} → ${r.target_ad_group_id || r.target} (wiersz ${i + 2})`,
+      }));
+      const result = await copyAdGroupTargeting(customerId, items, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'add-demand-gen-ads') {
+      if (!args.input) throw new Error('add-demand-gen-ads wymaga --input=mapa.csv (kolumny: ad_group_id,final_url,video,logo_asset_id,business_name,headline1..5,long_headline1..5,description1..5[,cta,status,name])');
+      const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+      if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
+      const pick = (r, prefix, n) => Array.from({ length: n }, (_, k) => r[`${prefix}${k + 1}`]).filter((v) => v !== undefined && String(v).trim() !== '');
+      const items = rows.map((r, i) => ({
+        adGroupId: r.ad_group_id,
+        finalUrl: r.final_url,
+        video: r.video || r.video_id || r.url,
+        logoAssetId: r.logo_asset_id,
+        businessName: r.business_name,
+        headlines: pick(r, 'headline', 5),
+        longHeadlines: pick(r, 'long_headline', 5),
+        descriptions: pick(r, 'description', 5),
+        cta: r.cta || '',
+        status: r.status || 'ENABLED',
+        name: r.name || '',
+        label: `grupa ${r.ad_group_id} (wiersz ${i + 2})`,
+      }));
+      const result = await addDemandGenAds(customerId, items, dryRun, loginCustomerId, { domain: args.domain });
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'add-listing-groups') {
+      if (!args.input) throw new Error('add-listing-groups wymaga --input=mapa.csv (kolumny: ad_group_id,product_item_ids) — ID rozdziel | ; lub przecinkiem, albo daj jeden wiersz na produkt');
+      const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+      if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
+      const items = rows.map((r, i) => ({
+        adGroupId: r.ad_group_id,
+        itemIds: String(r.product_item_ids || r.product_item_id || r.item_id || '')
+          .split(/[|;,]/).map((v) => v.trim()).filter(Boolean),
+        label: `grupa ${r.ad_group_id} (wiersz ${i + 2})`,
+      }));
+      const result = await addListingGroups(customerId, items, dryRun, loginCustomerId);
       console.log(JSON.stringify(result, null, 2));
     }
 

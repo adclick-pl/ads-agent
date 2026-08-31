@@ -1,6 +1,6 @@
 import { getCustomer, unpackError } from './client.js';
-import { getKeywordsByCriteria, getCampaignBasics, getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts, getExistingStructuredSnippets, getExistingPriceAssets, getAdGroupAdsByAdIds, getAdGroupsByIds } from './queries.js';
-import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkPriceOfferings } from './safety.js';
+import { getKeywordsByCriteria, getCampaignBasics, getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts, getExistingStructuredSnippets, getExistingPriceAssets, getExistingPromotions, promotionIdentity, getAdGroupAdsByAdIds, getAdGroupsByIds, getExistingYoutubeAssets, getExistingDemandGenAds, getExistingListingGroups, getAdGroupTargetingCriteria, getCampaignChannelTypes, getCallToActionAssets, COPYABLE_CRITERION_TYPES } from './queries.js';
+import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkPriceOfferings, checkPromotion, checkDemandGenAdTexts, checkDemandGenChannels } from './safety.js';
 
 /**
  * Entity metadata for Final URL updates. Maps our short entity key to the
@@ -943,11 +943,24 @@ function chunk(arr, size = MUTATE_CHUNK) {
  * actually succeeded and is tempted to re-run. Returning a plain summary keeps
  * the result printable and is the only part anyone reads anyway.
  */
-function mutatedResourceNames(responses) {
+export function mutatedResourceNames(responses) {
   const names = [];
   for (const res of responses || []) {
-    for (const r of res?.results || []) {
-      if (r?.resource_name) names.push(String(r.resource_name));
+    // GoogleAdsService.Mutate answers with `mutate_operation_responses`, one entry
+    // per operation, each wrapping a single typed `*_result` (asset_result,
+    // campaign_asset_result, ...) that carries the resource name. `results` is the
+    // shape of a SEARCH response, not a mutate one — reading it silently yielded an
+    // empty list for every write this connector has ever reported.
+    const ops = res?.mutate_operation_responses || res?.mutateOperationResponses || res?.results || [];
+    for (const op of ops) {
+      if (!op || typeof op !== 'object') continue;
+      // A bare {resource_name} (a typed service response) or a oneof wrapper.
+      const direct = op.resource_name ?? op.resourceName;
+      if (direct) { names.push(String(direct)); continue; }
+      for (const value of Object.values(op)) {
+        const rn = value && typeof value === 'object' ? (value.resource_name ?? value.resourceName) : null;
+        if (rn) { names.push(String(rn)); break; }
+      }
     }
   }
   return names;
@@ -1875,5 +1888,850 @@ export async function addPriceAssets(customerId, items, dryRun = false, loginCus
   }
 }
 
+/**
+ * Create PROMOTION assets and link them at account / campaign / ad-group level in
+ * ONE `mutateResources` call, so an asset never lands without its link.
+ *
+ * A promotion asset is what puts "7 € de descuento" under a text ad. It is NOT the
+ * same thing as a Merchant Center promotion: this one decorates ads, the Merchant
+ * one decorates free listings and Shopping. An account that wants both needs both.
+ *
+ * **Idempotent:** reads the promotions already linked (ENABLED or PAUSED) and skips
+ * a row whose target + discount already exists at that level, so re-running a CSV
+ * converges instead of stacking duplicates.
+ *
+ * Promotion assets are immutable, like callouts: to change one, add the replacement
+ * and retire the old link with `pause-assets`.
+ *
+ * @param {string} customerId
+ * @param {Array<{level: string, campaignId?: string, adGroupId?: string, adGroupName?: string,
+ *                promotionTarget: string, percentOff?: number, moneyAmountOff?: number,
+ *                currency?: string, ordersOverAmount?: number, discountModifier?: string,
+ *                occasion?: string, language?: string, finalUrl?: string,
+ *                startDate?: string, endDate?: string, label?: string}>} items
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @param {{domain?: string}} [opts]
+ */
+export async function addPromotionAssets(customerId, items, dryRun = false, loginCustomerId, opts = {}) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  if (!Array.isArray(items) || items.length === 0) throw new Error('Brak promocji do dodania (pusta lista).');
+
+  const num = (v) => (v === undefined || v === null || String(v).trim() === '' ? undefined : Number(String(v).replace(',', '.')));
+  const problems = [];
+  const rows = items.map((it, i) => {
+    const promotionTarget = String(it.promotionTarget ?? '').trim();
+    const ref = it.label || promotionTarget || `wiersz ${i + 1}`;
+    const r = {
+      level: String(it.level ?? '').trim().toLowerCase(),
+      campaignId: String(it.campaignId ?? '').replace(/[^0-9]/g, ''),
+      adGroupId: String(it.adGroupId ?? '').replace(/[^0-9]/g, ''),
+      adGroupName: String(it.adGroupName ?? '').trim(),
+      promotionTarget,
+      percentOff: num(it.percentOff),
+      moneyAmountOff: num(it.moneyAmountOff),
+      currency: String(it.currency ?? '').trim().toUpperCase(),
+      ordersOverAmount: num(it.ordersOverAmount),
+      discountModifier: String(it.discountModifier ?? '').trim().toUpperCase(),
+      occasion: String(it.occasion ?? '').trim().toUpperCase(),
+      language: String(it.language || 'pl').trim(),
+      finalUrl: String(it.finalUrl ?? '').trim(),
+      startDate: String(it.startDate ?? '').trim(),
+      endDate: String(it.endDate ?? '').trim(),
+      label: ref,
+    };
+    const check = checkPromotion(r);
+    if (!check.valid) check.reasons.forEach((m) => problems.push(`${ref}: ${m}`));
+    // Every promotion asset carries a Final URL (the API refuses one without it),
+    // and it must survive the same domain check as every other URL we write.
+    if (r.finalUrl) {
+      const urlCheck = validateFinalUrl(r.finalUrl, { domain: opts.domain });
+      if (!urlCheck.valid) problems.push(`${ref}: ${urlCheck.reason}`);
+    }
+    if ((r.startDate && !r.endDate) || (!r.startDate && r.endDate)) problems.push(`${ref}: podaj obie daty (start_date i end_date) albo żadnej.`);
+    return r;
+  });
+  await resolveAssetLinkTargets(cleanCustomerId, rows, problems, loginCustomerId);
+  if (problems.length) {
+    throw new Error(`🛑 Zablokowano — ${problems.length} problem(ów) walidacji, nic nie zapisano:\n${problems.map((m) => `  • ${m}`).join('\n')}`);
+  }
+
+  const parentOf = (r) => r.level === 'campaign' ? r.campaignId : r.level === 'ad_group' ? r.adGroupId : 'acct';
+  const identityOf = (r) => promotionIdentity(
+    r.promotionTarget,
+    r.percentOff ? Math.round(r.percentOff * 1_000_000) : null,
+    r.moneyAmountOff ? Math.round(r.moneyAmountOff * 1_000_000) : null,
+    r.currency);
+  const keyOf = (r) => `${r.level}:${parentOf(r)}|${identityOf(r)}`;
+
+  let existing = new Set();
+  try {
+    const current = await getExistingPromotions(cleanCustomerId, { loginCustomerId });
+    existing = new Set(current.map((c) => `${c.level}:${c.level === 'campaign' ? c.campaignId : c.level === 'ad_group' ? c.adGroupId : 'acct'}|${c.identity}`));
+  } catch { existing = new Set(); }
+
+  const toCreate = [];
+  const skipped = [];
+  const seenInFile = new Set();
+  for (const r of rows) {
+    const k = keyOf(r);
+    if (existing.has(k)) { skipped.push({ ...r, reason: 'taka promocja już jest na tym poziomie' }); continue; }
+    if (seenInFile.has(k)) { skipped.push({ ...r, reason: 'duplikat w pliku wejściowym' }); continue; }
+    seenInFile.add(k);
+    toCreate.push(r);
+  }
+
+  const describe = (r) => `${r.promotionTarget}: ${r.moneyAmountOff ? `${r.moneyAmountOff} ${r.currency}` : `${r.percentOff}%`}`
+    + `${r.ordersOverAmount ? ` przy zamówieniu od ${r.ordersOverAmount} ${r.currency}` : ''} [${r.language}]`;
+  const plan = {
+    toCreate: toCreate.map((r) => ({ level: r.level, parent: parentOf(r), promocja: describe(r), finalUrl: r.finalUrl || null, okres: r.startDate ? `${r.startDate}..${r.endDate}` : 'bez dat (do odwołania)' })),
+    skipped: skipped.map((r) => ({ level: r.level, parent: parentOf(r), promocja: describe(r), reason: r.reason })),
+  };
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Promocje: do utworzenia ${toCreate.length}, pominięte ${skipped.length}...`);
+  if (dryRun) return { success: true, dryRun: true, entity: 'promotion', toCreate: toCreate.length, skipped: skipped.length, plan };
+  if (toCreate.length === 0) return { success: true, dryRun: false, entity: 'promotion', created: 0, skipped: skipped.length, plan, resourceNames: [] };
+
+  try {
+    const customer = getCustomer(cleanCustomerId, loginCustomerId);
+    const mutations = [];
+    toCreate.forEach((r, i) => {
+      const assetRef = `customers/${cleanCustomerId}/assets/${-(i + 1)}`;
+      const promo = { promotion_target: r.promotionTarget, language_code: r.language };
+      if (r.percentOff) promo.percent_off = Math.round(r.percentOff * 1_000_000);
+      else promo.money_amount_off = { currency_code: r.currency, amount_micros: Math.round(r.moneyAmountOff * 1_000_000) };
+      if (r.ordersOverAmount) promo.orders_over_amount = { currency_code: r.currency, amount_micros: Math.round(r.ordersOverAmount * 1_000_000) };
+      if (r.discountModifier) promo.discount_modifier = r.discountModifier;
+      if (r.occasion) promo.occasion = r.occasion;
+      if (r.startDate) { promo.start_date = r.startDate; promo.end_date = r.endDate; }
+      mutations.push({ entity: 'Asset', operation: 'create', resource: { resource_name: assetRef, promotion_asset: promo, final_urls: [r.finalUrl] } });
+      mutations.push(assetLinkMutation(cleanCustomerId, r, assetRef, 'PROMOTION'));
+    });
+    const responses = [];
+    for (const part of chunk(mutations)) responses.push(await customer.mutateResources(part));
+    return { success: true, dryRun: false, entity: 'promotion', created: toCreate.length, skipped: skipped.length, chunks: responses.length, plan, resourceNames: mutatedResourceNames(responses) };
+  } catch (error) {
+    throw new Error(`Nie udało się dodać promocji: ${unpackError(error)}`);
+  }
+}
+
 /** PriceExtensionType name → enum number, for comparing against what the API returns. */
 const PRICE_TYPE_ENUM = { BRANDS: 2, EVENTS: 3, LOCATIONS: 4, NEIGHBORHOODS: 5, PRODUCT_CATEGORIES: 6, PRODUCT_TIERS: 7, SERVICES: 8, SERVICE_CATEGORIES: 9, SERVICE_TIERS: 10 };
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * Demand Gen
+ *
+ * Four building blocks, deliberately kept as separate actions rather than one
+ * "create the whole thing" command: each is idempotent on its own, so a batch
+ * that dies half-way is fixed by re-running it, not by unpicking what landed.
+ *   1. add-youtube-assets           film → asset on the account
+ *   2. create-demand-gen-ad-groups  ad group + channel settings
+ *   3. copy-ad-group-targeting      clone audiences/demographics from a sibling
+ *   4. add-demand-gen-ads           the video responsive ad itself
+ *   5. add-listing-groups           the product feed shown next to the ad
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Ask Google to validate a batch WITHOUT writing it (`validate_only`).
+ *
+ * A locally-built plan only proves the CSV parsed; it says nothing about whether
+ * the resource tree is acceptable. That gap matters most where the shape is
+ * intricate — a listing-group tree wired together with temporary resource names,
+ * or a nested responsive ad — because the first real feedback would otherwise
+ * arrive on the `--commit` run, half-applied.
+ *
+ * Returns `{ok: true}` or `{ok: false, error}`; never throws, so a simulation
+ * reports the objection instead of dying on it.
+ *
+ * @param {object} customer - google-ads-api Customer
+ * @param {Array<Array<object>>} batches - mutation arrays, each sent as one request
+ * @returns {Promise<{ok: boolean, error?: string}>}
+ */
+async function validateWithApi(customer, batches) {
+  try {
+    for (const b of batches) {
+      if (b.length) await customer.mutateResources(b, { validate_only: true });
+    }
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: unpackError(error) };
+  }
+}
+
+/** `advertising_channel_type` value for Demand Gen (10 is PMax — a classic mix-up). */
+const DEMAND_GEN_CHANNEL_TYPE = 14;
+
+/** A bare YouTube ID: 11 chars of the URL-safe base64 alphabet. */
+const YOUTUBE_ID_RE = /^[A-Za-z0-9_-]{11}$/;
+
+/**
+ * Accept either a bare YouTube ID or any of the URL forms an operator is likely
+ * to paste (watch?v=, youtu.be/, /shorts/, /embed/) and return the bare ID.
+ * Returns '' when nothing usable is found, so the caller reports one clear
+ * validation error instead of creating an asset for a malformed ID.
+ *
+ * @param {string} raw
+ * @returns {string} bare video ID, or '' if unparseable
+ */
+export function parseYoutubeVideoId(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s) return '';
+  if (YOUTUBE_ID_RE.test(s)) return s;
+  const patterns = [
+    /[?&]v=([A-Za-z0-9_-]{11})/,
+    /youtu\.be\/([A-Za-z0-9_-]{11})/,
+    /\/shorts\/([A-Za-z0-9_-]{11})/,
+    /\/embed\/([A-Za-z0-9_-]{11})/,
+    /\/live\/([A-Za-z0-9_-]{11})/,
+  ];
+  for (const re of patterns) {
+    const m = s.match(re);
+    if (m) return m[1];
+  }
+  return '';
+}
+
+/**
+ * Create YouTube video assets on the account.
+ *
+ * Idempotent by video ID: an asset that already exists is skipped and its ID is
+ * returned, so the caller can hang an ad on it either way. This matters because
+ * Google does NOT deduplicate — asking twice yields two assets for one film, and
+ * assets cannot be deleted.
+ *
+ * @param {string} customerId
+ * @param {Array<{video: string, name?: string, label?: string}>} items
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>} `{plan, assets: [{videoId, assetId, resourceName, created}]}`
+ */
+export async function addYoutubeAssets(customerId, items, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  if (!Array.isArray(items) || items.length === 0) throw new Error('Brak filmów do dodania (pusta lista).');
+
+  const problems = [];
+  const rows = items.map((it, i) => {
+    const ref = it.label || String(it.video ?? '') || `wiersz ${i + 1}`;
+    const videoId = parseYoutubeVideoId(it.video);
+    if (!videoId) problems.push(`${ref}: nie rozpoznano ID filmu YouTube w "${it.video}".`);
+    const name = String(it.name ?? '').trim();
+    return { videoId, name, label: ref };
+  });
+
+  const seenInFile = new Set();
+  for (const r of rows) {
+    if (!r.videoId) continue;
+    if (seenInFile.has(r.videoId)) problems.push(`${r.label}: film ${r.videoId} powtarza się w pliku wejściowym.`);
+    seenInFile.add(r.videoId);
+  }
+  if (problems.length) {
+    throw new Error(`🛑 Zablokowano — ${problems.length} problem(ów) walidacji, nic nie zapisano:\n${problems.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  // A read failure must block: a duplicate asset cannot be un-made.
+  const existingRows = await getExistingYoutubeAssets(cleanCustomerId, rows.map((r) => r.videoId), { loginCustomerId });
+  const existing = new Map(existingRows.map((a) => [a.videoId, a]));
+
+  const toCreate = rows.filter((r) => !existing.has(r.videoId));
+  const skipped = rows.filter((r) => existing.has(r.videoId));
+
+  const plan = {
+    toCreate: toCreate.map((r) => ({ videoId: r.videoId, name: r.name || `YouTube ${r.videoId}` })),
+    skipped: skipped.map((r) => ({ videoId: r.videoId, assetId: existing.get(r.videoId).assetId, reason: 'zasób dla tego filmu już istnieje na koncie' })),
+  };
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Zasoby YouTube: do utworzenia ${toCreate.length}, pominięte (już są) ${skipped.length}...`);
+  if (dryRun) return { success: true, dryRun: true, entity: 'asset', toCreate: toCreate.length, skipped: skipped.length, plan };
+
+  let responses = [];
+  if (toCreate.length) {
+    try {
+      const customer = getCustomer(cleanCustomerId, loginCustomerId);
+      const mutations = toCreate.map((r) => ({
+        entity: 'Asset',
+        operation: 'create',
+        resource: {
+          name: r.name || `YouTube ${r.videoId}`,
+          youtube_video_asset: { youtube_video_id: r.videoId },
+        },
+      }));
+      for (const part of chunk(mutations)) responses.push(await customer.mutateResources(part));
+    } catch (error) {
+      throw new Error(`Nie udało się utworzyć zasobów YouTube: ${unpackError(error)}`);
+    }
+  }
+
+  // Read back so every row — created or skipped — carries a usable asset ID.
+  const after = await getExistingYoutubeAssets(cleanCustomerId, rows.map((r) => r.videoId), { loginCustomerId });
+  const byVideo = new Map(after.map((a) => [a.videoId, a]));
+  const assets = rows.map((r) => {
+    const hit = byVideo.get(r.videoId);
+    return {
+      videoId: r.videoId,
+      assetId: hit ? hit.assetId : null,
+      resourceName: hit ? `customers/${cleanCustomerId}/assets/${hit.assetId}` : null,
+      created: !existing.has(r.videoId),
+    };
+  });
+
+  return { success: true, dryRun: false, entity: 'asset', created: toCreate.length, skipped: skipped.length, plan, assets, resourceNames: mutatedResourceNames(responses) };
+}
+
+/**
+ * Create ad groups in existing Demand Gen campaigns.
+ *
+ * Two things differ from `createAdGroups` (Search) and are the reason this is a
+ * separate function rather than a flag:
+ *   • `type` is NOT set. `AdGroupType` has no Demand Gen member — the campaign's
+ *     channel type is what defines the group, and sending a Search/Video type
+ *     here is rejected.
+ *   • `channel_strategy` and `selected_channels` are a protobuf oneof, so at most
+ *     one is written. `channel_config` is OUTPUT_ONLY and never sent.
+ *
+ * Refuses campaigns that are not Demand Gen: the resulting group would be wrong
+ * in a way that only a manual fix can undo.
+ *
+ * @param {string} customerId
+ * @param {Array<{campaignId: string|number, name: string, status?: string, strategy?: string, channels?: string[], label?: string}>} items
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>}
+ */
+export async function createDemandGenAdGroups(customerId, items, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  if (!Array.isArray(items) || items.length === 0) throw new Error('Brak grup reklam do utworzenia (pusta lista).');
+
+  const problems = [];
+  const rows = items.map((it, i) => {
+    const name = String(it.name ?? '').trim();
+    const ref = it.label || name || `wiersz ${i + 1}`;
+    const campaignId = String(it.campaignId ?? '').replace(/[^0-9]/g, '');
+    if (!campaignId) problems.push(`${ref}: brak campaign_id.`);
+    const nameCheck = checkAdGroupName(name);
+    if (!nameCheck.valid) nameCheck.reasons.forEach((r) => problems.push(`${ref}: ${r}`));
+
+    const status = String(it.status ?? 'ENABLED').trim().toUpperCase();
+    assertNotRemoval(status);
+    if (!['ENABLED', 'PAUSED'].includes(status)) problems.push(`${ref}: status musi być ENABLED lub PAUSED (jest "${it.status}").`);
+
+    const strategy = String(it.strategy ?? '').trim().toUpperCase();
+    const channels = (it.channels || []).map((c) => String(c ?? '').trim().toLowerCase()).filter(Boolean);
+    const chCheck = checkDemandGenChannels({ strategy, channels });
+    if (!chCheck.valid) chCheck.reasons.forEach((r) => problems.push(`${ref}: ${r}`));
+
+    return { campaignId, name, status, strategy, channels, label: ref };
+  });
+
+  const seenInFile = new Set();
+  for (const r of rows) {
+    const k = `${r.campaignId}|${r.name.toLowerCase()}`;
+    if (seenInFile.has(k)) problems.push(`${r.label}: nazwa powtarza się w pliku wejściowym.`);
+    seenInFile.add(k);
+  }
+  if (problems.length) {
+    throw new Error(`🛑 Zablokowano — ${problems.length} problem(ów) walidacji, nic nie zapisano:\n${problems.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  // Guardrail: every target campaign must actually be Demand Gen.
+  const campaigns = await getCampaignChannelTypes(cleanCustomerId, rows.map((r) => r.campaignId), { loginCustomerId });
+  const wrongChannel = [];
+  for (const r of rows) {
+    const c = campaigns.get(r.campaignId);
+    if (!c) wrongChannel.push(`${r.label}: kampania ${r.campaignId} nie istnieje albo jest niedostępna.`);
+    else if (c.channelType !== DEMAND_GEN_CHANNEL_TYPE) {
+      wrongChannel.push(`${r.label}: kampania "${c.name}" (${r.campaignId}) nie jest kampanią Demand Gen (advertising_channel_type=${c.channelType}).`);
+    }
+  }
+  if (wrongChannel.length) {
+    throw new Error(`🛑 Zablokowano — nieprawidłowe kampanie docelowe, nic nie zapisano:\n${wrongChannel.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  const existingRows = await getAdGroupsByCampaign(cleanCustomerId, rows.map((r) => r.campaignId), { loginCustomerId });
+  const existing = new Map(existingRows.map((g) => [`${g.campaignId}|${g.name.toLowerCase()}`, g]));
+
+  const toCreate = [];
+  const skipped = [];
+  for (const r of rows) {
+    const hit = existing.get(`${r.campaignId}|${r.name.toLowerCase()}`);
+    if (hit) skipped.push({ ...r, adGroupId: hit.adGroupId });
+    else toCreate.push(r);
+  }
+
+  const describeChannels = (r) => (r.strategy ? `strategia ${r.strategy}` : (r.channels.length ? `kanały: ${r.channels.join(', ')}` : 'ustawienie kanałów: domyślne kampanii'));
+  const plan = {
+    toCreate: toCreate.map((r) => ({ campaignId: r.campaignId, campaign: campaigns.get(r.campaignId)?.name, name: r.name, status: r.status, channels: describeChannels(r) })),
+    skipped: skipped.map((r) => ({ campaignId: r.campaignId, name: r.name, adGroupId: r.adGroupId, reason: 'grupa o tej nazwie już istnieje w kampanii' })),
+  };
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Grupy Demand Gen: do utworzenia ${toCreate.length}, pominięte ${skipped.length}...`);
+  if (!dryRun && toCreate.length === 0) {
+    return { success: true, dryRun: false, entity: 'ad_group', created: 0, skipped: skipped.length, plan, createdGroups: [], response: null };
+  }
+
+  try {
+    const customer = getCustomer(cleanCustomerId, loginCustomerId);
+    const mutations = toCreate.map((r) => {
+      const resource = {
+        campaign: `customers/${cleanCustomerId}/campaigns/${r.campaignId}`,
+        name: r.name,
+        status: r.status,
+      };
+      // oneof channel_configuration — set at most one branch.
+      if (r.strategy) {
+        resource.demand_gen_ad_group_settings = { channel_controls: { channel_strategy: r.strategy } };
+      } else if (r.channels.length) {
+        const selected = {};
+        for (const c of r.channels) selected[c] = true;
+        resource.demand_gen_ad_group_settings = { channel_controls: { selected_channels: selected } };
+      }
+      return { entity: 'AdGroup', operation: 'create', resource };
+    });
+
+    if (dryRun) {
+      const check = await validateWithApi(customer, chunk(mutations));
+      if (!check.ok) console.log(`[Mutator] ⚠️  Google odrzucił grupy w walidacji: ${check.error}`);
+      return { success: check.ok, dryRun: true, entity: 'ad_group', toCreate: toCreate.length, skipped: skipped.length, plan, apiValidated: check.ok, apiError: check.error };
+    }
+
+    const responses = [];
+    for (const part of chunk(mutations)) responses.push(await customer.mutateResources(part));
+
+    const after = await getAdGroupsByCampaign(cleanCustomerId, rows.map((r) => r.campaignId), { loginCustomerId });
+    const byKey = new Map(after.map((g) => [`${g.campaignId}|${g.name.toLowerCase()}`, g]));
+    const createdGroups = toCreate.map((r) => {
+      const g = byKey.get(`${r.campaignId}|${r.name.toLowerCase()}`);
+      return { campaignId: r.campaignId, name: r.name, adGroupId: g ? g.adGroupId : null };
+    });
+
+    return { success: true, dryRun: false, entity: 'ad_group', created: toCreate.length, skipped: skipped.length, chunks: responses.length, plan, createdGroups, resourceNames: mutatedResourceNames(responses) };
+  } catch (error) {
+    throw new Error(`Nie udało się utworzyć grup Demand Gen: ${unpackError(error)}`);
+  }
+}
+
+/**
+ * Copy audience + demographic targeting from one ad group onto others.
+ *
+ * A Demand Gen group routinely carries 30-40 criteria (age brackets, genders,
+ * parental status, interests, custom audiences). Rebuilding that by hand for
+ * every new group is where mistakes live, and a missed exclusion spends money
+ * silently. This clones only what `COPYABLE_CRITERION_TYPES` can rebuild and
+ * reports the rest as `notCopied` instead of pretending the copy was complete.
+ *
+ * Idempotent: criteria already present on the target (same type + same value)
+ * are skipped, so a re-run tops up rather than duplicating.
+ *
+ * @param {string} customerId
+ * @param {Array<{sourceAdGroupId: string|number, targetAdGroupId: string|number, label?: string}>} items
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>}
+ */
+export async function copyAdGroupTargeting(customerId, items, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  if (!Array.isArray(items) || items.length === 0) throw new Error('Brak par grup do skopiowania targetowania (pusta lista).');
+
+  const problems = [];
+  const pairs = items.map((it, i) => {
+    const source = String(it.sourceAdGroupId ?? '').replace(/[^0-9]/g, '');
+    const target = String(it.targetAdGroupId ?? '').replace(/[^0-9]/g, '');
+    const ref = it.label || `${source || '?'} → ${target || '?'}` || `wiersz ${i + 1}`;
+    if (!source) problems.push(`${ref}: brak source_ad_group_id.`);
+    if (!target) problems.push(`${ref}: brak target_ad_group_id.`);
+    if (source && source === target) problems.push(`${ref}: źródło i cel to ta sama grupa.`);
+    return { source, target, label: ref };
+  });
+  if (problems.length) {
+    throw new Error(`🛑 Zablokowano — ${problems.length} problem(ów) walidacji, nic nie zapisano:\n${problems.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  const perPair = [];
+  const mutations = [];
+  for (const p of pairs) {
+    const src = await getAdGroupTargetingCriteria(cleanCustomerId, p.source, { loginCustomerId });
+    const dst = await getAdGroupTargetingCriteria(cleanCustomerId, p.target, { loginCustomerId });
+    const have = new Set(dst.criteria.map((c) => `${c.key}|${c.value}|${c.negative ? 'neg' : 'pos'}`));
+
+    // "Audience grouped" is the modern Demand Gen shape: the whole targeting —
+    // demographics included — lives inside ONE account-level Audience resource,
+    // referenced by a single `audience` criterion. Google rejects every other
+    // criterion in that mode (demographics come back as
+    // CANNOT_ADD_AUDIENCE_SEGMENT_CRITERION_WHEN_AUDIENCE_GROUPED_IS_SET, not
+    // just segments), so copying anything else would fail the whole batch.
+    // Loose criteria still read out of such a group via GAQL — they are history
+    // from before the switch, not something that can be re-created.
+    const grouped = dst.useAudienceGrouped;
+    const targetHasAudience = dst.criteria.some((c) => c.group === 'audience');
+
+    const toAdd = [];
+    const already = [];
+    const blocked = [];
+    let audienceTaken = targetHasAudience;
+    for (const c of src.criteria) {
+      const k = `${c.key}|${c.value}|${c.negative ? 'neg' : 'pos'}`;
+      if (have.has(k)) { already.push(c); continue; }
+
+      // UNSPECIFIED (0) / UNKNOWN (1) are read-back artefacts; Google rejects
+      // them on create. Never pass one through just because it came back.
+      if (c.valueField === 'type' && (c.value === 0 || c.value === 1)) {
+        blocked.push({ label: c.label, reason: 'wartość UNKNOWN/UNSPECIFIED — Google nie przyjmuje jej przy tworzeniu kryterium' });
+        continue;
+      }
+
+      if (c.group === 'audience') {
+        if (audienceTaken) {
+          blocked.push({ label: c.label, reason: 'grupa docelowa ma już przypisanych odbiorców, a Google dopuszcza jednych na grupę' });
+          continue;
+        }
+        audienceTaken = true;
+      } else if (grouped) {
+        blocked.push({ label: c.label, reason: 'grupa docelowa działa w trybie „audience grouped" — całe targetowanie (także demografia) siedzi w zasobie Audience; podepnij tych samych odbiorców zamiast pojedynczych kryteriów' });
+        continue;
+      }
+
+      have.add(k); // guard against duplicates inside the source itself
+      toAdd.push(c);
+    }
+
+    for (const c of toAdd) {
+      const resource = {
+        ad_group: `customers/${cleanCustomerId}/adGroups/${p.target}`,
+        [c.key]: { [c.valueField]: c.value },
+      };
+      // Only set `negative` when excluding — some criterion types reject an
+      // explicit `negative: false` on create.
+      if (c.negative) resource.negative = true;
+      mutations.push({ entity: 'AdGroupCriterion', operation: 'create', resource });
+    }
+
+    perPair.push({
+      source: p.source,
+      target: p.target,
+      toCopy: toAdd.length,
+      alreadyPresent: already.length,
+      byType: [...toAdd.reduce((m, c) => m.set(c.label, (m.get(c.label) || 0) + 1), new Map())].map(([label, count]) => ({ label, count })),
+      audienceGrouped: grouped,
+      notCopied: [
+        ...src.skipped.map((s) => ({ criterionType: s.type, count: s.count, reason: 'typ kryterium nieobsługiwany przez kopiowanie — przenieś ręcznie' })),
+        ...blocked.map((b) => ({ label: b.label, count: 1, reason: b.reason })),
+      ],
+    });
+  }
+
+  const plan = { pairs: perPair, totalToCopy: mutations.length };
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Kopiowanie targetowania: ${mutations.length} kryteriów w ${pairs.length} parach...`);
+  const uncopyable = perPair.flatMap((p) => p.notCopied);
+  if (uncopyable.length) {
+    console.log(`[Mutator] ⚠️  ${uncopyable.reduce((n, u) => n + u.count, 0)} kryteriów NIE zostanie skopiowanych (nieobsługiwane typy) — sprawdź "notCopied" w wyniku.`);
+  }
+
+  if (!dryRun && mutations.length === 0) return { success: true, dryRun: false, entity: 'ad_group_criterion', created: 0, plan, response: null };
+
+  try {
+    const customer = getCustomer(cleanCustomerId, loginCustomerId);
+    if (dryRun) {
+      const check = await validateWithApi(customer, chunk(mutations));
+      if (!check.ok) console.log(`[Mutator] ⚠️  Google odrzucił kryteria w walidacji: ${check.error}`);
+      return { success: check.ok, dryRun: true, entity: 'ad_group_criterion', toCopy: mutations.length, plan, apiValidated: check.ok, apiError: check.error };
+    }
+    const responses = [];
+    for (const part of chunk(mutations)) responses.push(await customer.mutateResources(part));
+    return { success: true, dryRun: false, entity: 'ad_group_criterion', created: mutations.length, chunks: responses.length, plan, resourceNames: mutatedResourceNames(responses) };
+  } catch (error) {
+    throw new Error(`Nie udało się skopiować targetowania: ${unpackError(error)}`);
+  }
+}
+
+/** CTA names accepted by `add-demand-gen-ads`, mapped to their enum value. */
+export const CALL_TO_ACTION_VALUES = {
+  LEARN_MORE: 2, GET_QUOTE: 3, APPLY_NOW: 4, SIGN_UP: 5, CONTACT_US: 6, SUBSCRIBE: 7,
+  DOWNLOAD: 8, BOOK_NOW: 9, SHOP_NOW: 10, BUY_NOW: 11, DONATE_NOW: 12, ORDER_NOW: 13,
+  PLAY_NOW: 14, SEE_MORE: 15, START_NOW: 16, VISIT_SITE: 17, WATCH_NOW: 18,
+};
+
+/**
+ * Create Demand Gen video responsive ads.
+ *
+ * The proto marks `videos`, `logo_images` and `business_name` REQUIRED; the text
+ * minimums are enforced server-side and checked up front by
+ * `checkDemandGenAdTexts` so a bad row fails with a readable message.
+ *
+ * The video must already be an asset on the account — run `add-youtube-assets`
+ * first. Resolving it here by ID (rather than creating it on the fly) keeps this
+ * action free of the "created a duplicate asset" failure mode.
+ *
+ * The call-to-action is an ASSET reference, not an inline enum. Missing CTA
+ * assets are created in a pre-pass and reused across rows.
+ *
+ * Idempotent: an ad in the same group with the same video and the same Final URL
+ * counts as present.
+ *
+ * @param {string} customerId
+ * @param {Array<object>} items
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @param {{domain?: string}} [opts] - domain lock for Final URLs
+ * @returns {Promise<object>}
+ */
+export async function addDemandGenAds(customerId, items, dryRun = false, loginCustomerId, opts = {}) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  if (!Array.isArray(items) || items.length === 0) throw new Error('Brak reklam do dodania (pusta lista).');
+
+  const problems = [];
+  const rows = items.map((it, i) => {
+    const ref = it.label || `wiersz ${i + 1}`;
+    const adGroupId = String(it.adGroupId ?? '').replace(/[^0-9]/g, '');
+    if (!adGroupId) problems.push(`${ref}: brak ad_group_id.`);
+
+    const videoId = parseYoutubeVideoId(it.video);
+    if (!videoId) problems.push(`${ref}: nie rozpoznano ID filmu YouTube w "${it.video}".`);
+
+    const logoAssetId = String(it.logoAssetId ?? '').replace(/[^0-9]/g, '');
+    if (!logoAssetId) problems.push(`${ref}: brak logo_asset_id (logo jest wymagane przez API).`);
+
+    const finalUrl = String(it.finalUrl ?? '').trim();
+    const urlCheck = validateFinalUrl(finalUrl, { domain: opts.domain });
+    if (!urlCheck.valid) problems.push(`${ref}: ${urlCheck.reason}`);
+
+    const headlines = (it.headlines || []).map((h) => String(h ?? '').trim()).filter(Boolean);
+    const longHeadlines = (it.longHeadlines || []).map((h) => String(h ?? '').trim()).filter(Boolean);
+    const descriptions = (it.descriptions || []).map((d) => String(d ?? '').trim()).filter(Boolean);
+    const businessName = String(it.businessName ?? '').trim();
+    const textCheck = checkDemandGenAdTexts({ headlines, longHeadlines, descriptions, businessName });
+    if (!textCheck.valid) textCheck.reasons.forEach((r) => problems.push(`${ref}: ${r}`));
+
+    const cta = String(it.cta ?? '').trim().toUpperCase();
+    const status = String(it.status ?? 'ENABLED').trim().toUpperCase();
+    assertNotRemoval(status);
+    if (!['ENABLED', 'PAUSED'].includes(status)) problems.push(`${ref}: status musi być ENABLED lub PAUSED (jest "${it.status}").`);
+
+    return { adGroupId, videoId, logoAssetId, finalUrl, headlines, longHeadlines, descriptions, businessName, cta, status, name: String(it.name ?? '').trim(), label: ref };
+  });
+  if (problems.length) {
+    throw new Error(`🛑 Zablokowano — ${problems.length} problem(ów) walidacji, nic nie zapisano:\n${problems.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  // Resolve videos to existing assets — never create one here.
+  const videoAssets = await getExistingYoutubeAssets(cleanCustomerId, rows.map((r) => r.videoId), { loginCustomerId });
+  const byVideo = new Map(videoAssets.map((a) => [a.videoId, a.assetId]));
+  const missingVideos = [...new Set(rows.filter((r) => !byVideo.has(r.videoId)).map((r) => r.videoId))];
+  if (missingVideos.length) {
+    throw new Error(`🛑 Zablokowano — te filmy nie są jeszcze zasobami na koncie: ${missingVideos.join(', ')}.\n   Uruchom najpierw: --action=add-youtube-assets`);
+  }
+
+  // Skip ads that already exist (same group + same video asset + same URL).
+  const existingAds = await getExistingDemandGenAds(cleanCustomerId, rows.map((r) => r.adGroupId), { loginCustomerId });
+  const existingKeys = new Set();
+  for (const a of existingAds) {
+    for (const v of a.videoAssets) {
+      for (const u of (a.finalUrls || [])) existingKeys.add(`${a.adGroupId}|${v}|${u}`);
+    }
+  }
+
+  const toCreate = [];
+  const skipped = [];
+  for (const r of rows) {
+    const assetRn = `customers/${cleanCustomerId}/assets/${byVideo.get(r.videoId)}`;
+    const key = `${r.adGroupId}|${assetRn}|${r.finalUrl}`;
+    if (existingKeys.has(key)) { skipped.push({ ...r, reason: 'reklama z tym filmem i tym URL już jest w grupie' }); continue; }
+    existingKeys.add(key);
+    toCreate.push({ ...r, videoAssetResourceName: assetRn });
+  }
+
+  const plan = {
+    toCreate: toCreate.map((r) => ({ adGroupId: r.adGroupId, video: r.videoId, finalUrl: r.finalUrl, headlines: r.headlines.length, longHeadlines: r.longHeadlines.length, descriptions: r.descriptions.length, cta: r.cta || '(brak — Google dobierze)', status: r.status })),
+    skipped: skipped.map((r) => ({ adGroupId: r.adGroupId, video: r.videoId, reason: r.reason })),
+  };
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Reklamy Demand Gen: do utworzenia ${toCreate.length}, pominięte ${skipped.length}...`);
+  if (!dryRun && toCreate.length === 0) return { success: true, dryRun: false, entity: 'ad_group_ad', created: 0, skipped: skipped.length, plan, response: null };
+
+  try {
+    const customer = getCustomer(cleanCustomerId, loginCustomerId);
+
+    // Pre-pass: make sure every requested CTA exists as an asset, then reuse it.
+    const ctaWanted = [...new Set(toCreate.map((r) => r.cta).filter(Boolean))];
+    let ctaAssets = ctaWanted.length ? await getCallToActionAssets(cleanCustomerId, { loginCustomerId }) : new Map();
+    const ctaEnumOf = (name) => CALL_TO_ACTION_VALUES[name];
+    const unknownCta = ctaWanted.filter((c) => ctaEnumOf(c) === undefined);
+    if (unknownCta.length) {
+      throw new Error(`Nieznane CTA: ${unknownCta.join(', ')}. Dozwolone: ${Object.keys(CALL_TO_ACTION_VALUES).join(', ')}.`);
+    }
+    const ctaToCreate = ctaWanted.filter((c) => !ctaAssets.has(ctaEnumOf(c)));
+    // A simulation must not create assets. Missing CTAs are reported and the ad
+    // is validated without them — the part worth checking is the ad structure.
+    const ctaDeferred = dryRun ? ctaToCreate : [];
+    if (ctaToCreate.length && !dryRun) {
+      await customer.mutateResources(ctaToCreate.map((c) => ({
+        entity: 'Asset',
+        operation: 'create',
+        resource: { call_to_action_asset: { call_to_action: c } },
+      })));
+      ctaAssets = await getCallToActionAssets(cleanCustomerId, { loginCustomerId });
+    }
+
+    const mutations = toCreate.map((r) => {
+      const ad = {
+        final_urls: [r.finalUrl],
+        demand_gen_video_responsive_ad: {
+          videos: [{ asset: r.videoAssetResourceName }],
+          logo_images: [{ asset: `customers/${cleanCustomerId}/assets/${r.logoAssetId}` }],
+          business_name: { text: r.businessName },
+          headlines: r.headlines.map((t) => ({ text: t })),
+          long_headlines: r.longHeadlines.map((t) => ({ text: t })),
+          descriptions: r.descriptions.map((t) => ({ text: t })),
+        },
+      };
+      // `ad.name` is REQUIRED for Demand Gen ads (unlike RSA, where it is a free
+      // label). Google rejects the whole mutate without it, so fall back to a
+      // descriptive, per-video default instead of making every CSV carry one.
+      ad.name = r.name || `${(r.headlines[0] || 'Demand Gen').slice(0, 60)} [${r.videoId}]`;
+      if (r.cta) {
+        const rn = ctaAssets.get(ctaEnumOf(r.cta));
+        if (!rn && !dryRun) throw new Error(`Nie udało się ustalić zasobu CTA dla "${r.cta}".`);
+        if (rn) ad.demand_gen_video_responsive_ad.call_to_actions = [{ asset: rn }];
+      }
+      return {
+        entity: 'AdGroupAd',
+        operation: 'create',
+        resource: { ad_group: `customers/${cleanCustomerId}/adGroups/${r.adGroupId}`, status: r.status, ad },
+      };
+    });
+
+    if (dryRun) {
+      const check = await validateWithApi(customer, chunk(mutations));
+      if (!check.ok) console.log(`[Mutator] ⚠️  Google odrzucił reklamę w walidacji: ${check.error}`);
+      if (ctaDeferred.length) console.log(`[Mutator] ℹ️  CTA do utworzenia przy --commit: ${ctaDeferred.join(', ')} (walidacja poszła bez nich).`);
+      return { success: check.ok, dryRun: true, entity: 'ad_group_ad', toCreate: toCreate.length, skipped: skipped.length, plan, apiValidated: check.ok, apiError: check.error, ctaToCreate: ctaDeferred };
+    }
+
+    const responses = [];
+    for (const part of chunk(mutations)) responses.push(await customer.mutateResources(part));
+    return { success: true, dryRun: false, entity: 'ad_group_ad', created: toCreate.length, skipped: skipped.length, chunks: responses.length, plan, resourceNames: mutatedResourceNames(responses) };
+  } catch (error) {
+    throw new Error(`Nie udało się utworzyć reklam Demand Gen: ${unpackError(error)}`);
+  }
+}
+
+/**
+ * Attach a product feed to Demand Gen ad groups, restricted to specific products.
+ *
+ * Builds the standard three-part listing tree, in ONE mutate per ad group so the
+ * temporary resource names resolve:
+ *   • root  — SUBDIVISION on product_item_id
+ *   • units — one per requested item ID (these serve)
+ *   • other — the "everything else" unit, EXCLUDED, so only the listed products
+ *             can show. Without it the tree is invalid and, if Google accepted
+ *             it, the whole catalogue would run.
+ *
+ * Refuses an ad group that already has a tree: changing one means removing
+ * criteria, and this connector does not delete. Sort that in the UI instead.
+ *
+ * @param {string} customerId
+ * @param {Array<{adGroupId: string|number, itemIds: string[], label?: string}>} items
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>}
+ */
+export async function addListingGroups(customerId, items, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  if (!Array.isArray(items) || items.length === 0) throw new Error('Brak grup do podpięcia kanału produktowego (pusta lista).');
+
+  const problems = [];
+  // Several CSV rows may target the same ad group; merge them into one tree.
+  const byAdGroup = new Map();
+  items.forEach((it, i) => {
+    const adGroupId = String(it.adGroupId ?? '').replace(/[^0-9]/g, '');
+    const ref = it.label || adGroupId || `wiersz ${i + 1}`;
+    if (!adGroupId) { problems.push(`${ref}: brak ad_group_id.`); return; }
+    const ids = (it.itemIds || []).map((v) => String(v ?? '').trim()).filter(Boolean);
+    if (ids.length === 0) problems.push(`${ref}: brak ID produktów (product_item_ids).`);
+    const entry = byAdGroup.get(adGroupId) || { adGroupId, itemIds: [], labels: [] };
+    for (const id of ids) if (!entry.itemIds.includes(id)) entry.itemIds.push(id);
+    entry.labels.push(ref);
+    byAdGroup.set(adGroupId, entry);
+  });
+  if (problems.length) {
+    throw new Error(`🛑 Zablokowano — ${problems.length} problem(ów) walidacji, nic nie zapisano:\n${problems.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  const groups = [...byAdGroup.values()];
+  for (const g of groups) {
+    // root + "everything else" + one node per product must fit a single request.
+    if (g.itemIds.length + 2 > MUTATE_CHUNK) {
+      problems.push(`Grupa ${g.adGroupId}: ${g.itemIds.length} produktów to za dużo na jedno drzewo (limit ${MUTATE_CHUNK - 2}).`);
+    }
+  }
+  if (problems.length) {
+    throw new Error(`🛑 Zablokowano — ${problems.length} problem(ów), nic nie zapisano:\n${problems.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  // Guardrail: never touch an ad group that already has a feed tree.
+  const existing = await getExistingListingGroups(cleanCustomerId, groups.map((g) => g.adGroupId), { loginCustomerId });
+  const haveTree = new Map();
+  for (const n of existing) haveTree.set(n.adGroupId, (haveTree.get(n.adGroupId) || 0) + 1);
+
+  const toBuild = groups.filter((g) => !haveTree.has(g.adGroupId));
+  const skipped = groups.filter((g) => haveTree.has(g.adGroupId));
+
+  const plan = {
+    toBuild: toBuild.map((g) => ({ adGroupId: g.adGroupId, products: g.itemIds.length, itemIds: g.itemIds, nodes: g.itemIds.length + 2 })),
+    skipped: skipped.map((g) => ({ adGroupId: g.adGroupId, existingNodes: haveTree.get(g.adGroupId), reason: 'grupa ma już kanał produktowy — zmiana wymaga usunięcia kryteriów, a konektor nie usuwa (zrób to w UI)' })),
+  };
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Kanał produktowy: do zbudowania ${toBuild.length} drzew, pominięte ${skipped.length}...`);
+  if (!dryRun && toBuild.length === 0) return { success: true, dryRun: false, entity: 'ad_group_criterion', built: 0, skipped: skipped.length, plan, response: null };
+
+  try {
+    const customer = getCustomer(cleanCustomerId, loginCustomerId);
+    // One batch per ad group: temporary IDs only resolve inside a single mutate,
+    // and a failure stays contained to that group's tree.
+    const batches = toBuild.map((g) => {
+      const adGroup = `customers/${cleanCustomerId}/adGroups/${g.adGroupId}`;
+      const temp = (n) => `customers/${cleanCustomerId}/adGroupCriteria/${g.adGroupId}~${n}`;
+      const rootRn = temp(-1);
+
+      return [
+        {
+          entity: 'AdGroupCriterion',
+          operation: 'create',
+          resource: { resource_name: rootRn, ad_group: adGroup, status: 'ENABLED', listing_group: { type: 'SUBDIVISION' } },
+        },
+        {
+          // "Everything else", excluded — only the listed products may serve.
+          entity: 'AdGroupCriterion',
+          operation: 'create',
+          resource: {
+            resource_name: temp(-2),
+            ad_group: adGroup,
+            status: 'ENABLED',
+            negative: true,
+            listing_group: { type: 'UNIT', parent_ad_group_criterion: rootRn, case_value: { product_item_id: {} } },
+          },
+        },
+        ...g.itemIds.map((id, i) => ({
+          entity: 'AdGroupCriterion',
+          operation: 'create',
+          resource: {
+            resource_name: temp(-3 - i),
+            ad_group: adGroup,
+            status: 'ENABLED',
+            listing_group: { type: 'UNIT', parent_ad_group_criterion: rootRn, case_value: { product_item_id: { value: id } } },
+          },
+        })),
+      ];
+    });
+
+    if (dryRun) {
+      const check = await validateWithApi(customer, batches);
+      if (!check.ok) console.log(`[Mutator] ⚠️  Google odrzucił drzewo w walidacji: ${check.error}`);
+      return { success: check.ok, dryRun: true, entity: 'ad_group_criterion', toBuild: toBuild.length, skipped: skipped.length, plan, apiValidated: check.ok, apiError: check.error };
+    }
+
+    const responses = [];
+    for (const b of batches) responses.push(await customer.mutateResources(b));
+    return { success: true, dryRun: false, entity: 'ad_group_criterion', built: toBuild.length, skipped: skipped.length, plan, resourceNames: mutatedResourceNames(responses) };
+  } catch (error) {
+    throw new Error(`Nie udało się zbudować kanału produktowego: ${unpackError(error)}`);
+  }
+}

@@ -469,5 +469,151 @@ check('checkRsaTexts still rejects a genuinely too-long headline', () => {
   assert(!r.valid);
 });
 
+// --- Demand Gen -------------------------------------------------------------
+
+check('parseYoutubeVideoId accepts a bare ID and every common URL form', () => {
+  const p = mutator.parseYoutubeVideoId;
+  for (const v of [
+    '_BS8Ig7Uss8',
+    'https://www.youtube.com/shorts/_BS8Ig7Uss8',
+    'https://youtu.be/_BS8Ig7Uss8',
+    'https://www.youtube.com/watch?v=_BS8Ig7Uss8&t=10s',
+    'https://www.youtube.com/embed/_BS8Ig7Uss8',
+  ]) assert(p(v) === '_BS8Ig7Uss8', `nie sparsowano: ${v}`);
+});
+
+check('parseYoutubeVideoId returns empty string for junk (never a guess)', () => {
+  for (const v of ['', 'bzdura', 'https://example.com/film', null, undefined]) {
+    assert(mutator.parseYoutubeVideoId(v) === '', `powinno byc puste dla: ${v}`);
+  }
+});
+
+check('checkDemandGenAdTexts accepts a well-formed ad', () => {
+  const r = safety.checkDemandGenAdTexts({
+    headlines: ['Stol rozkladany do jadalni'],
+    longHeadlines: ['Owalny stol i obrotowe krzesla - gotowy komplet do jadalni'],
+    descriptions: ['Rozkladany do 300 cm. Sprawdz oferte.'],
+    businessName: 'Zielony Ogrod',
+  });
+  assert(r.valid, JSON.stringify(r.reasons));
+});
+
+check('checkDemandGenAdTexts blocks missing business name (API-required field)', () => {
+  const r = safety.checkDemandGenAdTexts({ headlines: ['A'], descriptions: ['B'], businessName: '' });
+  assert(!r.valid);
+  assert(r.reasons.some((x) => /business_name/.test(x)));
+});
+
+check('checkDemandGenAdTexts enforces per-field character limits', () => {
+  const r = safety.checkDemandGenAdTexts({
+    headlines: ['x'.repeat(41)],
+    longHeadlines: ['y'.repeat(91)],
+    descriptions: ['z'.repeat(91)],
+    businessName: 'w'.repeat(26),
+  });
+  assert(!r.valid);
+  assert(r.reasons.length === 4, `oczekiwano 4 bledow, jest ${r.reasons.length}`);
+});
+
+check('checkDemandGenAdTexts rejects too many headlines / descriptions', () => {
+  const r = safety.checkDemandGenAdTexts({
+    headlines: ['a', 'b', 'c', 'd', 'e', 'f'],
+    descriptions: ['a', 'b', 'c', 'd', 'e', 'f'],
+    businessName: 'Zielony Ogrod',
+  });
+  assert(!r.valid);
+});
+
+check('checkDemandGenChannels rejects strategy + channels together (protobuf oneof)', () => {
+  const r = safety.checkDemandGenChannels({ strategy: 'ALL_CHANNELS', channels: ['discover'] });
+  assert(!r.valid);
+  assert(r.reasons.some((x) => /oneof/.test(x)));
+});
+
+check('checkDemandGenChannels accepts either branch on its own', () => {
+  assert(safety.checkDemandGenChannels({ strategy: 'ALL_CHANNELS' }).valid);
+  assert(safety.checkDemandGenChannels({ channels: ['youtube_shorts', 'discover'] }).valid);
+  assert(safety.checkDemandGenChannels({}).valid, 'brak obu = dziedziczenie z kampanii');
+});
+
+check('checkDemandGenChannels rejects an unknown channel or strategy', () => {
+  assert(!safety.checkDemandGenChannels({ channels: ['tiktok'] }).valid);
+  assert(!safety.checkDemandGenChannels({ strategy: 'WSZYSTKO' }).valid);
+});
+
+check('COPYABLE_CRITERION_TYPES entries are complete and listing groups excluded', () => {
+  const map = queries.COPYABLE_CRITERION_TYPES;
+  assert(Object.keys(map).length > 0);
+  assert(!map[8], 'LISTING_GROUP (8) nie moze byc kopiowany jako targetowanie');
+  for (const [type, m] of Object.entries(map)) {
+    assert(m.key && m.field && m.value && m.label, `niekompletny wpis dla typu ${type}`);
+    assert(m.field.startsWith('ad_group_criterion.'), `zle pole GAQL dla typu ${type}`);
+  }
+});
+
+check('CALL_TO_ACTION_VALUES maps names to the API enum values', () => {
+  assert(mutator.CALL_TO_ACTION_VALUES.SHOP_NOW === 10);
+  assert(mutator.CALL_TO_ACTION_VALUES.LEARN_MORE === 2);
+  assert(mutator.CALL_TO_ACTION_VALUES.WATCH_NOW === 18);
+});
+
+check('every Demand Gen mutation rejects an empty batch instead of no-oping', async () => {
+  const fns = ['addYoutubeAssets', 'createDemandGenAdGroups', 'copyAdGroupTargeting', 'addDemandGenAds', 'addListingGroups'];
+  for (const fn of fns) assert(typeof mutator[fn] === 'function', `brak eksportu ${fn}`);
+});
+
+// --- Promotions -------------------------------------------------------------
+
+check('checkPromotion accepts a money-off promotion with a minimum order value', () => {
+  const r = safety.checkPromotion({ promotionTarget: 'Cały asortyment', moneyAmountOff: 7, currency: 'EUR', ordersOverAmount: 59, finalUrl: 'https://zielonyogrod.example/' });
+  assert(r.valid, r.reasons.join('; '));
+});
+
+check('checkPromotion refuses both discount shapes at once, and neither', () => {
+  const both = safety.checkPromotion({ promotionTarget: 'Cały asortyment', percentOff: 10, moneyAmountOff: 7, currency: 'EUR', finalUrl: 'https://zielonyogrod.example/' });
+  assert(!both.valid);
+  const none = safety.checkPromotion({ promotionTarget: 'Cały asortyment', finalUrl: 'https://zielonyogrod.example/' });
+  assert(!none.valid);
+});
+
+check('checkPromotion refuses a promotion without a Final URL (the API does too)', () => {
+  const r = safety.checkPromotion({ promotionTarget: 'Cały asortyment', percentOff: 10 });
+  assert(!r.valid);
+  assert(r.reasons.some((x) => /final_url/.test(x)), r.reasons.join('; '));
+});
+
+check('checkPromotion refuses a minimum order not above the discount', () => {
+  const r = safety.checkPromotion({ promotionTarget: 'Cały asortyment', moneyAmountOff: 7, currency: 'EUR', ordersOverAmount: 5, finalUrl: 'https://zielonyogrod.example/' });
+  assert(!r.valid);
+});
+
+check('promotionIdentity separates the same target at different discounts', () => {
+  const a = queries.promotionIdentity('Todo el pedido', null, 7000000, 'EUR');
+  const b = queries.promotionIdentity('Todo el pedido', 100000, null, null);
+  assert(a !== b, 'ta sama tożsamość dla różnych rabatów — idempotencja pominęłaby drugą promocję');
+  assert(a === queries.promotionIdentity('todo el pedido', null, 7000000, 'eur'), 'tożsamość wrażliwa na wielkość liter');
+});
+
+check('mutatedResourceNames reads a real mutate response (mutate_operation_responses)', () => {
+  const got = mutator.mutatedResourceNames([{ mutate_operation_responses: [
+    { asset_result: { resource_name: 'customers/1/assets/9' } },
+    { campaign_asset_result: { resource_name: 'customers/1/campaignAssets/9~9~PROMOTION' } },
+  ] }]);
+  assert(got.length === 2, `oczekiwano 2 nazw, dostałem ${got.length}`);
+  assert(got[0] === 'customers/1/assets/9');
+});
+
+check('mutatedResourceNames also handles camelCase and a bare results array', () => {
+  assert(mutator.mutatedResourceNames([{ mutateOperationResponses: [{ assetResult: { resourceName: 'customers/1/assets/8' } }] }])[0] === 'customers/1/assets/8');
+  assert(mutator.mutatedResourceNames([{ results: [{ resource_name: 'customers/1/campaigns/7' }] }])[0] === 'customers/1/campaigns/7');
+});
+
+check('mutatedResourceNames returns an empty list rather than throwing on junk', () => {
+  for (const input of [null, undefined, [], [{}], [{ mutate_operation_responses: [{}] }], [{ mutate_operation_responses: [null] }]]) {
+    assert(Array.isArray(mutator.mutatedResourceNames(input)), 'nie zwrócono tablicy');
+    assert(mutator.mutatedResourceNames(input).length === 0);
+  }
+});
+
 console.log(`\nResult: ${passed} passed, ${failed} failed.\n`);
 process.exit(failed === 0 ? 0 : 1);

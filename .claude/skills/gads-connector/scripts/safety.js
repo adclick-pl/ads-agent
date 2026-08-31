@@ -369,3 +369,148 @@ export function checkBudgetChange(currentAmount, newAmount, opts = {}) {
     reason,
   };
 }
+
+/**
+ * Google Ads hard limits for a Demand Gen video responsive ad.
+ *
+ * The API proto marks only `videos`, `logo_images` and `business_name` as
+ * REQUIRED; the text minimums below are enforced by the server at ad-creation
+ * time, not by the proto. Checking them here turns a rejected mutate into a
+ * readable message before anything is written.
+ */
+export const DEMAND_GEN_LIMITS = {
+  headlineChars: 40,
+  longHeadlineChars: 90,
+  descriptionChars: 90,
+  businessNameChars: 25,
+  minHeadlines: 1,
+  maxHeadlines: 5,
+  maxLongHeadlines: 5,
+  minDescriptions: 1,
+  maxDescriptions: 5,
+};
+
+/**
+ * Validate the text side of a Demand Gen video responsive ad.
+ *
+ * Mirrors `checkRsaTexts`: collect every reason, never throw here — the caller
+ * aggregates problems across the whole batch and blocks the write as a unit, so
+ * the operator fixes one file instead of discovering errors row by row.
+ *
+ * @param {{headlines?: string[], longHeadlines?: string[], descriptions?: string[], businessName?: string}} ad
+ * @returns {{valid: boolean, reasons: string[]}}
+ */
+export function checkDemandGenAdTexts(ad) {
+  const len = adTextLength;
+  const L = DEMAND_GEN_LIMITS;
+  const reasons = [];
+  const hs = (ad.headlines || []).map((h) => String(h ?? '').trim()).filter(Boolean);
+  const lhs = (ad.longHeadlines || []).map((h) => String(h ?? '').trim()).filter(Boolean);
+  const ds = (ad.descriptions || []).map((d) => String(d ?? '').trim()).filter(Boolean);
+  const bn = String(ad.businessName ?? '').trim();
+
+  if (hs.length < L.minHeadlines) reasons.push(`Za mało nagłówków: ${hs.length} (min ${L.minHeadlines}).`);
+  if (hs.length > L.maxHeadlines) reasons.push(`Za dużo nagłówków: ${hs.length} (max ${L.maxHeadlines}).`);
+  if (lhs.length > L.maxLongHeadlines) reasons.push(`Za dużo długich nagłówków: ${lhs.length} (max ${L.maxLongHeadlines}).`);
+  if (ds.length < L.minDescriptions) reasons.push(`Za mało tekstów: ${ds.length} (min ${L.minDescriptions}).`);
+  if (ds.length > L.maxDescriptions) reasons.push(`Za dużo tekstów: ${ds.length} (max ${L.maxDescriptions}).`);
+
+  for (const h of hs) if (len(h) > L.headlineChars) reasons.push(`Nagłówek ${len(h)} zn. (limit ${L.headlineChars}): "${h}"`);
+  for (const h of lhs) if (len(h) > L.longHeadlineChars) reasons.push(`Długi nagłówek ${len(h)} zn. (limit ${L.longHeadlineChars}): "${h}"`);
+  for (const d of ds) if (len(d) > L.descriptionChars) reasons.push(`Tekst ${len(d)} zn. (limit ${L.descriptionChars}): "${d}"`);
+
+  if (!bn) reasons.push('Brak nazwy firmy (business_name) — pole wymagane przez API.');
+  else if (len(bn) > L.businessNameChars) reasons.push(`Nazwa firmy ${len(bn)} zn. (limit ${L.businessNameChars}): "${bn}"`);
+
+  const dupH = hs.length - new Set(hs.map((h) => h.toLowerCase())).size;
+  if (dupH) reasons.push(`${dupH} zduplikowany(ch) nagłówek(ów) w jednej reklamie — Google je scali.`);
+  const dupD = ds.length - new Set(ds.map((d) => d.toLowerCase())).size;
+  if (dupD) reasons.push(`${dupD} zduplikowany(ch) tekst(ów) w jednej reklamie.`);
+
+  return { valid: reasons.length === 0, reasons };
+}
+
+/** Surfaces a Demand Gen ad group can be pinned to, as named in the API proto. */
+export const DEMAND_GEN_CHANNELS = ['youtube_in_stream', 'youtube_in_feed', 'youtube_shorts', 'discover', 'gmail', 'display'];
+
+/** Channel strategies that let Google pick the surfaces itself. */
+export const DEMAND_GEN_STRATEGIES = ['ALL_CHANNELS', 'ALL_OWNED_AND_OPERATED_CHANNELS'];
+
+/**
+ * Validate the channel configuration of a Demand Gen ad group.
+ *
+ * `channel_strategy` and `selected_channels` are a protobuf oneof, so exactly
+ * one of them may be set. Sending both silently drops one — this makes that a
+ * blocking error instead.
+ *
+ * @param {{strategy?: string, channels?: string[]}} cfg
+ * @returns {{valid: boolean, reasons: string[]}}
+ */
+export function checkDemandGenChannels(cfg) {
+  const reasons = [];
+  const strategy = String(cfg.strategy ?? '').trim().toUpperCase();
+  const channels = (cfg.channels || []).map((c) => String(c ?? '').trim().toLowerCase()).filter(Boolean);
+
+  if (strategy && channels.length) {
+    reasons.push('Podano jednocześnie channel_strategy i channels — to pola wykluczające się (oneof). Wybierz jedno.');
+  }
+  if (strategy && !DEMAND_GEN_STRATEGIES.includes(strategy)) {
+    reasons.push(`Nieznana strategia kanałów "${strategy}". Dozwolone: ${DEMAND_GEN_STRATEGIES.join(', ')}.`);
+  }
+  for (const c of channels) {
+    if (!DEMAND_GEN_CHANNELS.includes(c)) reasons.push(`Nieznany kanał "${c}". Dozwolone: ${DEMAND_GEN_CHANNELS.join(', ')}.`);
+  }
+  return { valid: reasons.length === 0, reasons };
+}
+
+/** Google Ads limits for a promotion asset ("promocja"). */
+export const PROMOTION_LIMITS = { targetChars: 25 };
+
+/** Discount modifiers Google accepts on a promotion asset. */
+const PROMOTION_MODIFIERS = new Set(['UP_TO']);
+
+/**
+ * Validate a promotion asset. Like callouts and price extensions, promotion
+ * assets are immutable — "editing" one means creating a replacement and pausing
+ * the old link (`pause-assets`).
+ *
+ * The two discount shapes are mutually exclusive: Google takes EITHER a percent
+ * OFF or a money amount off, never both and never neither. When a minimum order
+ * value is set it must be in the same currency as the discount, otherwise the
+ * API accepts the asset and it silently fails to serve.
+ *
+ * A promotion asset without a Final URL is rejected by the API
+ * (REQUIRED_NONEMPTY_LIST), so the URL is required here rather than optional.
+ *
+ * @param {{promotionTarget: string, percentOff?: number, moneyAmountOff?: number,
+ *          currency?: string, ordersOverAmount?: number, discountModifier?: string,
+ *          finalUrl?: string}} p
+ * @returns {{valid: boolean, reasons: string[]}}
+ */
+export function checkPromotion(p) {
+  const reasons = [];
+  const target = String(p.promotionTarget ?? '').trim();
+  if (!target) reasons.push('Puste "co obejmuje promocja" (promotion_target).');
+  const n = [...target].length;
+  if (n > PROMOTION_LIMITS.targetChars) reasons.push(`promotion_target ma ${n} znaków (limit ${PROMOTION_LIMITS.targetChars}): "${target}"`);
+
+  const hasPct = Number.isFinite(p.percentOff) && p.percentOff > 0;
+  const hasMoney = Number.isFinite(p.moneyAmountOff) && p.moneyAmountOff > 0;
+  if (hasPct && hasMoney) reasons.push('Podano naraz percent_off i money_amount_off — Google przyjmuje tylko jedno z dwóch.');
+  if (!hasPct && !hasMoney) reasons.push('Brak rabatu: podaj percent_off (np. 10) albo money_amount_off (np. 7) z walutą.');
+  if (hasPct && p.percentOff > 100) reasons.push(`percent_off = ${p.percentOff}% (dopuszczalne 0-100).`);
+  if (hasMoney && !String(p.currency ?? '').trim()) reasons.push('money_amount_off wymaga waluty (currency), np. EUR.');
+
+  const hasMin = Number.isFinite(p.ordersOverAmount) && p.ordersOverAmount > 0;
+  if (hasMin && hasMoney && p.ordersOverAmount <= p.moneyAmountOff) {
+    reasons.push(`Próg zamówienia (${p.ordersOverAmount}) nie jest wyższy od rabatu (${p.moneyAmountOff}) — taka promocja nie ma sensu.`);
+  }
+  if (hasMin && !String(p.currency ?? '').trim()) reasons.push('orders_over_amount wymaga waluty (currency) — tej samej co rabat.');
+
+  if (!String(p.finalUrl ?? '').trim()) reasons.push('Brak final_url — Google wymaga adresu docelowego na assecie promocji.');
+
+  const mod = String(p.discountModifier ?? '').trim().toUpperCase();
+  if (mod && !PROMOTION_MODIFIERS.has(mod)) reasons.push(`discount_modifier = "${mod}" — dopuszczalne: ${[...PROMOTION_MODIFIERS].join(', ')} albo puste.`);
+
+  return { valid: reasons.length === 0, reasons };
+}
