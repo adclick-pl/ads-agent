@@ -1196,11 +1196,14 @@ export async function addKeywords(customerId, items, dryRun = false, loginCustom
  * Google prefers. The marker is stripped before validation, so it never counts
  * toward the 30-character limit.
  */
-const HEADLINE_PIN_FIELDS = { H1: 'HEADLINE_1', H2: 'HEADLINE_2', H3: 'HEADLINE_3' };
-function splitHeadlinePin(raw) {
+const PIN_FIELDS = {
+  H1: 'HEADLINE_1', H2: 'HEADLINE_2', H3: 'HEADLINE_3',
+  D1: 'DESCRIPTION_1', D2: 'DESCRIPTION_2',
+};
+function splitAssetPin(raw) {
   const s = String(raw ?? '').trim();
-  const m = s.match(/^(.*?)\s*\|\s*(H[123])$/i);
-  return m ? { text: m[1].trim(), pin: HEADLINE_PIN_FIELDS[m[2].toUpperCase()] } : { text: s, pin: null };
+  const m = s.match(/^(.*?)\s*\|\s*(H[123]|D[12])$/i);
+  return m ? { text: m[1].trim(), pin: PIN_FIELDS[m[2].toUpperCase()] } : { text: s, pin: null };
 }
 
 /**
@@ -1209,9 +1212,10 @@ function splitHeadlinePin(raw) {
  * Ad groups are addressed by `adGroupId` or by `campaignId` + `adGroupName`, same
  * as `addKeywords` — so an ad file can be written before the groups exist.
  *
- * A headline may carry a pin marker (`"tekst|H1"`) to lock it to headline
- * position 1, 2 or 3. Pins are ignored by the content signature below, so an
- * ad differing only in pinning counts as already present.
+ * An asset may carry a pin marker: `"tekst|H1"` locks a headline to position 1,
+ * 2 or 3, `"tekst|D1"` locks a description to position 1 or 2. Pins are ignored
+ * by the content signature below, so an ad differing only in pinning counts as
+ * already present.
  *
  * Idempotent by CONTENT, not by name: an ad is skipped when the target group
  * already holds an RSA with the same headline set, description set and Final URL.
@@ -1236,9 +1240,10 @@ export async function addAds(customerId, items, dryRun = false, loginCustomerId,
   const problems = [];
   const rows = items.map((it, i) => {
     const ref = it.label || it.adGroupName || `wiersz ${i + 1}`;
-    const headlineAssets = (it.headlines || []).map(splitHeadlinePin).filter((h) => h.text);
+    const headlineAssets = (it.headlines || []).map(splitAssetPin).filter((h) => h.text);
     const headlines = headlineAssets.map((h) => h.text);
-    const descriptions = (it.descriptions || []).map((d) => String(d ?? '').trim()).filter(Boolean);
+    const descriptionAssets = (it.descriptions || []).map(splitAssetPin).filter((d) => d.text);
+    const descriptions = descriptionAssets.map((d) => d.text);
     const rsa = checkRsaTexts({ headlines, descriptions, path1: it.path1, path2: it.path2 });
     if (!rsa.valid) rsa.reasons.forEach((r) => problems.push(`${ref}: ${r}`));
 
@@ -1251,7 +1256,7 @@ export async function addAds(customerId, items, dryRun = false, loginCustomerId,
     const adGroupName = String(it.adGroupName ?? '').trim();
     if (!adGroupId && !(campaignId && adGroupName)) problems.push(`${ref}: podaj ad_group_id albo campaign_id + ad_group_name.`);
 
-    return { adGroupId, campaignId, adGroupName, headlines, headlineAssets, descriptions, finalUrl,
+    return { adGroupId, campaignId, adGroupName, headlines, headlineAssets, descriptions, descriptionAssets, finalUrl,
              path1: String(it.path1 ?? '').trim(), path2: String(it.path2 ?? '').trim(), label: ref };
   });
   if (problems.length) {
@@ -1315,7 +1320,7 @@ export async function addAds(customerId, items, dryRun = false, loginCustomerId,
     const mutations = toCreate.map((r) => {
       const rsa = {
         headlines: r.headlineAssets.map((h) => (h.pin ? { text: h.text, pinned_field: h.pin } : { text: h.text })),
-        descriptions: r.descriptions.map((t) => ({ text: t })),
+        descriptions: r.descriptionAssets.map((d) => (d.pin ? { text: d.text, pinned_field: d.pin } : { text: d.text })),
       };
       if (r.path1) rsa.path1 = r.path1;
       if (r.path2) rsa.path2 = r.path2;
@@ -1367,9 +1372,10 @@ export async function updateAdAssets(customerId, items, dryRun = false, loginCus
   const problems = [];
   const rows = items.map((it, i) => {
     const ref = it.label || it.adGroupName || `wiersz ${i + 1}`;
-    const headlineAssets = (it.headlines || []).map(splitHeadlinePin).filter((h) => h.text);
+    const headlineAssets = (it.headlines || []).map(splitAssetPin).filter((h) => h.text);
     const headlines = headlineAssets.map((h) => h.text);
-    const descriptions = (it.descriptions || []).map((d) => String(d ?? '').trim()).filter(Boolean);
+    const descriptionAssets = (it.descriptions || []).map(splitAssetPin).filter((d) => d.text);
+    const descriptions = descriptionAssets.map((d) => d.text);
     const rsa = checkRsaTexts({ headlines, descriptions, path1: it.path1, path2: it.path2 });
     if (!rsa.valid) rsa.reasons.forEach((r) => problems.push(`${ref}: ${r}`));
     const adId = String(it.adId ?? '').replace(/[^0-9]/g, '');
@@ -1379,7 +1385,7 @@ export async function updateAdAssets(customerId, items, dryRun = false, loginCus
     if (!adId && !adGroupId && !(campaignId && adGroupName)) {
       problems.push(`${ref}: podaj ad_id, ad_group_id albo campaign_id + ad_group_name.`);
     }
-    return { adId, adGroupId, campaignId, adGroupName, headlines, headlineAssets, descriptions,
+    return { adId, adGroupId, campaignId, adGroupName, headlines, headlineAssets, descriptions, descriptionAssets,
              path1: String(it.path1 ?? '').trim(), path2: String(it.path2 ?? '').trim(), label: ref };
   });
   if (problems.length) {
@@ -1451,7 +1457,7 @@ export async function updateAdAssets(customerId, items, dryRun = false, loginCus
     const mutations = toUpdate.map((r) => {
       const rsa = {
         headlines: r.headlineAssets.map((h) => (h.pin ? { text: h.text, pinned_field: h.pin } : { text: h.text })),
-        descriptions: r.descriptions.map((t) => ({ text: t })),
+        descriptions: r.descriptionAssets.map((d) => (d.pin ? { text: d.text, pinned_field: d.pin } : { text: d.text })),
       };
       if (r.path1) rsa.path1 = r.path1;
       if (r.path2) rsa.path2 = r.path2;
