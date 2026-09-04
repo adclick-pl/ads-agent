@@ -15,6 +15,9 @@ import {
   getChangeHistory,
   runRawQuery,
   getAccountTimezone,
+  getConversionActions,
+  getConversionActionActivity,
+  getConversionTrackingSetting,
 } from './queries.js';
 import {
   updateCampaignStatus,
@@ -24,12 +27,14 @@ import {
   updateCampaignBudget,
   addCampaignNegativeKeywords,
   addAccountNegativePlacements,
+  addAccountNegativeYouTubeChannels,
   updateFinalUrls,
   clearKeywordFinalUrls,
   buildFinalUrlResourceName,
   swapSitelinkFinalUrls,
   addSitelinks,
   pauseSitelinkLinks,
+  createSearchCampaigns,
   createAdGroups,
   addKeywords,
   addAds,
@@ -45,6 +50,8 @@ import {
   copyAdGroupTargeting,
   addDemandGenAds,
   addListingGroups,
+  createConversionActions,
+  updateConversionActions,
 } from './mutator.js';
 import { resolveAccount, loadAccounts } from './accounts.js';
 import { rowsToCsv, parseCsv } from './csv.js';
@@ -246,7 +253,8 @@ Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
   update-budget           Zmiana budżetu dziennego (--budget-id, --amount).
                           SafetyLimits blokuje skok > ${DEFAULT_MAX_BUDGET_CHANGE_PCT}% — użyj --force, by wymusić.
   add-negatives           Negatywne słowa kluczowe (--campaign, --keywords, --match-type).
-  add-negative-placements Wykluczenia miejsc docelowych (--domains).
+  add-negative-placements Wykluczenia miejsc docelowych — domeny (--domains).
+  add-negative-youtube-channels  Wykluczenia kanałów YouTube na poziomie konta (--channels).
   update-ad-url           Zmiana Final URL reklamy (RSA). Pojedynczo: --ad=<adId> --url=<...>;
                           wsadowo: --input=mapa.csv (kolumny: id,final_url).
   update-keyword-url      Zmiana Final URL słowa kluczowego (override). Pojedynczo:
@@ -261,6 +269,18 @@ Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
                           campaign_id,link_text,description1,description2,final_url).
   pause-sitelinks         Wstrzymuje (PAUSED) istniejące linki sitelink — dane zostają.
                           --input=mapa.csv (kolumna link_resource_name) lub --links="rn1,rn2".
+  create-campaigns        Tworzy KAMPANIE Search wraz z budżetem dziennym. Domyślnie powstają
+                          jako PAUSED (kampania ENABLED zaczyna wydawać od razu). Idempotentne
+                          po nazwie kampanii; budżet o istniejącej nazwie jest ponownie użyty,
+                          a nie duplikowany (kwoty nie zmienia — od tego jest update-budget).
+                          Tylko --input=mapa.csv (kolumny: campaign_name,budget_amount
+                          [,budget_name,status,bidding_strategy,cpc_bid_ceiling,target_cpa,
+                          target_roas,enhanced_cpc,geo_targets,languages,geo_target_type,
+                          search_partners,content_network,eu_political_advertising,
+                          start_date,end_date]).
+                          bidding_strategy: MAXIMIZE_CLICKS (domyślnie) | MAXIMIZE_CONVERSIONS |
+                          MAXIMIZE_CONVERSION_VALUE | MANUAL_CPC. Domyślnie Polska (2616),
+                          polski (1030), obecność w lokalizacji, bez partnerów i sieci reklamowej.
   create-ad-groups        Tworzy grupy reklam w istniejących kampaniach Search. Idempotentne:
                           pomija grupę, której nazwa już jest w kampanii. Tylko --input=mapa.csv
                           (kolumny: campaign_id,ad_group_name[,status]).
@@ -383,6 +403,13 @@ Przykłady:
   node scripts/cli.js --action=raw-query --account=client-one --query="SELECT campaign.name, metrics.cost_micros FROM campaign WHERE segments.date DURING LAST_30_DAYS" --json
   node scripts/cli.js --action=update-budget --customer=1234567890 --budget-id=111222333 --amount=150.00
   node scripts/cli.js --action=update-budget --customer=1234567890 --budget-id=111222333 --amount=150.00 --commit
+
+  Konwersje (wdrożenie śledzenia — Google Ads, potem GTM):
+  node scripts/cli.js --action=list-conversions --account=zielonyogrod --days=30
+  node scripts/cli.js --action=list-conversions --account=zielonyogrod --with-snippets
+  node scripts/cli.js --action=create-conversions --account=zielonyogrod --input=konwersje.csv
+  node scripts/cli.js --action=create-conversions --account=zielonyogrod --input=konwersje.csv --commit
+  node scripts/cli.js --action=update-conversions --account=zielonyogrod --id=987654321 --primary=true --commit
 `);
 }
 
@@ -438,7 +465,7 @@ async function main() {
   const READ_ONLY_ACTIONS = new Set([
     'test-connection', 'list-accessible', 'list-accounts', 'get-campaigns', 'get-keywords',
     'get-search-terms', 'get-pmax-search-terms', 'keyword-ideas', 'get-budgets',
-    'get-change-history', 'raw-query',
+    'get-change-history', 'raw-query', 'list-conversions',
   ]);
   const isMutation = !READ_ONLY_ACTIONS.has(action);
   const dryRun = isMutation && (!args.commit || !!args['dry-run']);
@@ -448,7 +475,7 @@ async function main() {
   // accounts.json; if unknown and this action computes a range, fall back to
   // fetching the account's timezone from the API (one extra query). For raw GAQL
   // without --days, Google evaluates DURING macros in the account timezone anyway.
-  const dateBasedActions = new Set(['get-campaigns', 'get-keywords', 'get-search-terms', 'get-pmax-search-terms', 'get-change-history']);
+  const dateBasedActions = new Set(['get-campaigns', 'get-keywords', 'get-search-terms', 'get-pmax-search-terms', 'get-change-history', 'list-conversions']);
   const usesDateRange = dateBasedActions.has(action) || (action === 'raw-query' && !!args.days);
   let effectiveTimezone = timezone;
   if (usesDateRange && !effectiveTimezone) {
@@ -724,6 +751,14 @@ async function main() {
       console.log(JSON.stringify(result, null, 2));
     }
 
+    else if (action === 'add-negative-youtube-channels') {
+      const channelsString = args.channels;
+      if (!channelsString) throw new Error('add-negative-youtube-channels requires --channels="UCxxx,UCyyy" (channel ids or full channel URLs)');
+      const channels = channelsString.split(',').map((c) => c.trim()).filter(Boolean);
+      const result = await addAccountNegativeYouTubeChannels(customerId, channels, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
     else if (action === 'update-ad-url' || action === 'update-keyword-url') {
       const entity = action === 'update-ad-url' ? 'ad' : 'keyword';
       const items = loadFinalUrlItems(entity, customerId);
@@ -782,6 +817,37 @@ async function main() {
       }
       if (names.length === 0) throw new Error('pause-sitelinks wymaga --input=mapa.csv (kolumna: link_resource_name) albo --links="rn1,rn2"');
       const result = await pauseSitelinkLinks(customerId, names, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'create-campaigns') {
+      // Batch-only, like every other build-out action: a campaign typed one flag
+      // at a time is a campaign nobody reviewed, and under the no-delete policy a
+      // wrong one can only be paused.
+      if (!args.input) throw new Error('create-campaigns wymaga --input=mapa.csv (kolumny: campaign_name,budget_amount[,status,bidding_strategy,cpc_bid_ceiling,target_cpa,target_roas,geo_targets,languages,...])');
+      const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+      if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
+      const items = rows.map((r, i) => ({
+        name: r.campaign_name || r.campaign || r.name,
+        budgetName: r.budget_name || '',
+        budgetAmount: r.budget_amount || r.budget || '',
+        status: r.status || 'PAUSED',
+        biddingStrategy: r.bidding_strategy || r.strategy || 'MAXIMIZE_CLICKS',
+        cpcBidCeiling: r.cpc_bid_ceiling || '',
+        targetCpa: r.target_cpa || '',
+        targetRoas: r.target_roas || '',
+        enhancedCpc: r.enhanced_cpc || '',
+        geoTargets: r.geo_targets || r.geo || '',
+        languages: r.languages || r.language || '',
+        geoTargetType: r.geo_target_type || 'PRESENCE',
+        euPoliticalAdvertising: r.eu_political_advertising || 'DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING',
+        searchPartners: r.search_partners || '',
+        contentNetwork: r.content_network || '',
+        startDate: r.start_date || '',
+        endDate: r.end_date || '',
+        label: `${r.campaign_name || r.campaign || r.name} (wiersz ${i + 2})`,
+      }));
+      const result = await createSearchCampaigns(customerId, items, dryRun, loginCustomerId);
       console.log(JSON.stringify(result, null, 2));
     }
 
@@ -1055,6 +1121,137 @@ async function main() {
         label: `grupa ${r.ad_group_id} (wiersz ${i + 2})`,
       }));
       const result = await addDemandGenAds(customerId, items, dryRun, loginCustomerId, { domain: args.domain });
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'list-conversions') {
+      // The inventory you read BEFORE deploying anything, and the source of the
+      // two values GTM needs afterwards (AW-… + label).
+      const [tracking, actions] = await Promise.all([
+        getConversionTrackingSetting(customerId, readOpts).catch(() => null),
+        getConversionActions(customerId, { loginCustomerId, withSnippets: !!args['with-snippets'], all: !!args.all }),
+      ]);
+
+      // Activity is best-effort: a brand-new account has no history to report and
+      // that must not fail the listing.
+      let rows = actions;
+      if (args.days) {
+        try {
+          const activity = await getConversionActionActivity(customerId, days, readOpts);
+          rows = actions.map((a) => {
+            const m = activity.get(a.id) || { conversions: 0, value: 0, lastConversionDate: null };
+            return { ...a, conversions: Number(m.conversions.toFixed(2)), conversionValue: Number(m.value.toFixed(2)), lastConversionDate: m.lastConversionDate };
+          });
+        } catch (e) {
+          rows = actions.map((a) => ({ ...a, conversions: null, conversionValue: null, lastConversionDate: null }));
+          if (!jsonMode) console.error(`⚠️  Nie udało się pobrać aktywności konwersji: ${e.message}`);
+        }
+      }
+
+      if (jsonMode) {
+        console.log(JSON.stringify({ tracking, actions: rows }));
+      } else if (args.output) {
+        writeCsvSummary(rows.map(({ eventSnippet, globalSiteTag, ...r }) => r), args.output, action);
+      } else {
+        if (tracking) {
+          console.log(`\n🎯 Śledzenie konwersji — ${tracking.accountName || customerId}`);
+          console.log(`   ID konwersji do GTM: ${tracking.gtmConversionId || '— (konto nie ma jeszcze śledzenia konwersji)'}`);
+          console.log(`   Zarządzanie: ${tracking.managedBy}${tracking.crossAccountConversionTrackingId ? ' (ID z konta managera — w GTM użyj właśnie tego)' : ''}`);
+          console.log(`   Dane klienta zaakceptowane: ${tracking.acceptedCustomerDataTerms ? 'tak' : 'nie'} | Konwersje rozszerzone dla leadów: ${tracking.enhancedConversionsForLeads ? 'włączone' : 'wyłączone'}`);
+        }
+        console.log(`\n📋 Konwersje w koncie (${rows.length}):`);
+        console.table(rows.map((a) => ({
+          ID: a.id,
+          Nazwa: a.name,
+          Typ: a.type,
+          Kategoria: a.category,
+          Status: a.status,
+          Główna: a.primaryForGoal ? '✓' : '',
+          Zliczanie: a.countingType,
+          Wartość: a.alwaysUseDefaultValue ? `${a.defaultValue ?? 0} ${a.currency || ''} (zawsze)` : (a.defaultValue ? `${a.defaultValue} ${a.currency || ''} (dom.)` : '—'),
+          'Okno klik.': a.clickLookbackDays ?? '—',
+          'AW / etykieta': a.conversionId ? `${a.conversionId} / ${a.label || '—'}` : '—',
+          ...(args.days ? { [`Konw. ${days}d`]: a.conversions ?? '—', Ostatnia: a.lastConversionDate || '—' } : {}),
+        })));
+        if (args['with-snippets']) {
+          for (const a of rows.filter((x) => x.eventSnippet)) {
+            console.log(`\n--- ${a.name} (${a.conversionId || '?'} / ${a.label || '?'}) ---\n${a.eventSnippet}`);
+          }
+        }
+      }
+    }
+
+    else if (action === 'create-conversions') {
+      // Batch-only on purpose: a conversion action created by a typo cannot be
+      // deleted by this connector (no-delete policy), only hidden.
+      if (!args.input) throw new Error('create-conversions wymaga --input=konwersje.csv (kolumny: name,type,category[,primary_for_goal,counting_type,default_value,currency,always_use_default_value,click_lookback_days,view_lookback_days,attribution_model,status])');
+      const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+      if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
+      const items = rows.map((r, i) => ({
+        name: r.name || r.nazwa,
+        type: r.type || r.typ || 'WEBPAGE',
+        category: r.category || r.kategoria,
+        status: r.status,
+        primaryForGoal: r.primary_for_goal ?? r.primary ?? r.glowna,
+        countingType: r.counting_type || r.counting,
+        defaultValue: r.default_value ?? r.value ?? r.wartosc,
+        currency: r.currency || r.waluta,
+        alwaysUseDefaultValue: r.always_use_default_value ?? r.always_use_value,
+        clickLookbackDays: r.click_lookback_days ?? r.click_lookback,
+        viewLookbackDays: r.view_lookback_days ?? r.view_lookback,
+        attributionModel: r.attribution_model || r.attribution,
+        label: `${r.name || r.nazwa} (wiersz ${i + 2})`,
+      }));
+      const result = await createConversionActions(customerId, items, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'update-conversions') {
+      // Single-item flags are allowed here (unlike create): promoting one action
+      // to primary after its tag is verified is the everyday case.
+      let items = [];
+      if (args.input) {
+        const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+        if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
+        items = rows.map((r, i) => ({
+          id: r.id || r.conversion_action_id,
+          resourceName: r.resource_name,
+          name: r.name,
+          // Passed through only so the mutator can say "type is immutable" instead
+          // of the misleading "this row changes nothing".
+          type: r.type,
+          category: r.category,
+          status: r.status,
+          primaryForGoal: r.primary_for_goal ?? r.primary,
+          countingType: r.counting_type || r.counting,
+          defaultValue: r.default_value ?? r.value,
+          currency: r.currency,
+          alwaysUseDefaultValue: r.always_use_default_value,
+          clickLookbackDays: r.click_lookback_days ?? r.click_lookback,
+          viewLookbackDays: r.view_lookback_days ?? r.view_lookback,
+          attributionModel: r.attribution_model || r.attribution,
+          label: `${r.name || r.id} (wiersz ${i + 2})`,
+        }));
+      } else if (args.id) {
+        items = [{
+          id: args.id,
+          name: args.name,
+          type: args.type,
+          category: args.category,
+          status: args.status,
+          primaryForGoal: args.primary,
+          countingType: args.counting,
+          defaultValue: args.value,
+          currency: args.currency,
+          alwaysUseDefaultValue: args['always-use-value'],
+          clickLookbackDays: args['click-lookback'],
+          viewLookbackDays: args['view-lookback'],
+          attributionModel: args.attribution,
+          label: `konwersja ${args.id}`,
+        }];
+      }
+      if (items.length === 0) throw new Error('update-conversions wymaga --input=zmiany.csv (kolumna id + zmieniane pola) albo --id=123 z flagami (np. --primary=true, --status=HIDDEN, --value=150 --currency=PLN)');
+      const result = await updateConversionActions(customerId, items, dryRun, loginCustomerId);
       console.log(JSON.stringify(result, null, 2));
     }
 

@@ -189,6 +189,54 @@ export function adTextLength(s) {
 }
 
 /**
+ * Longest run of capitals Google still reads as an acronym rather than shouting.
+ * PNG, JPG, RODO and HTML pass; GRATIS, PROMOCJA, NAJTANIEJ do not.
+ */
+export const CAPS_WORD_LIMIT = 4;
+
+/** A whole word written in capitals — Unicode-aware, so ŚWIEŻE counts too. */
+const SHOUTING_RE = new RegExp(`(?<!\\p{L})(\\p{Lu}{${CAPS_WORD_LIMIT + 1},})(?!\\p{L})`, 'gu');
+
+/**
+ * Find words written entirely in capitals in a piece of ad text.
+ *
+ * Google refuses these under "nadmierne użycie wielkich liter" as a **PROHIBITED**
+ * policy topic — not a warning, a hard disapproval. It matters more than a length
+ * slip, because the ad actions send a whole file as ONE atomic batch: a single
+ * shouted word takes every other ad in it down too, and the API answers with a
+ * bare `POLICY_FINDING` that names neither the topic nor the word. The failure
+ * therefore lands after the commit, opaque, and costs a round of detective work
+ * with `validate_only`.
+ *
+ * Acronyms are why this is a length threshold and not a flat ban: PNG, JPG, RODO
+ * and HTML are normal in ad copy and Google accepts them. A brand genuinely
+ * styled in capitals is the known false positive — business names are checked
+ * elsewhere and deliberately left out of this one.
+ *
+ * @param {string} text
+ * @returns {string[]} the shouted words, in order of appearance
+ */
+export function findShoutingWords(text) {
+  return [...String(text ?? '').matchAll(SHOUTING_RE)].map((m) => m[1]);
+}
+
+/**
+ * Turn every shouted word in a set of ad texts into a named reason.
+ * @param {Array<[string, string[]]>} groups - `[label, texts]` pairs
+ * @returns {string[]}
+ */
+function shoutingReasons(groups) {
+  const reasons = [];
+  for (const [kind, list] of groups) {
+    for (const t of list || []) {
+      const shouted = findShoutingWords(t);
+      if (shouted.length) reasons.push(`${kind} zawiera wyraz wersalikami (${shouted.join(', ')}) — Google odrzuca to jako "nadmierne użycie wielkich liter" (PROHIBITED) i ubija całą partię reklam. Zapisz normalnie: "${t}".`);
+    }
+  }
+  return reasons;
+}
+
+/**
  * Validate a Responsive Search Ad before it is written.
  *
  * Pure guardrail (no network). Google rejects the whole mutate batch on a single
@@ -199,6 +247,10 @@ export function adTextLength(s) {
  * Duplicate headlines within one ad are rejected: Google dedupes them silently,
  * so an ad that looks like it has 15 assets can serve with fewer, which quietly
  * weakens the ad strength you thought you had.
+ *
+ * Words in capitals are rejected too (see `findShoutingWords`) — that one is a
+ * PROHIBITED policy topic, so it disapproves the ad rather than merely weakening
+ * it, and takes the whole atomic batch with it.
  *
  * Lengths are measured with `adTextLength`, so keyword insertion is counted the
  * way Google counts it.
@@ -219,6 +271,8 @@ export function checkRsaTexts(ad) {
 
   for (const h of hs) if (len(h) > RSA_LIMITS.headlineChars) reasons.push(`Nagłówek ${len(h)} zn. (limit ${RSA_LIMITS.headlineChars}): "${h}"`);
   for (const d of ds) if (len(d) > RSA_LIMITS.descriptionChars) reasons.push(`Tekst ${len(d)} zn. (limit ${RSA_LIMITS.descriptionChars}): "${d}"`);
+
+  reasons.push(...shoutingReasons([['Nagłówek', hs], ['Tekst', ds]]));
 
   const dupH = hs.length - new Set(hs.map((h) => h.toLowerCase())).size;
   if (dupH) reasons.push(`${dupH} zduplikowany(ch) nagłówek(ów) w jednej reklamie — Google je scali.`);
@@ -339,6 +393,102 @@ export function checkAdGroupName(name) {
   return { valid: reasons.length === 0, reasons };
 }
 
+/** Google Ads hard limit for a campaign name. */
+export const CAMPAIGN_NAME_LIMIT = 255;
+
+/** Bidding strategies `create-campaigns` can set on a Search campaign. */
+export const SEARCH_BIDDING_STRATEGIES = ['MAXIMIZE_CLICKS', 'MAXIMIZE_CONVERSIONS', 'MAXIMIZE_CONVERSION_VALUE', 'MANUAL_CPC'];
+
+/** Which extra knob belongs to which strategy. Anything else is a silent no-op → blocked. */
+const STRATEGY_KNOB = {
+  MAXIMIZE_CLICKS: 'cpcBidCeiling',
+  MAXIMIZE_CONVERSIONS: 'targetCpa',
+  MAXIMIZE_CONVERSION_VALUE: 'targetRoas',
+  MANUAL_CPC: null,
+};
+
+/** How a campaign treats people outside the targeted area. */
+export const GEO_TARGET_TYPES = ['PRESENCE', 'PRESENCE_OR_INTEREST'];
+
+/**
+ * EU political-advertising declaration. Google made this REQUIRED on campaign
+ * creation (Regulation (EU) 2024/900) — a campaign without it is rejected
+ * outright. It is a legal statement about the ADS, so the connector never
+ * guesses "contains": the default declares that they do not, and an account
+ * that really runs political ads has to say so explicitly in the CSV.
+ */
+export const EU_POLITICAL_ADVERTISING = ['DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING', 'CONTAINS_EU_POLITICAL_ADVERTISING'];
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Validate one Search campaign spec before anything is created.
+ *
+ * Blocks are things Google would reject, or that silently do nothing — a
+ * `target_roas` on a Maximize-clicks campaign is accepted by the CSV and then
+ * ignored by the API, which is worse than an error because nobody notices.
+ * Warnings are configurations Google accepts and the account regrets: a campaign
+ * born ENABLED starts spending the moment it is written, and the display network
+ * inside a Search campaign quietly eats the budget.
+ *
+ * @param {object} c - normalised campaign row (see createSearchCampaigns)
+ * @returns {{valid: boolean, reasons: string[], warnings: string[]}}
+ */
+export function checkCampaignSpec(c) {
+  const reasons = [];
+  const warnings = [];
+
+  const name = String(c.name ?? '').trim();
+  if (!name) reasons.push('Pusta nazwa kampanii.');
+  const chars = [...name].length;
+  if (chars > CAMPAIGN_NAME_LIMIT) reasons.push(`Nazwa ma ${chars} znaków (limit ${CAMPAIGN_NAME_LIMIT}).`);
+
+  const budget = Number(c.budgetAmount);
+  if (!Number.isFinite(budget) || budget <= 0) reasons.push(`Budżet dzienny musi być liczbą dodatnią (jest "${c.budgetAmount}").`);
+
+  const strategy = String(c.biddingStrategy ?? '').trim().toUpperCase();
+  if (!SEARCH_BIDDING_STRATEGIES.includes(strategy)) {
+    reasons.push(`Strategia "${c.biddingStrategy}" nieobsługiwana. Dozwolone: ${SEARCH_BIDDING_STRATEGIES.join(', ')}.`);
+  } else {
+    // A knob that belongs to another strategy would be accepted and ignored.
+    const allowed = STRATEGY_KNOB[strategy];
+    for (const knob of ['cpcBidCeiling', 'targetCpa', 'targetRoas']) {
+      if (c[knob] == null || c[knob] === '') continue;
+      if (knob !== allowed) reasons.push(`"${knob}" nie działa ze strategią ${strategy} — Google przyjmie kampanię i zignoruje tę wartość. Usuń kolumnę albo zmień strategię.`);
+      else if (!(Number(c[knob]) > 0)) reasons.push(`"${knob}" musi być liczbą dodatnią (jest "${c[knob]}").`);
+    }
+  }
+
+  const status = String(c.status ?? '').trim().toUpperCase();
+  if (!['ENABLED', 'PAUSED'].includes(status)) reasons.push(`Status musi być ENABLED albo PAUSED (jest "${c.status}").`);
+  if (status === 'ENABLED') warnings.push(`Kampania powstanie jako ENABLED — zacznie wydawać budżet od razu po zapisie.`);
+
+  if (!Array.isArray(c.geoTargets) || c.geoTargets.length === 0) reasons.push('Brak lokalizacji docelowej (geo_targets).');
+  else c.geoTargets.forEach((g) => { if (!/^\d+$/.test(String(g))) reasons.push(`Lokalizacja "${g}" nie jest numerycznym ID geoTargetConstant.`); });
+
+  if (!Array.isArray(c.languages) || c.languages.length === 0) reasons.push('Brak języka (languages).');
+  else c.languages.forEach((l) => { if (!/^\d+$/.test(String(l))) reasons.push(`Język "${l}" nie jest numerycznym ID languageConstant.`); });
+
+  const geoType = String(c.geoTargetType ?? '').trim().toUpperCase();
+  if (!GEO_TARGET_TYPES.includes(geoType)) reasons.push(`geo_target_type musi być ${GEO_TARGET_TYPES.join(' albo ')} (jest "${c.geoTargetType}").`);
+
+  const euPolitical = String(c.euPoliticalAdvertising ?? '').trim().toUpperCase();
+  if (!EU_POLITICAL_ADVERTISING.includes(euPolitical)) reasons.push(`eu_political_advertising musi być ${EU_POLITICAL_ADVERTISING.join(' albo ')} (jest "${c.euPoliticalAdvertising}").`);
+  if (euPolitical === 'CONTAINS_EU_POLITICAL_ADVERTISING') warnings.push('Kampania zadeklarowana jako reklama polityczna w UE — Google nałoży na nią osobne wymogi weryfikacji i przejrzystości. Upewnij się, że to świadoma deklaracja.');
+
+  if (c.contentNetwork) warnings.push('Włączona sieć reklamowa w kampanii w wyszukiwarce — zwykle zjada budżet po znacznie gorszych stawkach niż wyszukiwarka.');
+
+  for (const [field, value] of [['start_date', c.startDate], ['end_date', c.endDate]]) {
+    if (!value) continue;
+    if (!ISO_DATE_RE.test(String(value))) reasons.push(`${field} musi być w formacie RRRR-MM-DD (jest "${value}").`);
+  }
+  if (c.startDate && c.endDate && ISO_DATE_RE.test(String(c.startDate)) && ISO_DATE_RE.test(String(c.endDate)) && String(c.endDate) < String(c.startDate)) {
+    reasons.push(`end_date (${c.endDate}) jest wcześniejszy niż start_date (${c.startDate}).`);
+  }
+
+  return { valid: reasons.length === 0, reasons, warnings };
+}
+
 /**
  * Decide whether a budget change is within the safety limit.
  * @param {number|null|undefined} currentAmount - current daily budget (standard currency)
@@ -421,6 +571,9 @@ export function checkDemandGenAdTexts(ad) {
 
   if (!bn) reasons.push('Brak nazwy firmy (business_name) — pole wymagane przez API.');
   else if (len(bn) > L.businessNameChars) reasons.push(`Nazwa firmy ${len(bn)} zn. (limit ${L.businessNameChars}): "${bn}"`);
+
+  // Nazwa firmy świadomie pominięta — marka bywa zapisana wersalikami legalnie.
+  reasons.push(...shoutingReasons([['Nagłówek', hs], ['Długi nagłówek', lhs], ['Tekst', ds]]));
 
   const dupH = hs.length - new Set(hs.map((h) => h.toLowerCase())).size;
   if (dupH) reasons.push(`${dupH} zduplikowany(ch) nagłówek(ów) w jednej reklamie — Google je scali.`);
@@ -513,4 +666,152 @@ export function checkPromotion(p) {
   if (mod && !PROMOTION_MODIFIERS.has(mod)) reasons.push(`discount_modifier = "${mod}" — dopuszczalne: ${[...PROMOTION_MODIFIERS].join(', ')} albo puste.`);
 
   return { valid: reasons.length === 0, reasons };
+}
+
+// --- Conversion actions (wdrażanie konwersji) --------------------------------
+
+/**
+ * Conversion action types this connector creates. Deliberately narrow: these are
+ * the ones you deploy by hand — a website tag (`WEBPAGE`), a call from the site
+ * (`WEBSITE_CALL`), or offline imports (`UPLOAD_CLICKS` / `UPLOAD_CALLS`).
+ *
+ * Everything else in the API enum (GOOGLE_ANALYTICS_4_*, FIREBASE_*, STORE_*,
+ * app-analytics types) is NOT created this way — those appear in the account by
+ * linking GA4 / Firebase / a store feed, and asking the API to create one either
+ * fails or produces a dead action that never fires.
+ */
+export const CONVERSION_TYPES = ['WEBPAGE', 'WEBSITE_CALL', 'UPLOAD_CLICKS', 'UPLOAD_CALLS'];
+
+/** Conversion categories Google accepts (the enum minus UNSPECIFIED/UNKNOWN). */
+export const CONVERSION_CATEGORIES = [
+  'DEFAULT', 'PAGE_VIEW', 'PURCHASE', 'SIGNUP', 'DOWNLOAD', 'ADD_TO_CART', 'BEGIN_CHECKOUT',
+  'SUBSCRIBE_PAID', 'PHONE_CALL_LEAD', 'IMPORTED_LEAD', 'SUBMIT_LEAD_FORM', 'BOOK_APPOINTMENT',
+  'REQUEST_QUOTE', 'GET_DIRECTIONS', 'OUTBOUND_CLICK', 'CONTACT', 'ENGAGEMENT', 'STORE_VISIT',
+  'STORE_SALE', 'QUALIFIED_LEAD', 'CONVERTED_LEAD',
+];
+
+/** Categories that describe a lead, not a sale — used only for the warnings below. */
+const LEAD_CATEGORIES = new Set([
+  'SIGNUP', 'PHONE_CALL_LEAD', 'IMPORTED_LEAD', 'SUBMIT_LEAD_FORM', 'BOOK_APPOINTMENT',
+  'REQUEST_QUOTE', 'CONTACT', 'QUALIFIED_LEAD', 'CONVERTED_LEAD',
+]);
+
+/** How many conversions one click may produce. */
+export const CONVERSION_COUNTING_TYPES = ['ONE_PER_CLICK', 'MANY_PER_CLICK'];
+
+/** Attribution models settable on a conversion action. */
+export const CONVERSION_ATTRIBUTION_MODELS = [
+  'GOOGLE_ADS_LAST_CLICK', 'GOOGLE_SEARCH_ATTRIBUTION_FIRST_CLICK',
+  'GOOGLE_SEARCH_ATTRIBUTION_LINEAR', 'GOOGLE_SEARCH_ATTRIBUTION_TIME_DECAY',
+  'GOOGLE_SEARCH_ATTRIBUTION_POSITION_BASED', 'GOOGLE_SEARCH_ATTRIBUTION_DATA_DRIVEN',
+];
+
+/**
+ * Statuses the connector will set on a conversion action. `REMOVED` is absent on
+ * purpose (no-delete policy) — retiring a conversion means `HIDDEN`, which stops
+ * it from counting while the history stays readable.
+ */
+export const CONVERSION_STATUSES = ['ENABLED', 'HIDDEN'];
+
+/** Google's hard bounds on the conversion windows, in days. */
+export const CONVERSION_LOOKBACK = { clickMin: 1, clickMax: 90, viewMin: 1, viewMax: 30 };
+
+/**
+ * Validate one conversion action before it is created or updated.
+ *
+ * Two separate outputs, and the difference matters: `reasons` are API-level
+ * errors that block the batch, `warnings` are configurations the API accepts
+ * happily but which quietly break measurement or bidding later (a purchase
+ * counted once per click, revenue flattened to one default value). Warnings ride
+ * along in the dry-run plan so the operator sees them before `--commit`.
+ *
+ * On an update only the fields actually present are checked — a CSV row that
+ * only flips `primary_for_goal` must not be rejected for "missing type".
+ *
+ * @param {{name?: string, type?: string, category?: string, status?: string,
+ *          countingType?: string, attributionModel?: string, primaryForGoal?: boolean,
+ *          defaultValue?: number|string, currency?: string, alwaysUseDefaultValue?: boolean,
+ *          clickLookbackDays?: number|string, viewLookbackDays?: number|string}} c
+ * @param {{isUpdate?: boolean}} [opts]
+ * @returns {{valid: boolean, reasons: string[], warnings: string[]}}
+ */
+export function checkConversionAction(c, opts = {}) {
+  const isUpdate = !!opts.isUpdate;
+  const reasons = [];
+  const warnings = [];
+  const up = (v) => String(v ?? '').trim().toUpperCase();
+  const given = (v) => v !== undefined && v !== null && String(v).trim() !== '';
+
+  const name = String(c.name ?? '').trim();
+  if (!isUpdate && !name) reasons.push('Brak nazwy konwersji (name).');
+
+  const type = up(c.type);
+  if (given(c.type) && !CONVERSION_TYPES.includes(type)) {
+    reasons.push(`type = "${type}" — ten connector tworzy tylko: ${CONVERSION_TYPES.join(', ')}. Konwersje z GA4/Firebase powstają przez połączenie usługi, nie przez API.`);
+  }
+  if (!isUpdate && !given(c.type)) reasons.push('Brak type (np. WEBPAGE dla konwersji ze strony).');
+
+  const category = up(c.category);
+  if (given(c.category) && !CONVERSION_CATEGORIES.includes(category)) {
+    reasons.push(`category = "${category}" — nieznana kategoria. Dozwolone: ${CONVERSION_CATEGORIES.join(', ')}.`);
+  }
+  if (!isUpdate && !given(c.category)) reasons.push('Brak category (np. PURCHASE dla zakupu, SUBMIT_LEAD_FORM dla formularza).');
+
+  if (given(c.status)) {
+    assertNotRemoval(c.status); // throws with the no-delete policy
+    if (!CONVERSION_STATUSES.includes(up(c.status))) {
+      reasons.push(`status = "${up(c.status)}" — dozwolone: ${CONVERSION_STATUSES.join(', ')} (wycofanie konwersji to HIDDEN, nie usunięcie).`);
+    }
+  }
+
+  const counting = up(c.countingType);
+  if (given(c.countingType) && !CONVERSION_COUNTING_TYPES.includes(counting)) {
+    reasons.push(`counting_type = "${counting}" — dozwolone: ${CONVERSION_COUNTING_TYPES.join(', ')}.`);
+  }
+
+  if (given(c.attributionModel) && !CONVERSION_ATTRIBUTION_MODELS.includes(up(c.attributionModel))) {
+    reasons.push(`attribution_model = "${up(c.attributionModel)}" — dozwolone: ${CONVERSION_ATTRIBUTION_MODELS.join(', ')}.`);
+  }
+
+  if (given(c.defaultValue)) {
+    const v = Number(c.defaultValue);
+    if (!Number.isFinite(v) || v < 0) reasons.push(`default_value = "${c.defaultValue}" — musi być liczbą >= 0.`);
+  }
+  if (given(c.currency) && !/^[A-Za-z]{3}$/.test(String(c.currency).trim())) {
+    reasons.push(`currency = "${c.currency}" — oczekiwano trzyliterowego kodu waluty (np. PLN).`);
+  }
+  if (c.alwaysUseDefaultValue === true && !given(c.defaultValue)) {
+    reasons.push('always_use_default_value = TRUE bez default_value — każda konwersja dostałaby wartość 0.');
+  }
+
+  const win = (v, min, max, label) => {
+    if (!given(v)) return;
+    const n = Number(v);
+    if (!Number.isInteger(n) || n < min || n > max) reasons.push(`${label} = "${v}" — musi być całkowitą liczbą dni z zakresu ${min}-${max}.`);
+  };
+  win(c.clickLookbackDays, CONVERSION_LOOKBACK.clickMin, CONVERSION_LOOKBACK.clickMax, 'click_through_lookback_days');
+  win(c.viewLookbackDays, CONVERSION_LOOKBACK.viewMin, CONVERSION_LOOKBACK.viewMax, 'view_through_lookback_days');
+
+  // Configurations the API accepts and the account regrets.
+  if (category === 'PURCHASE') {
+    if (c.alwaysUseDefaultValue === true) {
+      warnings.push(`"${name || 'PURCHASE'}": always_use_default_value na zakupie spłaszcza przychód do jednej kwoty — ROAS przestanie odpowiadać rzeczywistości. Wartość powinna przychodzić ze strony (transaction value).`);
+    }
+    if (counting === 'ONE_PER_CLICK') {
+      warnings.push(`"${name || 'PURCHASE'}": counting_type = ONE_PER_CLICK na zakupie — drugie zamówienie z tego samego kliknięcia nie policzy się. Dla e-commerce standardem jest MANY_PER_CLICK.`);
+    }
+    if (c.primaryForGoal === false) {
+      warnings.push(`"${name || 'PURCHASE'}": zakup jako konwersja dodatkowa (primary_for_goal = FALSE) nie wejdzie do licytacji — Smart Bidding jej nie użyje.`);
+    }
+  }
+  if (LEAD_CATEGORIES.has(category)) {
+    if (counting === 'MANY_PER_CLICK') {
+      warnings.push(`"${name || category}": counting_type = MANY_PER_CLICK na leadzie policzy każde powtórzenie tego zdarzenia z jednego kliknięcia. Dla leadów standardem jest ONE_PER_CLICK.`);
+    }
+    if (!given(c.defaultValue) && c.alwaysUseDefaultValue !== true) {
+      warnings.push(`"${name || category}": lead bez wartości (default_value) — tCPA zadziała, tROAS nie ma z czego liczyć.`);
+    }
+  }
+
+  return { valid: reasons.length === 0, reasons, warnings };
 }

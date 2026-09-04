@@ -804,6 +804,79 @@ export async function getCurrentFinalUrls(customerId, entity, resourceNames, opt
  * @returns {'campaign'|'ad_group'|'customer'}
  */
 /**
+ * List the campaigns that already EXIST on the account (ENABLED or PAUSED),
+ * as `{campaignId, name, status, channelType, budgetId, budgetName, budgetAmount}`.
+ *
+ * `create-campaigns` reads this to converge instead of accumulating: a campaign
+ * whose name is already on the account is skipped, not duplicated. A paused
+ * campaign counts as "exists" — a re-run must never resurrect what someone
+ * deliberately paused, and the no-delete policy means a duplicate campaign can
+ * only ever be hidden, not taken back.
+ *
+ * @param {string} customerId
+ * @param {{loginCustomerId?: string}} [opts]
+ * @returns {Promise<Array<{campaignId:string, name:string, status:number|string,
+ *                          channelType:number|string, budgetId:string|null,
+ *                          budgetName:string, budgetAmount:number|null}>>}
+ */
+export async function getExistingCampaigns(customerId, opts = {}) {
+  const clean = String(customerId).replace(/-/g, '');
+  const rows = await runRawQuery(clean,
+    `SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type,
+            campaign_budget.id, campaign_budget.name, campaign_budget.amount_micros
+     FROM campaign
+     WHERE campaign.status IN ('ENABLED', 'PAUSED')`,
+    { loginCustomerId: opts.loginCustomerId });
+  return rows.map((r) => ({
+    campaignId: String(r['campaign.id']),
+    name: r['campaign.name'] || '',
+    status: r['campaign.status'],
+    channelType: r['campaign.advertising_channel_type'],
+    budgetId: r['campaign_budget.id'] ? String(r['campaign_budget.id']) : null,
+    budgetName: r['campaign_budget.name'] || '',
+    budgetAmount: r['campaign_budget.amount_micros'] != null ? Number(r['campaign_budget.amount_micros']) / 1000000 : null,
+  }));
+}
+
+/**
+ * Budgets already on the account, keyed by lower-cased name.
+ *
+ * Google happily accepts two budgets with the same name, which leaves an account
+ * with "[Search] Brand" twice and no way to tell them apart in a report. So
+ * `create-campaigns` reuses a same-named budget rather than minting a second one —
+ * and reports the reuse (plus the amount it found) instead of silently rewriting
+ * it, because changing a live budget belongs to `update-budget`, where the 40%
+ * SafetyLimit lives.
+ *
+ * @param {string} customerId
+ * @param {{loginCustomerId?: string}} [opts]
+ * @returns {Promise<Map<string,{budgetId:string, name:string, amount:number|null, explicitlyShared:boolean}>>}
+ */
+export async function getBudgetsByName(customerId, opts = {}) {
+  const clean = String(customerId).replace(/-/g, '');
+  const rows = await runRawQuery(clean,
+    `SELECT campaign_budget.id, campaign_budget.name, campaign_budget.amount_micros,
+            campaign_budget.explicitly_shared
+     FROM campaign_budget
+     WHERE campaign_budget.status = 'ENABLED'`,
+    { loginCustomerId: opts.loginCustomerId });
+  const out = new Map();
+  for (const r of rows) {
+    const name = r['campaign_budget.name'] || '';
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (out.has(key)) continue; // first one wins; the duplicate is exactly what we refuse to add to
+    out.set(key, {
+      budgetId: String(r['campaign_budget.id']),
+      name,
+      amount: r['campaign_budget.amount_micros'] != null ? Number(r['campaign_budget.amount_micros']) / 1000000 : null,
+      explicitlyShared: !!r['campaign_budget.explicitly_shared'],
+    });
+  }
+  return out;
+}
+
+/**
  * List the ad groups that already EXIST in the given campaigns (ENABLED or
  * PAUSED — not removed), as `{campaignId, adGroupId, name, status}`.
  *
@@ -1600,4 +1673,229 @@ export async function getCallToActionAssets(customerId, opts = {}) {
     if (cta !== null && cta !== undefined && !out.has(cta)) out.set(cta, String(r['asset.resource_name']));
   }
   return out;
+}
+
+/**
+ * Pull the Google Ads conversion ID and label out of a conversion action's tag
+ * snippets — the two values GTM's "Google Ads Conversion Tracking" tag asks for.
+ *
+ * Both live inside the event snippet as `send_to: 'AW-123456789/AbC-dEf...'`, so
+ * this reads them from the `AW-…/label` pair rather than trying to parse gtag
+ * syntax (which Google has already rewritten several times). The global site tag
+ * carries the `AW-` half only, and is the fallback when a snippet has no label
+ * yet (a freshly created action can come back without one).
+ *
+ * Pure function — no API call, so it stays testable offline.
+ *
+ * @param {Array<object>|null|undefined} snippets - `conversion_action.tag_snippets`
+ * @returns {{conversionId: string|null, label: string|null, sendTo: string|null}}
+ */
+export function parseTagSnippets(snippets) {
+  const texts = [];
+  for (const s of Array.isArray(snippets) ? snippets : []) {
+    if (!s || typeof s !== 'object') continue;
+    texts.push(String(s.event_snippet ?? s.eventSnippet ?? ''));
+    texts.push(String(s.global_site_tag ?? s.globalSiteTag ?? ''));
+  }
+  const blob = texts.join('\n');
+  const pair = blob.match(/AW-(\d+)\/([A-Za-z0-9_-]+)/);
+  if (pair) {
+    return { conversionId: `AW-${pair[1]}`, label: pair[2], sendTo: `AW-${pair[1]}/${pair[2]}` };
+  }
+  const idOnly = blob.match(/AW-(\d+)/);
+  if (idOnly) return { conversionId: `AW-${idOnly[1]}`, label: null, sendTo: null };
+  return { conversionId: null, label: null, sendTo: null };
+}
+
+/**
+ * Conversion actions in the account — the inventory you read before deploying
+ * anything, and the source of the values GTM needs afterwards.
+ *
+ * REMOVED actions are filtered out by default (they only add noise); `opts.all`
+ * brings them back. Enums arrive from the API as numbers and are decoded here
+ * via the library's own maps, so nothing drifts when Google adds a value.
+ *
+ * `opts.withSnippets` costs nothing extra in queries but makes rows much bigger,
+ * so it is opt-in: it adds `conversionId` / `label` (parsed) plus the raw
+ * `eventSnippet` for the GTM step.
+ *
+ * @param {string} customerId
+ * @param {{loginCustomerId?: string, withSnippets?: boolean, all?: boolean}} [opts]
+ * @returns {Promise<Array<object>>} One row per conversion action, sorted by name
+ */
+export async function getConversionActions(customerId, opts = {}) {
+  const T = enums.ConversionActionType;
+  const C = enums.ConversionActionCategory;
+  const S = enums.ConversionActionStatus;
+  const CT = enums.ConversionActionCountingType;
+  const AM = enums.AttributionModel;
+  const OR = enums.ConversionOrigin;
+
+  const query = `
+    SELECT
+      conversion_action.id,
+      conversion_action.name,
+      conversion_action.resource_name,
+      conversion_action.type,
+      conversion_action.category,
+      conversion_action.status,
+      conversion_action.origin,
+      conversion_action.primary_for_goal,
+      conversion_action.counting_type,
+      conversion_action.value_settings.default_value,
+      conversion_action.value_settings.default_currency_code,
+      conversion_action.value_settings.always_use_default_value,
+      conversion_action.click_through_lookback_window_days,
+      conversion_action.view_through_lookback_window_days,
+      conversion_action.attribution_model_settings.attribution_model,
+      conversion_action.owner_customer,
+      conversion_action.tag_snippets
+    FROM conversion_action
+    ${opts.all ? '' : "WHERE conversion_action.status != 'REMOVED'"}
+  `;
+  const rows = await runRawQuery(customerId, query, { loginCustomerId: opts.loginCustomerId });
+
+  const out = rows.map((r) => {
+    const snippets = r['conversion_action.tag_snippets'];
+    const tag = parseTagSnippets(snippets);
+    const row = {
+      id: String(r['conversion_action.id'] ?? ''),
+      name: r['conversion_action.name'] || '',
+      type: T[r['conversion_action.type']] || String(r['conversion_action.type'] ?? ''),
+      category: C[r['conversion_action.category']] || String(r['conversion_action.category'] ?? ''),
+      status: S[r['conversion_action.status']] || String(r['conversion_action.status'] ?? ''),
+      origin: OR[r['conversion_action.origin']] || String(r['conversion_action.origin'] ?? ''),
+      primaryForGoal: r['conversion_action.primary_for_goal'] === true,
+      countingType: CT[r['conversion_action.counting_type']] || String(r['conversion_action.counting_type'] ?? ''),
+      defaultValue: r['conversion_action.value_settings.default_value'] ?? null,
+      currency: r['conversion_action.value_settings.default_currency_code'] || null,
+      alwaysUseDefaultValue: r['conversion_action.value_settings.always_use_default_value'] === true,
+      clickLookbackDays: r['conversion_action.click_through_lookback_window_days'] ?? null,
+      viewLookbackDays: r['conversion_action.view_through_lookback_window_days'] ?? null,
+      attributionModel: AM[r['conversion_action.attribution_model_settings.attribution_model']]
+        || String(r['conversion_action.attribution_model_settings.attribution_model'] ?? ''),
+      // Cross-account tracking: the action lives on the manager, not this account.
+      ownerCustomer: r['conversion_action.owner_customer'] || null,
+      conversionId: tag.conversionId,
+      label: tag.label,
+      resourceName: r['conversion_action.resource_name'] || '',
+    };
+    if (opts.withSnippets) {
+      const first = (Array.isArray(snippets) ? snippets : [])[0] || {};
+      row.eventSnippet = String(first.event_snippet ?? first.eventSnippet ?? '') || null;
+      row.globalSiteTag = String(first.global_site_tag ?? first.globalSiteTag ?? '') || null;
+    }
+    return row;
+  });
+
+  return out.sort((a, b) => a.name.localeCompare(b.name, 'pl'));
+}
+
+/**
+ * When each conversion action last actually fired, plus its volume in the window.
+ *
+ * This is the question that matters right after deploying a tag ("did anything
+ * come through?") and the one that spots a tag that died months ago. Kept as a
+ * separate call because `conversion_action` metrics need a date range while the
+ * configuration read above must work on a brand-new account with no history.
+ *
+ * @param {string} customerId
+ * @param {number} [days=30]
+ * @param {{loginCustomerId?: string, timezone?: string}} [opts]
+ * @returns {Promise<Map<string, {conversions: number, value: number, lastConversionDate: string|null}>>}
+ *   keyed by conversion action ID
+ */
+export async function getConversionActionActivity(customerId, days = 30, opts = {}) {
+  const { start, end } = calculateDateRange(days, opts.timezone);
+
+  // Two queries, because Google refuses to segment `conversion_last_conversion_date`
+  // by date (query_error 53): the window gives the volume, the unsegmented read
+  // gives the last time the tag fired at all — which is the answer you want when
+  // the window is empty ("dead since March" vs "never fired").
+  const windowed = await runRawQuery(customerId, `
+    SELECT
+      conversion_action.id,
+      metrics.all_conversions,
+      metrics.all_conversions_value
+    FROM conversion_action
+    WHERE segments.date BETWEEN '${start}' AND '${end}'
+  `, { loginCustomerId: opts.loginCustomerId });
+
+  const map = new Map();
+  for (const r of windowed) {
+    const id = String(r['conversion_action.id'] ?? '');
+    if (!id) continue;
+    const prev = map.get(id) || { conversions: 0, value: 0, lastConversionDate: null };
+    map.set(id, {
+      conversions: prev.conversions + (Number(r['metrics.all_conversions']) || 0),
+      value: prev.value + (Number(r['metrics.all_conversions_value']) || 0),
+      lastConversionDate: null,
+    });
+  }
+
+  try {
+    const lifetime = await runRawQuery(customerId, `
+      SELECT conversion_action.id, metrics.conversion_last_conversion_date
+      FROM conversion_action
+    `, { loginCustomerId: opts.loginCustomerId });
+    for (const r of lifetime) {
+      const id = String(r['conversion_action.id'] ?? '');
+      if (!id) continue;
+      const prev = map.get(id) || { conversions: 0, value: 0, lastConversionDate: null };
+      map.set(id, { ...prev, lastConversionDate: r['metrics.conversion_last_conversion_date'] || null });
+    }
+  } catch { /* volume alone is still useful */ }
+
+  return map;
+}
+
+/**
+ * The account's conversion tracking setting — above all the conversion tracking
+ * ID, which is the `AW-…` number GTM has to send to.
+ *
+ * The trap this answers: on an account under an MCC with cross-account conversion
+ * tracking, the ID belongs to the MANAGER, and `conversion_tracking_id` on the
+ * client account is not the one to put in GTM. When
+ * `crossAccountConversionTrackingId` is set, that is the one that counts.
+ *
+ * @param {string} customerId
+ * @param {{loginCustomerId?: string}} [opts]
+ * @returns {Promise<object|null>}
+ */
+export async function getConversionTrackingSetting(customerId, opts = {}) {
+  const ST = enums.ConversionTrackingStatus;
+  const rows = await runRawQuery(customerId, `
+    SELECT
+      customer.id,
+      customer.descriptive_name,
+      customer.currency_code,
+      customer.conversion_tracking_setting.conversion_tracking_id,
+      customer.conversion_tracking_setting.cross_account_conversion_tracking_id,
+      customer.conversion_tracking_setting.conversion_tracking_status,
+      customer.conversion_tracking_setting.accepted_customer_data_terms,
+      customer.conversion_tracking_setting.enhanced_conversions_for_leads_enabled,
+      customer.conversion_tracking_setting.google_ads_conversion_customer
+    FROM customer
+    LIMIT 1
+  `, { loginCustomerId: opts.loginCustomerId });
+
+  const r = rows[0];
+  if (!r) return null;
+  const own = r['customer.conversion_tracking_setting.conversion_tracking_id'];
+  const cross = r['customer.conversion_tracking_setting.cross_account_conversion_tracking_id'];
+  const effective = cross || own;
+  return {
+    customerId: String(r['customer.id'] ?? ''),
+    accountName: r['customer.descriptive_name'] || '',
+    currency: r['customer.currency_code'] || '',
+    conversionTrackingId: own ? String(own) : null,
+    crossAccountConversionTrackingId: cross ? String(cross) : null,
+    // What GTM must actually send to.
+    gtmConversionId: effective ? `AW-${effective}` : null,
+    managedBy: ST[r['customer.conversion_tracking_setting.conversion_tracking_status']]
+      || String(r['customer.conversion_tracking_setting.conversion_tracking_status'] ?? ''),
+    acceptedCustomerDataTerms: r['customer.conversion_tracking_setting.accepted_customer_data_terms'] === true,
+    enhancedConversionsForLeads: r['customer.conversion_tracking_setting.enhanced_conversions_for_leads_enabled'] === true,
+    conversionOwnerCustomer: r['customer.conversion_tracking_setting.google_ads_conversion_customer'] || null,
+  };
 }

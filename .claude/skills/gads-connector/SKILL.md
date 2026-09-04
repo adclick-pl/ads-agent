@@ -1,7 +1,7 @@
 ---
 name: gads-connector
 description: |
-  Connect to and manage Google Ads accounts (agency/MCC or in-house) through a self-contained Node.js connector. Use when the user wants to query a Google Ads account (campaigns, keywords, search terms, budgets, raw GAQL), or mutate it (pause/enable campaigns, change daily budgets, add negative keywords or placement exclusions). Triggers: "gads-connector", "Google Ads connector", "połącz się z Google Ads", "pobierz kampanie z konta", "zmień budżet", "wstrzymaj kampanię", "dodaj negatywy", "raw GAQL", "test połączenia Google Ads".
+  Connect to and manage Google Ads accounts (agency/MCC or in-house) through a self-contained Node.js connector. Use when the user wants to query a Google Ads account (campaigns, keywords, search terms, budgets, raw GAQL), or mutate it (pause/enable campaigns, change daily budgets, add negative keywords or placement exclusions, deploy conversion tracking). Triggers: "gads-connector", "Google Ads connector", "połącz się z Google Ads", "pobierz kampanie z konta", "zmień budżet", "wstrzymaj kampanię", "dodaj negatywy", "raw GAQL", "test połączenia Google Ads", "wdróż konwersje", "konwersje w koncie", "ID konwersji do GTM", "etykieta konwersji".
 ---
 
 # Google Ads Connector (gads-connector)
@@ -20,7 +20,8 @@ All commands below are run **from inside that folder** unless noted.
 - The user wants to **read** a Google Ads account: campaigns, keywords, search
   terms, placements, budgets, or an arbitrary GAQL query.
 - The user wants to **mutate** an account: pause/enable a campaign, change a daily
-  budget, add campaign negative keywords, or add account-level placement exclusions.
+  budget, add campaign negative keywords, or add account-level placement exclusions
+  (website domains and YouTube channels).
 - Agency / MCC setups (parent → child accounts) and single in-house accounts both work.
 
 Do **not** use this for writing ad copy (→ `gads-reklamy`), client-facing reports
@@ -169,6 +170,12 @@ node scripts/cli.js --action=add-negatives --customer=1234567890 --campaign=9876
 # Add account-level placement exclusions (display/PMax spam domains)
 node scripts/cli.js --action=add-negative-placements --customer=1234567890 --domains="spam.example,clickfarm.example"
 
+# Add account-level YouTube CHANNEL exclusions (Demand Gen / Video / PMax)
+# Accepts channel ids or full channel URLs. Account level covers every campaign,
+# including PMax — campaign-level channel exclusions leave paused campaigns
+# "protected" while the spending ones stay uncovered.
+node scripts/cli.js --action=add-negative-youtube-channels --customer=1234567890 --channels="UCaaaaaaaaaaaaaaaaaaaaaa,UCbbbbbbbbbbbbbbbbbbbbbb"
+
 # Change an ad's Final URL — single ad (works for RSA; legacy text ads are immutable)
 node scripts/cli.js --action=update-ad-url --customer=1234567890 --ad=670502653180 --url="https://example.pl/kategoria/" --domain=example.pl
 
@@ -252,6 +259,73 @@ Three jobs these exist for:
   whose name already exists (matching is case-insensitive — `Orange` finds `ORANGE`),
   so it can never bring one back. `update-ad-group-status` is how you do that.
 
+**Creating the campaign itself (`create-campaigns`).** The step that used to
+need the UI. Takes `--input=map.csv` (required cols `campaign_name`,
+`budget_amount`; optional `budget_name`, `status`, `bidding_strategy`,
+`cpc_bid_ceiling`, `target_cpa`, `target_roas`, `enhanced_cpc`, `geo_targets`,
+`languages`, `geo_target_type`, `search_partners`, `content_network`,
+`eu_political_advertising`, `start_date`, `end_date`) and creates a daily budget
+plus a **SEARCH** campaign
+with its geo and language criteria in ONE atomic `mutateResources`, wired with
+temporary resource names — so a failure cannot leave an orphan budget or a
+campaign targeting the whole world.
+
+```bash
+node scripts/cli.js --action=create-campaigns --account=zielonyogrod --input=kampanie.csv
+#  kampanie.csv: campaign_name,budget_amount,status,bidding_strategy,cpc_bid_ceiling
+#                [Search] Ogrod,30,PAUSED,MAXIMIZE_CLICKS,10
+```
+
+**Search only, and born paused.** Other channel types are out of scope on
+purpose: everything else this connector builds (SEARCH_STANDARD ad groups,
+keywords, RSAs) only makes sense in Search, and under the no-delete policy a
+wrong Shopping or PMax campaign can only ever be paused, never taken back. For
+the same reason `status` defaults to **PAUSED** — a campaign created ENABLED
+starts spending the second the write lands, before anyone has seen a keyword or
+an ad in it. `ENABLED` works and the plan warns.
+
+Defaults match a Polish Search account: Poland (`2616`), Polish (`1030`),
+`geo_target_type=PRESENCE` (people *in* the area, not merely interested in it),
+Google Search only — no search partners, no display. `content_network=true`
+produces a warning, because the display network inside a Search campaign quietly
+eats the budget at much worse rates.
+
+`bidding_strategy` is one of `MAXIMIZE_CLICKS` (default), `MAXIMIZE_CONVERSIONS`,
+`MAXIMIZE_CONVERSION_VALUE`, `MANUAL_CPC`, and each owns exactly one extra knob:
+`cpc_bid_ceiling`, `target_cpa`, `target_roas`, `enhanced_cpc` respectively. A
+knob paired with the wrong strategy **blocks the batch** rather than riding along
+— Google accepts a `target_roas` on a Maximize-clicks campaign and then ignores
+it, which is worse than an error because nobody notices.
+
+**`contains_eu_political_advertising` is required by Google** on every new
+campaign in the EU (Regulation 2024/900) — leave it out and the whole batch dies
+on a bare "required field" error. The connector declares
+`DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING` by default and never guesses the
+other way: it is a legal statement about the ads, so an account that really runs
+political advertising has to say so in the CSV (and the plan warns when it does).
+
+Idempotent on the campaign **name** (case-insensitively, ENABLED or PAUSED), and
+the idempotency read blocks the write if it fails: a duplicated campaign cannot
+be undone. A budget whose name already exists is **reused, not duplicated** — and
+if its amount differs from the CSV, that is reported as a warning and left alone
+(changing a live budget is `update-budget`'s job, where the 40% SafetyLimit
+lives). The dry run is checked by Google itself (`validate_only`), so
+`apiValidated: true` means the whole tree — budget, oneof strategy, criteria on a
+temporary campaign — was accepted before you commit.
+
+Full flow for a new account: `create-campaigns` → `create-ad-groups` →
+`add-keywords` → `add-ads` → `add-negatives` → the asset actions.
+
+**Words in CAPITALS are blocked locally (`add-ads`, `add-demand-gen-ads`).**
+Google refuses them as a PROHIBITED policy topic ("nadmierne użycie wielkich
+liter") — a hard disapproval, not a warning. Since these actions send the file as
+one atomic batch, a single shouted word takes every other ad down with it, and
+the API answers with a bare `POLICY_FINDING` that names neither the topic nor the
+word: the failure lands *after* the commit and has to be tracked down with
+`validate_only`. So the connector refuses it up front and names the word.
+Acronyms up to 4 letters (PNG, JPG, RODO, HTML) pass, and a Demand Gen
+`business_name` is exempt — a brand may legitimately be styled in capitals.
+
 **Building out a campaign (`create-ad-groups`, `add-keywords`).** The pair that
 turns a keyword research file into a live structure. `create-ad-groups` takes
 `--input=map.csv` (cols `campaign_id`, `ad_group_name`, optional `status`) and
@@ -319,6 +393,60 @@ order, so the ads are never left without one. Note this is a Google Ads asset an
 nothing to do with a **Merchant Center promotion**: the asset decorates text ads, the
 Merchant one decorates Shopping and free listings. An account that wants the discount
 in both places has to set it up in both.
+
+### Conversions — deploying conversion tracking
+
+Three actions cover the Google Ads half of a conversion deployment. The tagging
+half (GTM) happens elsewhere; what connects the two is a pair of values this skill
+hands you: the **conversion ID** (`AW-…`) and the **label**.
+
+```bash
+# 1. What the account already measures, and what GTM must send to.
+node scripts/cli.js --action=list-conversions --customer=1234567890 --days=30
+
+# 2. Create what's missing (simulation first, then --commit).
+node scripts/cli.js --action=create-conversions --customer=1234567890 --input=konwersje.csv
+#  konwersje.csv: name,type,category[,primary_for_goal,counting_type,default_value,
+#                 currency,always_use_default_value,click_lookback_days,
+#                 view_lookback_days,attribution_model,status]
+#                 Zakup,WEBPAGE,PURCHASE,true,MANY_PER_CLICK,,PLN,,30
+
+# 3. The exact snippets / values for the GTM tag.
+node scripts/cli.js --action=list-conversions --customer=1234567890 --with-snippets
+
+# 4. Once the tag is verified firing: promote it, correct a value, retire an old one.
+node scripts/cli.js --action=update-conversions --customer=1234567890 --id=987654321 --primary=true --commit
+```
+
+**Read `list-conversions` before touching anything.** Its header answers the
+question GTM actually asks — which `AW-…` ID this account sends to. On an account
+under an MCC with cross-account conversion tracking the ID belongs to the
+**manager**, not the client account, and the header says so ("ID z konta managera").
+Putting the child account's own ID in GTM there produces a tag that fires into
+nothing. `--days=N` adds the volume in the window plus the date the action **last
+fired at all** (lifetime, so an empty window still distinguishes "dead since March"
+from "never fired" — the first thing to check after deploying a tag).
+
+**Only tag-based and offline types are creatable:** `WEBPAGE`, `WEBSITE_CALL`,
+`UPLOAD_CLICKS`, `UPLOAD_CALLS`. GA4 and Firebase conversions appear in the account
+by **linking the property**, not through this API — asking for one is blocked with
+that explanation rather than creating a dead action.
+
+**Idempotent by name** (case-insensitively), and stricter than elsewhere: a failed
+read of the existing actions **blocks** the write. Two live actions measuring the
+same event double-count every conversion and poison Smart Bidding, and the
+no-delete policy means the connector cannot take the duplicate back — only hide it.
+
+**Retiring a conversion is `status=HIDDEN`**, never `REMOVED` (the no-delete policy
+throws). Hidden stops it counting and keeps the history readable. The **type is
+immutable** once created: to change it, create a new action and hide the old one.
+
+**Blocks vs warnings.** Blocks are API-level errors (unknown category, a lookback
+window outside 1-90 / 1-30 days, `always_use_default_value` with no value). Warnings
+are configurations Google accepts happily and the account regrets later — a purchase
+with a flat default value (ROAS becomes fiction), a purchase counted `ONE_PER_CLICK`,
+a lead counted `MANY_PER_CLICK`, a purchase left as a secondary action. They ride
+along in the dry-run plan; read them to the user before `--commit`.
 
 ### Demand Gen — five steps, in order
 

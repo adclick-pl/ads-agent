@@ -1,6 +1,6 @@
 import { getCustomer, unpackError } from './client.js';
-import { getKeywordsByCriteria, getCampaignBasics, getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts, getExistingStructuredSnippets, getExistingPriceAssets, getExistingPromotions, promotionIdentity, getAdGroupAdsByAdIds, getAdGroupsByIds, getExistingYoutubeAssets, getExistingDemandGenAds, getExistingListingGroups, getAdGroupTargetingCriteria, getCampaignChannelTypes, getCallToActionAssets, COPYABLE_CRITERION_TYPES } from './queries.js';
-import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkPriceOfferings, checkPromotion, checkDemandGenAdTexts, checkDemandGenChannels } from './safety.js';
+import { getKeywordsByCriteria, getCampaignBasics, getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts, getExistingStructuredSnippets, getExistingPriceAssets, getExistingPromotions, promotionIdentity, getAdGroupAdsByAdIds, getAdGroupsByIds, getExistingYoutubeAssets, getExistingDemandGenAds, getExistingListingGroups, getAdGroupTargetingCriteria, getCampaignChannelTypes, getCallToActionAssets, getConversionActions, getExistingCampaigns, getBudgetsByName, COPYABLE_CRITERION_TYPES } from './queries.js';
+import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkPriceOfferings, checkPromotion, checkDemandGenAdTexts, checkDemandGenChannels, checkConversionAction, checkCampaignSpec } from './safety.js';
 
 /**
  * Entity metadata for Final URL updates. Maps our short entity key to the
@@ -700,8 +700,28 @@ export async function addAccountNegativePlacements(customerId, domains, dryRun =
   try {
     const customer = getCustomer(cleanCustomerId, loginCustomerId);
 
+    // Idempotent: skip domains already excluded, so re-running a list converges
+    // instead of failing on duplicates.
+    const existing = new Set();
+    try {
+      const rows = await customer.query(`
+        SELECT customer_negative_criterion.placement.url
+        FROM customer_negative_criterion
+        WHERE customer_negative_criterion.type = 'PLACEMENT'
+      `);
+      for (const r of rows) {
+        const url = r?.customer_negative_criterion?.placement?.url;
+        if (url) existing.add(String(url).toLowerCase().replace(/^www\./, ''));
+      }
+    } catch {
+      // Account with no exclusions yet — treat as empty.
+    }
+    const toAdd = parsedDomains.filter(d => !existing.has(d));
+    const skipped = parsedDomains.filter(d => existing.has(d));
+    if (toAdd.length === 0) return { success: true, dryRun: false, domains: [], added: [], skipped };
+
     // Account negative placements are CustomerNegativeCriterion
-    const mutations = parsedDomains.map(domain => ({
+    const mutations = toAdd.map(domain => ({
       entity: 'CustomerNegativeCriterion',
       operation: 'create',
       resource: {
@@ -713,11 +733,82 @@ export async function addAccountNegativePlacements(customerId, domains, dryRun =
     return {
       success: true,
       dryRun: false,
-      domains: parsedDomains,
+      domains: toAdd,
+      added: toAdd,
+      skipped,
       response
     };
   } catch (error) {
     throw new Error(`Failed to add account negative placements: ${unpackError(error)}`);
+  }
+}
+
+/**
+ * Exclude YouTube CHANNELS at ACCOUNT level (`CustomerNegativeCriterion` with
+ * `youtube_channel.channel_id`).
+ *
+ * Separate action from `addAccountNegativePlacements` because the API field differs:
+ * a website exclusion carries `placement.url`, a channel carries a channel id. They
+ * cannot be mixed in one resource.
+ *
+ * Account level is the right default for channels: it covers every campaign at once,
+ * including Performance Max and Demand Gen. Campaign-level channel exclusions are a
+ * common trap — they keep protecting a campaign long after it was paused, while the
+ * campaigns actually spending stay uncovered.
+ *
+ * **Idempotent:** reads the channels already excluded on the account and SKIPS them,
+ * so re-running the same list adds nothing instead of failing on duplicates.
+ *
+ * @param {string} customerId
+ * @param {string[]} channelIds YouTube channel ids (the `UC…` form)
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>} Summary: what was added and what was already there
+ */
+export async function addAccountNegativeYouTubeChannels(customerId, channelIds, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  const parsed = [...new Set(
+    channelIds.map((c) => String(c).trim()).filter(Boolean)
+      // Accept a full channel URL as well — that is what reports hand you.
+      .map((c) => (c.includes('/channel/') ? c.split('/channel/')[1].split(/[/?#]/)[0] : c))
+  )];
+  if (parsed.length === 0) throw new Error('No YouTube channel ids given.');
+
+  const customer = getCustomer(cleanCustomerId, loginCustomerId);
+
+  const existing = new Set();
+  try {
+    const rows = await customer.query(`
+      SELECT customer_negative_criterion.youtube_channel.channel_id
+      FROM customer_negative_criterion
+      WHERE customer_negative_criterion.type = 'YOUTUBE_CHANNEL'
+    `);
+    for (const r of rows) {
+      const id = r?.customer_negative_criterion?.youtube_channel?.channel_id;
+      if (id) existing.add(String(id));
+    }
+  } catch {
+    // An account with no exclusions yet may not expose the resource — treat as empty.
+  }
+
+  const toAdd = parsed.filter((c) => !existing.has(c));
+  const skipped = parsed.filter((c) => existing.has(c));
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Excluding ${toAdd.length} YouTube channel(s) on Account level${skipped.length ? ` (${skipped.length} already excluded)` : ''}...`);
+
+  if (dryRun || toAdd.length === 0) {
+    return { success: true, dryRun, added: toAdd, skipped };
+  }
+
+  try {
+    const response = await customer.mutateResources(toAdd.map((channelId) => ({
+      entity: 'CustomerNegativeCriterion',
+      operation: 'create',
+      resource: { youtube_channel: { channel_id: channelId } },
+    })));
+    return { success: true, dryRun: false, added: toAdd, skipped, response };
+  } catch (error) {
+    throw new Error(`Failed to add account negative YouTube channels: ${unpackError(error)}`);
   }
 }
 
@@ -964,6 +1055,259 @@ export function mutatedResourceNames(responses) {
     }
   }
   return names;
+}
+
+/**
+ * Create Search campaigns — each with its own daily budget — on an account.
+ *
+ * This is the missing first step of a build-out: `create-ad-groups`,
+ * `add-keywords` and `add-ads` all need a campaign to hang off, and until now
+ * that shell had to be clicked together in the UI. Deliberately limited to
+ * SEARCH: everything else this connector builds (SEARCH_STANDARD ad groups,
+ * keywords, RSAs) only makes sense there, and a half-supported Shopping or PMax
+ * campaign would be worse than none — under the no-delete policy a wrong
+ * campaign can only be paused, never taken back.
+ *
+ * **Born paused by default.** `status` defaults to PAUSED, because a campaign
+ * created ENABLED starts spending the second the write lands, before anyone has
+ * seen a keyword or an ad in it. Passing ENABLED works, and the plan warns.
+ *
+ * Idempotent on the campaign NAME (case-insensitively, ENABLED or PAUSED): a
+ * re-run of the same file adds nothing. The idempotency read MUST succeed — a
+ * duplicated campaign is not recoverable by re-running, unlike a skip.
+ *
+ * The budget is reused when one with the same name already exists, rather than
+ * minting a second budget with an identical name. A different amount on that
+ * existing budget is reported as a warning, never silently rewritten — that is
+ * `update-budget`'s job, where the 40% SafetyLimit lives.
+ *
+ * Budget + campaign + geo/language criteria go out as ONE atomic
+ * `mutateResources` per run, wired together with temporary resource names, so a
+ * failure can't leave an orphan budget or a campaign targeting the whole world.
+ *
+ * @param {string} customerId
+ * @param {Array<object>} items - rows: {name, budgetAmount, budgetName?, status?,
+ *        biddingStrategy?, cpcBidCeiling?, targetCpa?, targetRoas?, enhancedCpc?,
+ *        geoTargets?, languages?, searchPartners?, contentNetwork?, geoTargetType?,
+ *        startDate?, endDate?, label?}
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>}
+ */
+export async function createSearchCampaigns(customerId, items, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  if (!Array.isArray(items) || items.length === 0) throw new Error('Brak kampanii do utworzenia (pusta lista).');
+
+  const problems = [];
+  const warnings = [];
+  const rows = items.map((it, i) => {
+    const name = String(it.name ?? '').trim();
+    const ref = it.label || name || `wiersz ${i + 1}`;
+    const status = String(it.status ?? 'PAUSED').trim().toUpperCase();
+    assertNotRemoval(status);
+    const row = {
+      label: ref,
+      name,
+      budgetName: String(it.budgetName ?? '').trim() || name,
+      budgetAmount: it.budgetAmount,
+      status,
+      biddingStrategy: String(it.biddingStrategy ?? 'MAXIMIZE_CLICKS').trim().toUpperCase(),
+      cpcBidCeiling: it.cpcBidCeiling === '' ? null : it.cpcBidCeiling ?? null,
+      targetCpa: it.targetCpa === '' ? null : it.targetCpa ?? null,
+      targetRoas: it.targetRoas === '' ? null : it.targetRoas ?? null,
+      enhancedCpc: it.enhancedCpc === true || String(it.enhancedCpc ?? '').toLowerCase() === 'true',
+      geoTargets: normaliseIdList(it.geoTargets, ['2616']),
+      languages: normaliseIdList(it.languages, ['1030']),
+      searchPartners: it.searchPartners === true || String(it.searchPartners ?? '').toLowerCase() === 'true',
+      contentNetwork: it.contentNetwork === true || String(it.contentNetwork ?? '').toLowerCase() === 'true',
+      geoTargetType: String(it.geoTargetType ?? 'PRESENCE').trim().toUpperCase(),
+      euPoliticalAdvertising: String(it.euPoliticalAdvertising ?? 'DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING').trim().toUpperCase(),
+      startDate: String(it.startDate ?? '').trim() || null,
+      endDate: String(it.endDate ?? '').trim() || null,
+    };
+    const check = checkCampaignSpec(row);
+    check.reasons.forEach((r) => problems.push(`${ref}: ${r}`));
+    check.warnings.forEach((w) => warnings.push(`${ref}: ${w}`));
+    return row;
+  });
+
+  // Two rows creating the same campaign name would both pass the "already on the
+  // account" check and then collide with each other inside one batch.
+  const seenInFile = new Set();
+  for (const r of rows) {
+    const k = r.name.toLowerCase();
+    if (seenInFile.has(k)) problems.push(`${r.label}: nazwa kampanii powtarza się w pliku wejściowym.`);
+    seenInFile.add(k);
+  }
+
+  if (problems.length) {
+    throw new Error(`🛑 Zablokowano — ${problems.length} problem(ów) walidacji, nic nie zapisano:\n${problems.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  // Converge, don't accumulate. A read failure MUST block here: a duplicate
+  // campaign cannot be undone, only paused.
+  const existingCampaigns = await getExistingCampaigns(cleanCustomerId, { loginCustomerId });
+  const byName = new Map(existingCampaigns.map((c) => [c.name.toLowerCase(), c]));
+  const existingBudgets = await getBudgetsByName(cleanCustomerId, { loginCustomerId });
+
+  const toCreate = [];
+  const skipped = [];
+  for (const r of rows) {
+    const hit = byName.get(r.name.toLowerCase());
+    if (hit) { skipped.push({ ...r, campaignId: hit.campaignId }); continue; }
+    const budget = existingBudgets.get(r.budgetName.toLowerCase()) || null;
+    if (budget && budget.amount != null && Number(budget.amount) !== Number(r.budgetAmount)) {
+      warnings.push(`${r.label}: budżet "${r.budgetName}" już istnieje z kwotą ${budget.amount} (żądano ${r.budgetAmount}) — użyję istniejącego, kwoty nie zmieniam. Zmiana kwoty → update-budget.`);
+    }
+    toCreate.push({ ...r, reuseBudget: budget });
+  }
+
+  const plan = {
+    toCreate: toCreate.map((r) => ({
+      name: r.name,
+      status: r.status,
+      budgetName: r.budgetName,
+      budgetDaily: Number(r.budgetAmount),
+      budgetMonthlyApprox: r.reuseBudget ? Number(r.reuseBudget.amount) * 30.4 : Math.round(Number(r.budgetAmount) * 30.4 * 100) / 100,
+      budgetReused: r.reuseBudget ? { budgetId: r.reuseBudget.budgetId, amount: r.reuseBudget.amount } : null,
+      biddingStrategy: r.biddingStrategy,
+      cpcBidCeiling: r.cpcBidCeiling ? Number(r.cpcBidCeiling) : null,
+      targetCpa: r.targetCpa ? Number(r.targetCpa) : null,
+      targetRoas: r.targetRoas ? Number(r.targetRoas) : null,
+      networks: { googleSearch: true, searchPartners: r.searchPartners, contentNetwork: r.contentNetwork },
+      geoTargets: r.geoTargets,
+      geoTargetType: r.geoTargetType,
+      languages: r.languages,
+      euPoliticalAdvertising: r.euPoliticalAdvertising,
+      startDate: r.startDate,
+      endDate: r.endDate,
+    })),
+    skipped: skipped.map((r) => ({ name: r.name, campaignId: r.campaignId, reason: 'kampania o tej nazwie już jest na koncie' })),
+    warnings,
+  };
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Kampanie Search: do utworzenia ${toCreate.length}, pominięte (już istnieją) ${skipped.length}...`);
+
+  if (toCreate.length === 0) {
+    if (dryRun) return { success: true, dryRun: true, entity: 'campaign', toCreate: 0, skipped: skipped.length, plan };
+    return { success: true, dryRun: false, entity: 'campaign', created: 0, skipped: skipped.length, plan, createdCampaigns: [], response: null };
+  }
+
+  // Build the batch once — the same mutations are used for the API validation in
+  // a dry run and for the write, so what Google approves is what gets sent.
+  let tempId = 0;
+  const nextTemp = () => --tempId;
+  const mutations = [];
+  for (const r of toCreate) {
+    let budgetRef;
+    if (r.reuseBudget) {
+      budgetRef = `customers/${cleanCustomerId}/campaignBudgets/${r.reuseBudget.budgetId}`;
+    } else {
+      budgetRef = `customers/${cleanCustomerId}/campaignBudgets/${nextTemp()}`;
+      mutations.push({
+        entity: 'CampaignBudget',
+        operation: 'create',
+        resource: {
+          resource_name: budgetRef,
+          name: r.budgetName,
+          amount_micros: standardToMicros(r.budgetAmount),
+          delivery_method: 'STANDARD',
+          explicitly_shared: false,
+        },
+      });
+    }
+
+    const campaignRef = `customers/${cleanCustomerId}/campaigns/${nextTemp()}`;
+    const campaign = {
+      resource_name: campaignRef,
+      name: r.name,
+      status: r.status,
+      advertising_channel_type: 'SEARCH',
+      campaign_budget: budgetRef,
+      network_settings: {
+        target_google_search: true,
+        target_search_network: r.searchPartners,
+        target_content_network: r.contentNetwork,
+        target_partner_search_network: false,
+      },
+      geo_target_type_setting: {
+        positive_geo_target_type: r.geoTargetType,
+        negative_geo_target_type: 'PRESENCE',
+      },
+      // Required by Google on every new campaign in the EU (Reg. 2024/900).
+      // Omitting it fails the whole batch with a bare "required field" error.
+      contains_eu_political_advertising: r.euPoliticalAdvertising,
+    };
+    if (r.startDate) campaign.start_date = r.startDate;
+    if (r.endDate) campaign.end_date = r.endDate;
+
+    // Bidding strategy is a protobuf oneof — exactly one of these may be set.
+    if (r.biddingStrategy === 'MAXIMIZE_CLICKS') {
+      campaign.target_spend = r.cpcBidCeiling ? { cpc_bid_ceiling_micros: standardToMicros(r.cpcBidCeiling) } : {};
+    } else if (r.biddingStrategy === 'MAXIMIZE_CONVERSIONS') {
+      campaign.maximize_conversions = r.targetCpa ? { target_cpa_micros: standardToMicros(r.targetCpa) } : {};
+    } else if (r.biddingStrategy === 'MAXIMIZE_CONVERSION_VALUE') {
+      campaign.maximize_conversion_value = r.targetRoas ? { target_roas: Number(r.targetRoas) } : {};
+    } else {
+      campaign.manual_cpc = { enhanced_cpc_enabled: r.enhancedCpc };
+    }
+    mutations.push({ entity: 'Campaign', operation: 'create', resource: campaign });
+
+    for (const geo of r.geoTargets) {
+      mutations.push({
+        entity: 'CampaignCriterion',
+        operation: 'create',
+        resource: { campaign: campaignRef, location: { geo_target_constant: `geoTargetConstants/${geo}` } },
+      });
+    }
+    for (const lang of r.languages) {
+      mutations.push({
+        entity: 'CampaignCriterion',
+        operation: 'create',
+        resource: { campaign: campaignRef, language: { language_constant: `languageConstants/${lang}` } },
+      });
+    }
+  }
+
+  const customer = getCustomer(cleanCustomerId, loginCustomerId);
+
+  // A locally-valid plan only proves the CSV parsed. Ask Google whether the whole
+  // tree — budget, oneof strategy, criteria on a temporary campaign — is
+  // acceptable, so objections surface in the simulation, not half-way through a
+  // commit.
+  if (dryRun) {
+    const check = await validateWithApi(customer, chunk(mutations));
+    return { success: check.ok, dryRun: true, entity: 'campaign', toCreate: toCreate.length, skipped: skipped.length, plan, apiValidated: check.ok, apiError: check.error };
+  }
+
+  try {
+    const responses = [];
+    for (const part of chunk(mutations)) responses.push(await customer.mutateResources(part));
+
+    // Read back so the caller gets real campaign IDs to hang ad groups on.
+    const after = await getExistingCampaigns(cleanCustomerId, { loginCustomerId });
+    const afterByName = new Map(after.map((c) => [c.name.toLowerCase(), c]));
+    const createdCampaigns = toCreate.map((r) => {
+      const c = afterByName.get(r.name.toLowerCase());
+      return { name: r.name, campaignId: c ? c.campaignId : null, budgetId: c ? c.budgetId : null, status: r.status };
+    });
+
+    return { success: true, dryRun: false, entity: 'campaign', created: toCreate.length, skipped: skipped.length, chunks: responses.length, plan, createdCampaigns, resourceNames: mutatedResourceNames(responses) };
+  } catch (error) {
+    throw new Error(`Nie udało się utworzyć kampanii: ${unpackError(error)}`);
+  }
+}
+
+/**
+ * Normalise a list of numeric constant IDs given as an array, or as a string
+ * separated by `|`, `,` or whitespace. Falls back to `fallback` when empty, which
+ * is what makes `geo_targets` / `languages` optional columns in the CSV.
+ */
+function normaliseIdList(value, fallback) {
+  if (value == null || value === '') return [...fallback];
+  const raw = Array.isArray(value) ? value : String(value).split(/[|,\s]+/);
+  const out = raw.map((v) => String(v).trim()).filter(Boolean);
+  return out.length ? [...new Set(out)] : [...fallback];
 }
 
 /**
@@ -2739,5 +3083,292 @@ export async function addListingGroups(customerId, items, dryRun = false, loginC
     return { success: true, dryRun: false, entity: 'ad_group_criterion', built: toBuild.length, skipped: skipped.length, plan, resourceNames: mutatedResourceNames(responses) };
   } catch (error) {
     throw new Error(`Nie udało się zbudować kanału produktowego: ${unpackError(error)}`);
+  }
+}
+
+// --- Conversion actions (wdrażanie konwersji) --------------------------------
+
+/**
+ * Build the API resource for a conversion action from our flat row, sending ONLY
+ * the fields the caller actually provided.
+ *
+ * Nested messages are the subtlety here. `value_settings` and
+ * `attribution_model_settings` are sub-messages, so on an update the whole
+ * sub-message is what travels — send just `default_value` and the sibling
+ * currency can be wiped. Callers therefore pass `base` (the current values read
+ * from the account) and this merges onto it, so an update touches one field and
+ * leaves the rest as they were. `data_driven_model_status` is read-only and is
+ * never sent.
+ *
+ * @param {object} row - normalized row (see createConversionActions)
+ * @param {object} [base] - current values, for merge-on-update
+ * @returns {object} partial ConversionAction resource
+ */
+function buildConversionResource(row, base = {}) {
+  const res = {};
+  if (row.name !== undefined) res.name = row.name;
+  if (row.type !== undefined) res.type = row.type;
+  if (row.category !== undefined) res.category = row.category;
+  if (row.status !== undefined) res.status = row.status;
+  if (row.primaryForGoal !== undefined) res.primary_for_goal = row.primaryForGoal;
+  if (row.countingType !== undefined) res.counting_type = row.countingType;
+  if (row.clickLookbackDays !== undefined) res.click_through_lookback_window_days = row.clickLookbackDays;
+  if (row.viewLookbackDays !== undefined) res.view_through_lookback_window_days = row.viewLookbackDays;
+
+  const touchesValue = row.defaultValue !== undefined || row.currency !== undefined || row.alwaysUseDefaultValue !== undefined;
+  if (touchesValue) {
+    const defaultValue = row.defaultValue !== undefined ? row.defaultValue : base.defaultValue;
+    const currency = row.currency !== undefined ? row.currency : base.currency;
+    const always = row.alwaysUseDefaultValue !== undefined ? row.alwaysUseDefaultValue : base.alwaysUseDefaultValue;
+    res.value_settings = {};
+    if (defaultValue !== undefined && defaultValue !== null) res.value_settings.default_value = Number(defaultValue);
+    if (currency) res.value_settings.default_currency_code = String(currency).toUpperCase();
+    if (always !== undefined && always !== null) res.value_settings.always_use_default_value = !!always;
+  }
+
+  if (row.attributionModel !== undefined) {
+    res.attribution_model_settings = { attribution_model: row.attributionModel };
+  }
+  return res;
+}
+
+/**
+ * Normalize one CSV/flag row into the shape the builder and the validator expect.
+ * Empty cells become `undefined` (= "don't touch"), not empty strings — that
+ * distinction is what makes a partial update possible.
+ */
+function normalizeConversionRow(it) {
+  const str = (v) => (v === undefined || v === null || String(v).trim() === '' ? undefined : String(v).trim());
+  const upper = (v) => (str(v) === undefined ? undefined : str(v).toUpperCase());
+  const num = (v) => (str(v) === undefined ? undefined : Number(str(v)));
+  const bool = (v) => {
+    const s = str(v);
+    if (s === undefined) return undefined;
+    if (/^(true|yes|tak|1|primary|glowna|główna)$/i.test(s)) return true;
+    if (/^(false|no|nie|0|secondary|dodatkowa)$/i.test(s)) return false;
+    return undefined;
+  };
+  return {
+    id: str(it.id),
+    resourceName: str(it.resourceName),
+    name: str(it.name),
+    type: upper(it.type),
+    category: upper(it.category),
+    status: upper(it.status),
+    countingType: upper(it.countingType),
+    attributionModel: upper(it.attributionModel),
+    primaryForGoal: bool(it.primaryForGoal),
+    defaultValue: num(it.defaultValue),
+    currency: upper(it.currency),
+    alwaysUseDefaultValue: bool(it.alwaysUseDefaultValue),
+    clickLookbackDays: num(it.clickLookbackDays),
+    viewLookbackDays: num(it.viewLookbackDays),
+    label: str(it.label) || str(it.name) || 'wiersz',
+  };
+}
+
+/**
+ * Create conversion actions — the Google Ads half of deploying conversion
+ * tracking. What GTM needs afterwards (the `AW-…` conversion ID and the label)
+ * is read back and returned per created action, so the tagging step can start
+ * immediately without a trip to the UI.
+ *
+ * Idempotent by NAME (case-insensitively): an existing action with the same name
+ * is skipped, so a re-run adds nothing. This matters more here than anywhere else
+ * in the connector — two live actions measuring the same event double-count every
+ * conversion, they poison Smart Bidding, and the no-delete policy means the
+ * connector cannot take the duplicate back. For the same reason a failed read of
+ * the current actions BLOCKS the write instead of assuming the account is empty.
+ *
+ * Only tag-based and offline-import types are creatable (see CONVERSION_TYPES) —
+ * GA4 and Firebase conversions appear by linking the property, not through here.
+ *
+ * @param {string} customerId
+ * @param {Array<object>} items - rows: name, type, category, [status, primaryForGoal,
+ *   countingType, defaultValue, currency, alwaysUseDefaultValue, clickLookbackDays,
+ *   viewLookbackDays, attributionModel]
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>} `{plan, warnings, created, skipped, createdActions}`
+ */
+export async function createConversionActions(customerId, items, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  if (!Array.isArray(items) || items.length === 0) throw new Error('Brak konwersji do utworzenia (pusta lista).');
+
+  const problems = [];
+  const warnings = [];
+  const rows = items.map((it, i) => {
+    const row = normalizeConversionRow(it);
+    const ref = row.label || `wiersz ${i + 1}`;
+    const check = checkConversionAction(row, { isUpdate: false });
+    check.reasons.forEach((r) => problems.push(`${ref}: ${r}`));
+    check.warnings.forEach((w) => warnings.push(w));
+    return { ...row, label: ref };
+  });
+
+  const seen = new Set();
+  for (const r of rows) {
+    const k = String(r.name ?? '').toLowerCase();
+    if (seen.has(k)) problems.push(`${r.label}: nazwa konwersji powtarza się w pliku wejściowym.`);
+    seen.add(k);
+  }
+
+  if (problems.length) {
+    throw new Error(`🛑 Zablokowano — ${problems.length} problem(ów) walidacji, nic nie zapisano:\n${problems.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  // A read failure must block: a duplicate conversion action cannot be undone here.
+  const existing = await getConversionActions(cleanCustomerId, { loginCustomerId, all: true });
+  const byName = new Map(existing.map((a) => [a.name.toLowerCase(), a]));
+
+  const toCreate = [];
+  const skipped = [];
+  for (const r of rows) {
+    const hit = byName.get(String(r.name).toLowerCase());
+    if (hit) skipped.push({ ...r, existingId: hit.id, existingStatus: hit.status });
+    else toCreate.push(r);
+  }
+
+  const plan = {
+    toCreate: toCreate.map((r) => ({
+      name: r.name, type: r.type, category: r.category,
+      primaryForGoal: r.primaryForGoal ?? '(domyślnie Google)',
+      countingType: r.countingType ?? '(domyślnie Google)',
+      defaultValue: r.defaultValue ?? null, currency: r.currency ?? null,
+      alwaysUseDefaultValue: r.alwaysUseDefaultValue ?? false,
+      clickLookbackDays: r.clickLookbackDays ?? '(domyślnie Google)',
+      viewLookbackDays: r.viewLookbackDays ?? '(domyślnie Google)',
+      attributionModel: r.attributionModel ?? '(domyślnie Google)',
+    })),
+    skipped: skipped.map((r) => ({ name: r.name, existingId: r.existingId, status: r.existingStatus, reason: 'konwersja o tej nazwie już istnieje w koncie' })),
+  };
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Konwersje: do utworzenia ${toCreate.length}, pominięte (już istnieją) ${skipped.length}...`);
+  if (dryRun) {
+    return { success: true, dryRun: true, entity: 'conversion_action', toCreate: toCreate.length, skipped: skipped.length, plan, warnings };
+  }
+  if (toCreate.length === 0) {
+    return { success: true, dryRun: false, entity: 'conversion_action', created: 0, skipped: skipped.length, plan, warnings, createdActions: [] };
+  }
+
+  try {
+    const customer = getCustomer(cleanCustomerId, loginCustomerId);
+    const resources = toCreate.map((r) => buildConversionResource(r));
+    const responses = [];
+    for (const part of chunk(resources)) responses.push(await customer.conversionActions.create(part));
+
+    // Read back for the IDs and the tag snippets — this is the GTM handoff.
+    let createdActions = toCreate.map((r) => ({ name: r.name, id: null, conversionId: null, label: null }));
+    try {
+      const after = await getConversionActions(cleanCustomerId, { loginCustomerId, all: true });
+      const afterByName = new Map(after.map((a) => [a.name.toLowerCase(), a]));
+      createdActions = toCreate.map((r) => {
+        const a = afterByName.get(String(r.name).toLowerCase());
+        return {
+          name: r.name,
+          id: a ? a.id : null,
+          category: a ? a.category : r.category,
+          conversionId: a ? a.conversionId : null,
+          label: a ? a.label : null,
+        };
+      });
+    } catch { /* the write landed; a failed read-back must not look like a failure */ }
+
+    return {
+      success: true, dryRun: false, entity: 'conversion_action',
+      created: toCreate.length, skipped: skipped.length, chunks: responses.length,
+      plan, warnings, createdActions, resourceNames: mutatedResourceNames(responses),
+      next: 'Konwersje istnieją w Google Ads. Wartości do tagu w GTM: conversionId (AW-…) + label. Etykieta pojawia się dopiero po chwili — jeśli jest pusta, powtórz list-conversions --with-snippets.',
+    };
+  } catch (error) {
+    throw new Error(`Nie udało się utworzyć konwersji: ${unpackError(error)}`);
+  }
+}
+
+/**
+ * Update existing conversion actions — the second half of deployment: promoting an
+ * action to primary once its tag is verified, correcting a value or a counting
+ * type, retiring an old action with HIDDEN.
+ *
+ * Partial by design: a row changes only the columns it fills in. Current values
+ * are read first, so the from→to diff is real and nested sub-messages
+ * (`value_settings`) are merged rather than overwritten. An unknown ID blocks the
+ * whole batch — silently skipping it would report success for a change that never
+ * happened.
+ *
+ * `REMOVED` is refused (no-delete policy); use `HIDDEN` to stop an action from
+ * counting while keeping its history.
+ *
+ * @param {string} customerId
+ * @param {Array<object>} items - rows with `id` (or `resourceName`) + the fields to change
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>} Summary with a per-action from→to diff
+ */
+export async function updateConversionActions(customerId, items, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  if (!Array.isArray(items) || items.length === 0) throw new Error('Brak konwersji do zmiany (pusta lista).');
+
+  const problems = [];
+  const warnings = [];
+  const rows = items.map((it, i) => {
+    const row = normalizeConversionRow(it);
+    const ref = row.label || row.id || `wiersz ${i + 1}`;
+    const idFromRn = row.resourceName ? String(row.resourceName).split('/').pop() : undefined;
+    const id = (row.id || idFromRn || '').replace(/[^0-9]/g, '');
+    if (!id) problems.push(`${ref}: brak id konwersji (kolumna id albo resource_name).`);
+    const check = checkConversionAction(row, { isUpdate: true });
+    check.reasons.forEach((r) => problems.push(`${ref}: ${r}`));
+    check.warnings.forEach((w) => warnings.push(w));
+
+    const CHANGEABLE = ['name', 'category', 'status', 'countingType', 'attributionModel', 'primaryForGoal',
+      'defaultValue', 'currency', 'alwaysUseDefaultValue', 'clickLookbackDays', 'viewLookbackDays'];
+    const changes = CHANGEABLE.filter((k) => row[k] !== undefined);
+    // `type` is immutable once the action exists — the API rejects it, so catch it
+    // here. It also answers "this row changes nothing", so don't say both.
+    if (row.type !== undefined) problems.push(`${ref}: typu konwersji (type) nie da się zmienić po utworzeniu — założ nową konwersję i ukryj starą (status=HIDDEN).`);
+    else if (changes.length === 0) problems.push(`${ref}: wiersz nie zmienia żadnego pola.`);
+    return { ...row, id, label: ref, changes };
+  });
+
+  if (problems.length) {
+    throw new Error(`🛑 Zablokowano — ${problems.length} problem(ów) walidacji, nic nie zapisano:\n${problems.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  const current = await getConversionActions(cleanCustomerId, { loginCustomerId, all: true });
+  const byId = new Map(current.map((a) => [a.id, a]));
+  const missing = rows.filter((r) => !byId.has(r.id));
+  if (missing.length) {
+    throw new Error(`🛑 Zablokowano — ${missing.length} konwersji nie ma w koncie (id: ${missing.map((m) => m.id).join(', ')}), nic nie zapisano.`);
+  }
+
+  const diff = rows.map((r) => {
+    const cur = byId.get(r.id);
+    const fields = {};
+    for (const k of r.changes) fields[k] = { from: cur[k] ?? null, to: r[k] };
+    return { id: r.id, name: cur.name, changed: r.changes, fields };
+  });
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Zmiana ${rows.length} konwersji...`);
+  if (dryRun) {
+    return { success: true, dryRun: true, entity: 'conversion_action', count: rows.length, diff, warnings };
+  }
+
+  try {
+    const customer = getCustomer(cleanCustomerId, loginCustomerId);
+    const resources = rows.map((r) => ({
+      resource_name: byId.get(r.id).resourceName || `customers/${cleanCustomerId}/conversionActions/${r.id}`,
+      ...buildConversionResource(r, byId.get(r.id)),
+    }));
+    const responses = [];
+    for (const part of chunk(resources)) responses.push(await customer.conversionActions.update(part));
+
+    return {
+      success: true, dryRun: false, entity: 'conversion_action',
+      updated: rows.length, chunks: responses.length, diff, warnings,
+      resourceNames: mutatedResourceNames(responses),
+    };
+  } catch (error) {
+    throw new Error(`Nie udało się zmienić konwersji: ${unpackError(error)}`);
   }
 }

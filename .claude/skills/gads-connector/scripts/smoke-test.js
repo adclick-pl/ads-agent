@@ -615,5 +615,203 @@ check('mutatedResourceNames returns an empty list rather than throwing on junk',
   }
 });
 
+// --- Conversion actions -----------------------------------------------------
+
+check('parseTagSnippets reads the AW id and label out of an event snippet', () => {
+  const snippet = `<!-- Event snippet -->\n<script>\n gtag('event', 'conversion', {'send_to': 'AW-123456789/AbC-D_efG-h12_34', 'value': 1.0});\n</script>`;
+  const got = queries.parseTagSnippets([{ event_snippet: snippet, global_site_tag: '<script src="https://www.googletagmanager.com/gtag/js?id=AW-123456789"></script>' }]);
+  assert(got.conversionId === 'AW-123456789', `id: ${got.conversionId}`);
+  assert(got.label === 'AbC-D_efG-h12_34', `label: ${got.label}`);
+  assert(got.sendTo === 'AW-123456789/AbC-D_efG-h12_34');
+});
+
+check('parseTagSnippets falls back to the site tag when there is no label yet', () => {
+  const got = queries.parseTagSnippets([{ global_site_tag: 'gtag/js?id=AW-987654321' }]);
+  assert(got.conversionId === 'AW-987654321' && got.label === null, JSON.stringify(got));
+});
+
+check('parseTagSnippets returns nulls on junk instead of throwing', () => {
+  for (const input of [null, undefined, [], [{}], [{ event_snippet: '' }], 'nonsense']) {
+    const got = queries.parseTagSnippets(input);
+    assert(got.conversionId === null && got.label === null, JSON.stringify(got));
+  }
+});
+
+check('checkConversionAction accepts a normal purchase conversion', () => {
+  const r = safety.checkConversionAction({ name: 'Zakup', type: 'WEBPAGE', category: 'PURCHASE', countingType: 'MANY_PER_CLICK', currency: 'PLN', primaryForGoal: true });
+  assert(r.valid, r.reasons.join('; '));
+  assert(r.warnings.length === 0, `nieoczekiwane ostrzeżenia: ${r.warnings.join('; ')}`);
+});
+
+check('checkConversionAction blocks a GA4 type — those come from linking, not from the API', () => {
+  const r = safety.checkConversionAction({ name: 'GA4 purchase', type: 'GOOGLE_ANALYTICS_4_PURCHASE', category: 'PURCHASE' });
+  assert(!r.valid);
+  assert(r.reasons.some((x) => /WEBPAGE/.test(x)), r.reasons.join('; '));
+});
+
+check('checkConversionAction refuses REMOVED (no-delete policy) but allows HIDDEN', () => {
+  let threw = false;
+  try { safety.checkConversionAction({ name: 'x', type: 'WEBPAGE', category: 'PURCHASE', status: 'REMOVED' }); } catch { threw = true; }
+  assert(threw, 'REMOVED powinno rzucić polityką no-delete');
+  assert(safety.checkConversionAction({ name: 'x', type: 'WEBPAGE', category: 'PURCHASE', status: 'HIDDEN' }).valid);
+});
+
+check('checkConversionAction bounds the lookback windows', () => {
+  assert(!safety.checkConversionAction({ name: 'x', type: 'WEBPAGE', category: 'PURCHASE', clickLookbackDays: 120 }).valid);
+  assert(!safety.checkConversionAction({ name: 'x', type: 'WEBPAGE', category: 'PURCHASE', viewLookbackDays: 45 }).valid);
+  assert(safety.checkConversionAction({ name: 'x', type: 'WEBPAGE', category: 'PURCHASE', clickLookbackDays: 90, viewLookbackDays: 30 }).valid);
+});
+
+check('checkConversionAction blocks always_use_default_value without a value', () => {
+  const r = safety.checkConversionAction({ name: 'x', type: 'WEBPAGE', category: 'SUBMIT_LEAD_FORM', alwaysUseDefaultValue: true });
+  assert(!r.valid, 'przeszło mimo braku wartości');
+});
+
+check('checkConversionAction warns (not blocks) when a purchase would get a flat value', () => {
+  const r = safety.checkConversionAction({ name: 'Zakup', type: 'WEBPAGE', category: 'PURCHASE', defaultValue: 200, currency: 'PLN', alwaysUseDefaultValue: true, countingType: 'MANY_PER_CLICK' });
+  assert(r.valid, r.reasons.join('; '));
+  assert(r.warnings.some((w) => /ROAS/.test(w)), r.warnings.join('; '));
+});
+
+check('checkConversionAction warns about ONE_PER_CLICK on a purchase and MANY_PER_CLICK on a lead', () => {
+  assert(safety.checkConversionAction({ name: 'Zakup', type: 'WEBPAGE', category: 'PURCHASE', countingType: 'ONE_PER_CLICK' })
+    .warnings.some((w) => /MANY_PER_CLICK/.test(w)));
+  assert(safety.checkConversionAction({ name: 'Formularz', type: 'WEBPAGE', category: 'SUBMIT_LEAD_FORM', countingType: 'MANY_PER_CLICK', defaultValue: 50, currency: 'PLN' })
+    .warnings.some((w) => /ONE_PER_CLICK/.test(w)));
+});
+
+check('checkConversionAction in update mode does not demand type/category', () => {
+  const r = safety.checkConversionAction({ primaryForGoal: true }, { isUpdate: true });
+  assert(r.valid, r.reasons.join('; '));
+});
+
+check('conversion mutations are exported and reject an empty batch', async () => {
+  for (const fn of ['createConversionActions', 'updateConversionActions']) {
+    assert(typeof mutator[fn] === 'function', `brak eksportu ${fn}`);
+    let threw = false;
+    try { await mutator[fn]('1234567890', [], true); } catch { threw = true; }
+    assert(threw, `${fn} nie odrzucił pustej listy`);
+  }
+});
+
+// ---- create-campaigns (Search campaign shells) ----------------------------
+
+const CAMPAIGN_OK = {
+  name: 'Zielony Ogrod - Search',
+  budgetAmount: 30,
+  status: 'PAUSED',
+  biddingStrategy: 'MAXIMIZE_CLICKS',
+  geoTargets: ['2616'],
+  languages: ['1030'],
+  geoTargetType: 'PRESENCE',
+  euPoliticalAdvertising: 'DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING',
+};
+
+check('checkCampaignSpec accepts a plain Search campaign', () => {
+  const r = safety.checkCampaignSpec(CAMPAIGN_OK);
+  assert(r.valid, r.reasons.join('; '));
+  assert(r.warnings.length === 0, r.warnings.join('; '));
+});
+
+check('checkCampaignSpec blocks a non-positive budget and an unknown strategy', () => {
+  assert(!safety.checkCampaignSpec({ ...CAMPAIGN_OK, budgetAmount: 0 }).valid);
+  assert(!safety.checkCampaignSpec({ ...CAMPAIGN_OK, budgetAmount: 'dużo' }).valid);
+  assert(!safety.checkCampaignSpec({ ...CAMPAIGN_OK, biddingStrategy: 'TARGET_IMPRESSION_SHARE' }).valid);
+});
+
+check('checkCampaignSpec blocks a bid knob that belongs to another strategy', () => {
+  // target_roas on Maximize clicks is accepted by Google and then ignored — the
+  // silent no-op this check exists to prevent.
+  assert(!safety.checkCampaignSpec({ ...CAMPAIGN_OK, targetRoas: 4 }).valid);
+  assert(!safety.checkCampaignSpec({ ...CAMPAIGN_OK, biddingStrategy: 'MAXIMIZE_CONVERSIONS', cpcBidCeiling: 10 }).valid);
+  assert(safety.checkCampaignSpec({ ...CAMPAIGN_OK, cpcBidCeiling: 10 }).valid);
+  assert(safety.checkCampaignSpec({ ...CAMPAIGN_OK, biddingStrategy: 'MAXIMIZE_CONVERSION_VALUE', targetRoas: 4 }).valid);
+});
+
+check('checkCampaignSpec warns about ENABLED and about the display network', () => {
+  assert(safety.checkCampaignSpec({ ...CAMPAIGN_OK, status: 'ENABLED' }).warnings.some((w) => /ENABLED/.test(w)));
+  assert(safety.checkCampaignSpec({ ...CAMPAIGN_OK, contentNetwork: true }).warnings.some((w) => /sieć reklamowa/.test(w)));
+});
+
+check('checkCampaignSpec validates targeting ids and the date pair', () => {
+  assert(!safety.checkCampaignSpec({ ...CAMPAIGN_OK, geoTargets: [] }).valid);
+  assert(!safety.checkCampaignSpec({ ...CAMPAIGN_OK, geoTargets: ['Polska'] }).valid);
+  assert(!safety.checkCampaignSpec({ ...CAMPAIGN_OK, languages: ['pl'] }).valid);
+  assert(!safety.checkCampaignSpec({ ...CAMPAIGN_OK, startDate: '01.02.2026' }).valid);
+  assert(!safety.checkCampaignSpec({ ...CAMPAIGN_OK, startDate: '2026-02-01', endDate: '2026-01-01' }).valid);
+  assert(safety.checkCampaignSpec({ ...CAMPAIGN_OK, startDate: '2026-02-01', endDate: '2026-03-01' }).valid);
+});
+
+check('checkCampaignSpec demands the EU political-advertising declaration', () => {
+  // Google rejects a campaign without it; catching it here turns a bare
+  // "required field" API error into a readable block.
+  const { euPoliticalAdvertising, ...noDeclaration } = CAMPAIGN_OK;
+  assert(!safety.checkCampaignSpec(noDeclaration).valid);
+  assert(!safety.checkCampaignSpec({ ...CAMPAIGN_OK, euPoliticalAdvertising: 'nie' }).valid);
+  const political = safety.checkCampaignSpec({ ...CAMPAIGN_OK, euPoliticalAdvertising: 'CONTAINS_EU_POLITICAL_ADVERTISING' });
+  assert(political.valid, political.reasons.join('; '));
+  assert(political.warnings.some((w) => /polityczna/.test(w)), 'brak ostrzeżenia o reklamie politycznej');
+});
+
+check('createSearchCampaigns is exported and rejects an empty batch', async () => {
+  assert(typeof mutator.createSearchCampaigns === 'function', 'brak eksportu createSearchCampaigns');
+  let threw = false;
+  try { await mutator.createSearchCampaigns('1234567890', [], true); } catch { threw = true; }
+  assert(threw, 'createSearchCampaigns nie odrzucił pustej listy');
+});
+
+check('createSearchCampaigns blocks a bad row before touching the API', async () => {
+  // No credentials here — reaching the API would throw a different error. A
+  // validation block must come first, which is what "nic nie zapisano" proves.
+  let msg = '';
+  try {
+    await mutator.createSearchCampaigns('1234567890', [{ name: '', budgetAmount: -5 }], true);
+  } catch (e) { msg = e.message; }
+  assert(/Zablokowano/.test(msg), `spodziewano się bloku walidacji, było: ${msg}`);
+});
+
+check('getExistingCampaigns and getBudgetsByName are exported', () => {
+  assert(typeof queries.getExistingCampaigns === 'function', 'brak getExistingCampaigns');
+  assert(typeof queries.getBudgetsByName === 'function', 'brak getBudgetsByName');
+});
+
+// ---- capitalisation policy (PROHIBITED / CAPITALIZATION) -------------------
+
+check('findShoutingWords catches a shouted word, including Polish diacritics', () => {
+  assert(safety.findShoutingWords('Projekt ogrodu GRATIS').join() === 'GRATIS');
+  assert(safety.findShoutingWords('ŚWIEŻE nasiona').join() === 'ŚWIEŻE');
+  assert(safety.findShoutingWords('NAJTANIEJ w Polsce').join() === 'NAJTANIEJ');
+});
+
+check('findShoutingWords leaves acronyms and CamelCase brands alone', () => {
+  // The threshold exists for exactly these: refusing them would block normal copy.
+  for (const t of ['Logo w PNG lub JPG wystarczy', 'Zgodne z RODO, eksport HTML',
+                   'ZielonyOgrod.example', 'Projekt ogrodu gratis', 'Ekspres: 3 dni robocze']) {
+    assert(safety.findShoutingWords(t).length === 0, `fałszywy alarm na: ${t}`);
+  }
+});
+
+check('checkRsaTexts blocks a shouted headline and names the word', () => {
+  const ad = {
+    headlines: ['Trawa na taras', 'Rośliny do ogrodu', 'Projekt ogrodu GRATIS'],
+    descriptions: ['Rośliny dobrane do Twojego tarasu.', 'Zamówienie już od 1 sztuki.'],
+  };
+  const r = safety.checkRsaTexts(ad);
+  assert(!r.valid, 'przeszło mimo wersalików');
+  assert(r.reasons.some((x) => /GRATIS/.test(x)), r.reasons.join('; '));
+  const ok = safety.checkRsaTexts({ ...ad, headlines: ['Trawa na taras', 'Rośliny do ogrodu', 'Projekt ogrodu gratis'] });
+  assert(ok.valid, ok.reasons.join('; '));
+});
+
+check('checkDemandGenAdTexts blocks shouting but not a business name in capitals', () => {
+  const base = {
+    headlines: ['Trawa na taras'], longHeadlines: ['Rośliny dobrane do Twojego ogrodu'],
+    descriptions: ['Rośliny dobrane do Twojego tarasu.'], businessName: 'ADIDAS',
+  };
+  assert(safety.checkDemandGenAdTexts(base).valid, 'nazwa firmy wersalikami nie powinna blokować');
+  const shouted = safety.checkDemandGenAdTexts({ ...base, descriptions: ['Rośliny do ogrodu, PROMOCJA na taras.'] });
+  assert(!shouted.valid && shouted.reasons.some((x) => /PROMOCJA/.test(x)), shouted.reasons.join('; '));
+});
+
 console.log(`\nResult: ${passed} passed, ${failed} failed.\n`);
 process.exit(failed === 0 ? 0 : 1);
