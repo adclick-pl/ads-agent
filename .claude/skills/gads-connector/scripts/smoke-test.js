@@ -10,6 +10,8 @@
  * Exit code 0 = all good, 1 = a check failed.
  */
 
+import { readFileSync } from 'fs';
+
 let passed = 0;
 let failed = 0;
 
@@ -811,6 +813,49 @@ check('checkDemandGenAdTexts blocks shouting but not a business name in capitals
   assert(safety.checkDemandGenAdTexts(base).valid, 'nazwa firmy wersalikami nie powinna blokować');
   const shouted = safety.checkDemandGenAdTexts({ ...base, descriptions: ['Rośliny do ogrodu, PROMOCJA na taras.'] });
   assert(!shouted.valid && shouted.reasons.some((x) => /PROMOCJA/.test(x)), shouted.reasons.join('; '));
+});
+
+// ---- phone numbers in ad text (PHONE_NUMBER_IN_AD_TEXT) -------------------
+
+check('findPhoneNumbers catches a real number, with and without a country code', () => {
+  assert(safety.findPhoneNumbers('tel. +48 795 822 114').length === 1);
+  assert(safety.findPhoneNumbers('795 822 114').length === 1);
+  assert(safety.findPhoneNumbers('Zadzwoń: 795-822-114').length === 1);
+});
+
+check('findPhoneNumbers leaves quantities, prices and dates alone', () => {
+  // The false positives that would make the check unusable in real ad copy.
+  for (const t of ['1200 szt. — 52,27 zł/kg', '3000 szt. — 45,51 zł/kg', 'Od 2018 roku',
+                   'Zamówienie od 1 do 50 kg', 'Standard 7 dni, ekspres 3 dni', '2026-09-07']) {
+    assert(safety.findPhoneNumbers(t).length === 0, `fałszywy alarm na: ${t}`);
+  }
+});
+
+check('checkSitelinkTexts blocks a phone number in a description', () => {
+  const bad = safety.checkSitelinkTexts({ linkText: 'Kontakt', description1: 'Napisz lub zadzwoń', description2: 'tel. +48 795 822 114' });
+  assert(!bad.valid, 'przeszło mimo numeru telefonu');
+  assert(bad.reasons.some((r) => /PHONE_NUMBER_IN_AD_TEXT/.test(r)), bad.reasons.join('; '));
+  assert(safety.checkSitelinkTexts({ linkText: 'Kontakt', description1: 'Napisz lub zadzwoń', description2: 'Pomożemy dobrać nakład' }).valid);
+});
+
+check('the policy check reaches callouts, snippets and price offerings too', () => {
+  assert(!safety.checkCalloutText('Zadzwoń 795 822 114').valid);
+  assert(!safety.checkStructuredSnippet({ header: 'Typy', values: ['Krówki z logo', 'Krówki na targi', 'Infolinia 795 822 114'] }).valid);
+  const offerings = [{ header: '1 kg krówek', description: '60 szt. — 73,68 zł', price: 73.68 },
+                     { header: '20 kg krówek', description: '1200 szt. — 52,27 zł', price: 1045.38 },
+                     { header: '50 kg krówek', description: '3000 szt. — 45,51 zł', price: 2275.38 }];
+  assert(safety.checkPriceOfferings(offerings).valid, 'realny cennik nie powinien być blokowany');
+  assert(!safety.checkPriceOfferings([...offerings.slice(1), { header: 'Zamów 795 822 114', description: 'Na telefon', price: 10 }]).valid);
+});
+
+check('getExistingSitelinks reports descriptions, so the idempotency key can use them', async () => {
+  // A disapproved sitelink is replaced by adding the corrected one and pausing
+  // the old link — impossible while the key was only parent + text + URL.
+  const src = readFileSync(new URL('./queries.js', import.meta.url), 'utf8');
+  const fn = src.slice(src.indexOf('export async function getExistingSitelinks'));
+  assert(/description1: r\['asset\.sitelink_asset\.description1'\]/.test(fn.slice(0, 3000)), 'opisy nie wracają z getExistingSitelinks');
+  const mut = readFileSync(new URL('./mutator.js', import.meta.url), 'utf8');
+  assert(/const keyOf = \(level, parent, text, url, d1, d2\)/.test(mut), 'klucz idempotencji sitelinków nie obejmuje opisów');
 });
 
 console.log(`\nResult: ${passed} passed, ${failed} failed.\n`);

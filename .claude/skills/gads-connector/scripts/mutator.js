@@ -892,18 +892,23 @@ export async function addSitelinks(customerId, items, dryRun = false, loginCusto
   const norm = (u) => String(u).replace(/\/$/, '');
   const parentOf = (level, campaignId, adGroupId) =>
     level === 'campaign' ? campaignId : level === 'ad_group' ? adGroupId : 'acct';
-  const keyOf = (level, parent, text, url) => `${level}:${parent}|${text}|${norm(url)}`;
+  // Idempotencja po PEŁNEJ treści linku, nie po samym tekście i adresie. Zasób
+  // sitelinka jest niezmienialny, więc "poprawka" z definicji polega na dodaniu
+  // nowego linku i wstrzymaniu starego — a klucz bez opisów pomijał poprawioną
+  // wersję jako duplikat i cementował na koncie komponent odrzucony przez Google.
+  // Ponowne uruchomienie tego samego pliku nadal nic nie dodaje.
+  const keyOf = (level, parent, text, url, d1, d2) => `${level}:${parent}|${text}|${norm(url)}|${d1 || ''}|${d2 || ''}`;
   let existing = new Set();
   try {
     const current = await getExistingSitelinks(cleanCustomerId, { loginCustomerId });
-    existing = new Set(current.map((s) => keyOf(s.level, parentOf(s.level, s.campaignId, s.adGroupId), s.linkText, s.finalUrl)));
+    existing = new Set(current.map((s) => keyOf(s.level, parentOf(s.level, s.campaignId, s.adGroupId), s.linkText, s.finalUrl, s.description1, s.description2)));
   } catch {
     existing = new Set(); // best-effort — a read failure must not block a first-time add
   }
   const toCreate = [];
   const skipped = [];
   for (const r of rows) {
-    (existing.has(keyOf(r.level, parentOf(r.level, r.campaignId, r.adGroupId), r.linkText, r.finalUrl)) ? skipped : toCreate).push(r);
+    (existing.has(keyOf(r.level, parentOf(r.level, r.campaignId, r.adGroupId), r.linkText, r.finalUrl, r.description1, r.description2)) ? skipped : toCreate).push(r);
   }
 
   // De-duplicate assets by content (only among links we will actually create).

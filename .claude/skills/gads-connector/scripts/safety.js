@@ -113,6 +113,7 @@ export function checkSitelinkTexts(t) {
   // Google requires description1 if description2 is set (and vice versa).
   const d1 = String(t.description1 ?? '').trim(), d2 = String(t.description2 ?? '').trim();
   if ((d1 && !d2) || (!d1 && d2)) reasons.push('Opisy muszą być podane parą (oba albo żaden).');
+  reasons.push(...adTextPolicyReasons([['Nagłówek linku', [t.linkText]], ['Opis linku', [d1, d2]]]));
   return { valid: reasons.length === 0, reasons };
 }
 
@@ -221,16 +222,60 @@ export function findShoutingWords(text) {
 }
 
 /**
- * Turn every shouted word in a set of ad texts into a named reason.
+ * Fewest digits that still read as a phone number rather than a quantity.
+ * A Polish subscriber number is exactly 9; with a country code, 11.
+ */
+export const PHONE_MIN_DIGITS = 9;
+
+/**
+ * A run of digits long enough to be a phone number, optionally with a country
+ * code and an area code in brackets. Only space, dot and hyphen may separate the
+ * digits — a comma keeps "52,27 zł" and "1 249,90" out of the match.
+ */
+const PHONE_RE = new RegExp(
+  `(?<!\\d)(?:\\+\\d{1,3}[\\s.-]?)?(?:\\(\\d{1,4}\\)[\\s.-]?)?\\d(?:[\\s.-]?\\d){${PHONE_MIN_DIGITS - 1},}(?!\\d)`,
+  'gu');
+
+/**
+ * Find phone numbers in a piece of ad text.
+ *
+ * Google refuses these under "numer telefonu w tekście reklamy"
+ * (`PHONE_NUMBER_IN_AD_TEXT`) as a **PROHIBITED** policy topic. The number is not
+ * banned from the account — it belongs in a CALL asset, where Google can format
+ * it, count the clicks and swap it per country. Written into a headline, a
+ * sitelink description or a callout, it is a hard disapproval.
+ *
+ * The threshold is what keeps quantities and prices out: "1200 szt.", "52,27 zł",
+ * "od 1 do 50 kg" and "2026-09-07" all stay well under nine digits in one run.
+ *
+ * @param {string} text
+ * @returns {string[]} the matched numbers, in order of appearance
+ */
+export function findPhoneNumbers(text) {
+  return [...String(text ?? '').matchAll(PHONE_RE)].map((m) => m[0].trim());
+}
+
+/**
+ * Check a set of ad texts against the policies Google enforces by DISAPPROVAL
+ * rather than by truncation — shouted words and phone numbers.
+ *
+ * Both belong together because they fail the same way: the write actions send a
+ * whole file as ONE atomic batch, so a single offending string takes every other
+ * ad or asset in it down, and the API answers with a bare `POLICY_FINDING` that
+ * names neither the topic nor the text. Catching them here turns that into a
+ * named row before anything is sent.
+ *
  * @param {Array<[string, string[]]>} groups - `[label, texts]` pairs
  * @returns {string[]}
  */
-function shoutingReasons(groups) {
+function adTextPolicyReasons(groups) {
   const reasons = [];
   for (const [kind, list] of groups) {
     for (const t of list || []) {
       const shouted = findShoutingWords(t);
-      if (shouted.length) reasons.push(`${kind} zawiera wyraz wersalikami (${shouted.join(', ')}) — Google odrzuca to jako "nadmierne użycie wielkich liter" (PROHIBITED) i ubija całą partię reklam. Zapisz normalnie: "${t}".`);
+      if (shouted.length) reasons.push(`${kind} zawiera wyraz wersalikami (${shouted.join(', ')}) — Google odrzuca to jako "nadmierne użycie wielkich liter" (PROHIBITED) i ubija całą partię. Zapisz normalnie: "${t}".`);
+      const phones = findPhoneNumbers(t);
+      if (phones.length) reasons.push(`${kind} zawiera numer telefonu (${phones.join(', ')}) — Google odrzuca to jako PHONE_NUMBER_IN_AD_TEXT (PROHIBITED). Numer podaje się komponentem połączeń, nie w treści: "${t}".`);
     }
   }
   return reasons;
@@ -272,7 +317,7 @@ export function checkRsaTexts(ad) {
   for (const h of hs) if (len(h) > RSA_LIMITS.headlineChars) reasons.push(`Nagłówek ${len(h)} zn. (limit ${RSA_LIMITS.headlineChars}): "${h}"`);
   for (const d of ds) if (len(d) > RSA_LIMITS.descriptionChars) reasons.push(`Tekst ${len(d)} zn. (limit ${RSA_LIMITS.descriptionChars}): "${d}"`);
 
-  reasons.push(...shoutingReasons([['Nagłówek', hs], ['Tekst', ds]]));
+  reasons.push(...adTextPolicyReasons([['Nagłówek', hs], ['Tekst', ds]]));
 
   const dupH = hs.length - new Set(hs.map((h) => h.toLowerCase())).size;
   if (dupH) reasons.push(`${dupH} zduplikowany(ch) nagłówek(ów) w jednej reklamie — Google je scali.`);
@@ -302,6 +347,7 @@ export function checkCalloutText(text) {
   if (!raw) reasons.push('Puste objaśnienie.');
   const n = [...raw].length;
   if (n > CALLOUT_LIMIT) reasons.push(`Objaśnienie ma ${n} znaków (limit ${CALLOUT_LIMIT}).`);
+  reasons.push(...adTextPolicyReasons([['Objaśnienie', [raw]]]));
   return { valid: reasons.length === 0, reasons };
 }
 
@@ -334,6 +380,7 @@ export function checkStructuredSnippet({ header, values }) {
   const dup = vs.length - new Set(vs.map((v) => v.toLowerCase())).size;
   if (dup) reasons.push(`${dup} zduplikowana(ych) wartość(ci) w jednym fragmencie.`);
 
+  reasons.push(...adTextPolicyReasons([['Wartość fragmentu', vs]]));
   return { valid: reasons.length === 0, reasons };
 }
 
@@ -370,6 +417,11 @@ export function checkPriceOfferings(offerings) {
   const dup = list.length - new Set(list.map((o) => String(o.header ?? '').trim().toLowerCase())).size;
   if (dup) reasons.push(`${dup} zduplikowany(ch) nagłówek(ów) pozycji — Google wymaga unikalnych.`);
 
+  // Only the texts: the price itself is a numeric field, not ad copy.
+  reasons.push(...adTextPolicyReasons([
+    ['Nagłówek pozycji cennika', list.map((o) => String(o.header ?? '').trim())],
+    ['Opis pozycji cennika', list.map((o) => String(o.description ?? '').trim())],
+  ]));
   return { valid: reasons.length === 0, reasons };
 }
 
@@ -573,7 +625,7 @@ export function checkDemandGenAdTexts(ad) {
   else if (len(bn) > L.businessNameChars) reasons.push(`Nazwa firmy ${len(bn)} zn. (limit ${L.businessNameChars}): "${bn}"`);
 
   // Nazwa firmy świadomie pominięta — marka bywa zapisana wersalikami legalnie.
-  reasons.push(...shoutingReasons([['Nagłówek', hs], ['Długi nagłówek', lhs], ['Tekst', ds]]));
+  reasons.push(...adTextPolicyReasons([['Nagłówek', hs], ['Długi nagłówek', lhs], ['Tekst', ds]]));
 
   const dupH = hs.length - new Set(hs.map((h) => h.toLowerCase())).size;
   if (dupH) reasons.push(`${dupH} zduplikowany(ch) nagłówek(ów) w jednej reklamie — Google je scali.`);

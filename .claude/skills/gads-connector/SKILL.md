@@ -217,10 +217,15 @@ lock as above. Caveat: a separate **mobile** Final URL is NOT carried to the clo
 a fresh sitelink set from `--input=map.csv` (cols `level`=customer|campaign,
 `campaign_id`, `link_text`, `description1`, `description2`, `final_url`): creates the
 assets and links them at account or campaign level in one atomic call. It is
-**idempotent** — first reads the sitelinks that already exist (`ENABLED` or
-`PAUSED`) and skips any with the same parent + text + URL, so re-running the same
-CSV adds nothing (the dry-run reports `skipped` vs `linksToAdd`). Texts are checked
-against Google's limits (`link_text` 25, descriptions 35, descriptions as a pair).
+**idempotent on the link's full content** — it reads the sitelinks that already
+exist (`ENABLED` or `PAUSED`) and skips any with the same parent, text, URL **and
+both descriptions**, so re-running the same CSV adds nothing (the dry-run reports
+`skipped` vs `linksToAdd`). The descriptions are part of that key on purpose: a
+sitelink asset is immutable, so correcting one means adding the fixed link and
+pausing the old one — and a key of parent + text + URL alone skipped the fix as a
+duplicate, which left a disapproved sitelink impossible to replace. Texts are
+checked against Google's limits (`link_text` 25, descriptions 35, descriptions as
+a pair) and against the ad-text policies below.
 `pause-sitelinks` retires links (status `PAUSED`, kept not removed) — the data-
 preserving way to swap a whole set: `add-sitelinks` the new one, `pause-sitelinks`
 the old resource names.
@@ -316,15 +321,26 @@ temporary campaign — was accepted before you commit.
 Full flow for a new account: `create-campaigns` → `create-ad-groups` →
 `add-keywords` → `add-ads` → `add-negatives` → the asset actions.
 
-**Words in CAPITALS are blocked locally (`add-ads`, `add-demand-gen-ads`).**
-Google refuses them as a PROHIBITED policy topic ("nadmierne użycie wielkich
-liter") — a hard disapproval, not a warning. Since these actions send the file as
-one atomic batch, a single shouted word takes every other ad down with it, and
-the API answers with a bare `POLICY_FINDING` that names neither the topic nor the
-word: the failure lands *after* the commit and has to be tracked down with
-`validate_only`. So the connector refuses it up front and names the word.
-Acronyms up to 4 letters (PNG, JPG, RODO, HTML) pass, and a Demand Gen
-`business_name` is exempt — a brand may legitimately be styled in capitals.
+**Two ad-text policies are blocked locally, in every text-bearing action** —
+`add-ads`, `add-demand-gen-ads`, `add-sitelinks`, `add-callouts`,
+`add-structured-snippets`, `add-price-assets`:
+
+- **Words in CAPITALS** — "nadmierne użycie wielkich liter". Acronyms up to 4
+  letters (PNG, JPG, RODO, HTML) pass, and a Demand Gen `business_name` is exempt,
+  because a brand may legitimately be styled in capitals.
+- **Phone numbers** (`PHONE_NUMBER_IN_AD_TEXT`) — nine or more digits in one run.
+  The number is not banned from the account; it belongs in a **CALL asset**, where
+  Google formats it, counts the clicks and can swap it per country. Written into a
+  headline, a sitelink description or a callout, it is a disapproval. The digit
+  threshold is what keeps real copy out of the net: "1200 szt.", "52,27 zł/kg",
+  "od 1 do 50 kg" and "2026-09-07" never reach nine digits in one run.
+
+Both are PROHIBITED topics — hard disapprovals, not warnings. Since these actions
+send the file as one atomic batch, a single offending string takes every other ad
+or asset down with it, and the API answers with a bare `POLICY_FINDING` that names
+neither the topic nor the text: the failure lands *after* the commit and has to be
+tracked down with `validate_only`. So the connector refuses it up front and names
+the exact word or number.
 
 **Building out a campaign (`create-ad-groups`, `add-keywords`).** The pair that
 turns a keyword research file into a live structure. `create-ad-groups` takes

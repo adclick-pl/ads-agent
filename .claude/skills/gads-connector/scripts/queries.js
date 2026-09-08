@@ -1320,28 +1320,31 @@ export async function getExistingSitelinks(customerId, opts = {}) {
   const clean = String(customerId).replace(/-/g, '');
   const out = [];
   const campRows = await runRawQuery(clean,
-    `SELECT campaign.id, campaign.status, campaign_asset.status, asset.sitelink_asset.link_text, asset.final_urls
+    `SELECT campaign.id, campaign.status, campaign_asset.status, asset.sitelink_asset.link_text, asset.sitelink_asset.description1,
+            asset.sitelink_asset.description2, asset.final_urls
      FROM campaign_asset
      WHERE asset.type = 'SITELINK' AND campaign_asset.status IN ('ENABLED', 'PAUSED')`,
     { loginCustomerId: opts.loginCustomerId });
   for (const r of campRows) {
-    out.push({ level: 'campaign', campaignId: String(r['campaign.id']), adGroupId: null, linkText: r['asset.sitelink_asset.link_text'] || '', finalUrl: (r['asset.final_urls'] || [])[0] || '' });
+    out.push({ level: 'campaign', campaignId: String(r['campaign.id']), adGroupId: null, linkText: r['asset.sitelink_asset.link_text'] || '', description1: r['asset.sitelink_asset.description1'] || '', description2: r['asset.sitelink_asset.description2'] || '', finalUrl: (r['asset.final_urls'] || [])[0] || '' });
   }
   const agRows = await runRawQuery(clean,
-    `SELECT ad_group.id, ad_group_asset.status, asset.sitelink_asset.link_text, asset.final_urls
+    `SELECT ad_group.id, ad_group_asset.status, asset.sitelink_asset.link_text, asset.sitelink_asset.description1,
+            asset.sitelink_asset.description2, asset.final_urls
      FROM ad_group_asset
      WHERE asset.type = 'SITELINK' AND ad_group_asset.status IN ('ENABLED', 'PAUSED')`,
     { loginCustomerId: opts.loginCustomerId });
   for (const r of agRows) {
-    out.push({ level: 'ad_group', campaignId: null, adGroupId: String(r['ad_group.id']), linkText: r['asset.sitelink_asset.link_text'] || '', finalUrl: (r['asset.final_urls'] || [])[0] || '' });
+    out.push({ level: 'ad_group', campaignId: null, adGroupId: String(r['ad_group.id']), linkText: r['asset.sitelink_asset.link_text'] || '', description1: r['asset.sitelink_asset.description1'] || '', description2: r['asset.sitelink_asset.description2'] || '', finalUrl: (r['asset.final_urls'] || [])[0] || '' });
   }
   const custRows = await runRawQuery(clean,
-    `SELECT customer_asset.status, asset.sitelink_asset.link_text, asset.final_urls
+    `SELECT customer_asset.status, asset.sitelink_asset.link_text, asset.sitelink_asset.description1,
+            asset.sitelink_asset.description2, asset.final_urls
      FROM customer_asset
      WHERE asset.type = 'SITELINK' AND customer_asset.status IN ('ENABLED', 'PAUSED')`,
     { loginCustomerId: opts.loginCustomerId });
   for (const r of custRows) {
-    out.push({ level: 'customer', campaignId: null, adGroupId: null, linkText: r['asset.sitelink_asset.link_text'] || '', finalUrl: (r['asset.final_urls'] || [])[0] || '' });
+    out.push({ level: 'customer', campaignId: null, adGroupId: null, linkText: r['asset.sitelink_asset.link_text'] || '', description1: r['asset.sitelink_asset.description1'] || '', description2: r['asset.sitelink_asset.description2'] || '', finalUrl: (r['asset.final_urls'] || [])[0] || '' });
   }
   return out;
 }
