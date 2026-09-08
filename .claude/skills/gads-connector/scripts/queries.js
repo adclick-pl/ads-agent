@@ -166,12 +166,18 @@ export async function listAccounts(customerId, opts = {}) {
   // Use login_customer_id or default customer_id as the parent
   const targetId = customerId || undefined;
 
+  // `time_zone` and `currency_code` are here because the account registry stores
+  // both, and `timezone` is load-bearing: `--days` windows are computed in the
+  // account's zone, so a registry without it silently drifts by a day for any
+  // account outside the operator's own zone.
   const query = `
     SELECT
       customer_client.id,
       customer_client.descriptive_name,
       customer_client.manager,
       customer_client.status,
+      customer_client.time_zone,
+      customer_client.currency_code,
       customer_client.applied_labels
     FROM customer_client
     WHERE customer_client.status = 'ENABLED'
@@ -216,7 +222,7 @@ export async function listAccessibleAccounts() {
     try {
       const customer = api.Customer({ customer_id: id, refresh_token: config.refresh_token });
       const rows = await customer.query(
-        'SELECT customer.id, customer.descriptive_name, customer.manager, customer.status, customer.currency_code FROM customer LIMIT 1'
+        'SELECT customer.id, customer.descriptive_name, customer.manager, customer.status, customer.currency_code, customer.time_zone FROM customer LIMIT 1'
       );
       const c = rows[0]?.customer || {};
       return {
@@ -225,6 +231,7 @@ export async function listAccessibleAccounts() {
         manager: !!c.manager,
         status: c.status ?? null,
         currency_code: c.currency_code ?? null,
+        time_zone: c.time_zone ?? null,
         login_customer_id: null,
         source: 'direct',
       };
@@ -253,7 +260,8 @@ export async function listAccessibleAccounts() {
         descriptive_name: acc['customer_client.descriptive_name'] || '',
         manager: !!acc['customer_client.manager'],
         status: acc['customer_client.status'] ?? null,
-        currency_code: null,
+        currency_code: acc['customer_client.currency_code'] ?? null,
+        time_zone: acc['customer_client.time_zone'] ?? null,
         login_customer_id: mccId,
         source: `mcc:${mccId}`,
       }));

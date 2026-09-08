@@ -73,6 +73,36 @@ node scripts/cli.js --action=get-campaigns --account="Example Client One" --days
 When an account is resolved from the registry, its `login_customer_id` (MCC) and
 `timezone` are applied automatically. With no registry, just use raw IDs.
 
+**Creating the registry — `init-accounts`.** Typing dozens of accounts by hand is
+the reason most setups never get a registry at all:
+
+```bash
+node scripts/cli.js --action=init-accounts             # simulate: show what it would write
+node scripts/cli.js --action=init-accounts --commit    # write it
+```
+
+It reads every account this login can reach, builds a key from the account name,
+and fills in `id`, `login_customer_id`, `currency` and `timezone`. Manager
+accounts, non-enabled accounts and anything already in the registry are skipped,
+each with a stated reason. **Existing entries are never overwritten**, so it is
+safe to re-run after gaining access to new accounts.
+
+Two things it deliberately leaves to a human. It never writes `aliases`, because
+an unchecked short name is a wrong-account risk in a tool that changes budgets,
+and it never sets `default`. When two accounts produce the same key, or a name
+yields no readable key at all, **both are skipped and reported** rather than
+suffixed into `client2` — name those by hand.
+
+**Checking the registry — `check-accounts`.** Reports duplicated keys, ids and
+aliases, aliases shadowed by another entry's key or name, and multiple accounts
+flagged `default`. Exit code 1 when it finds something. A selector matching more
+than one entry now **stops the run** instead of silently taking the first match.
+
+The registry key doubles as the client's folder name under `Klienci/`, so keys are
+lowercase ASCII with no separators (`zielonyogrod`). That is the same shape the
+`ga4-connector` and `gsc-connector` propose, which is why one client resolves the
+same way in all three.
+
 **Finding an account when you don't know its ID — use `list-accessible`.**
 `list-accounts` only lists children of *one* MCC, so it misses accounts that were
 shared with you **directly** (e.g. a client added you as a user on their own

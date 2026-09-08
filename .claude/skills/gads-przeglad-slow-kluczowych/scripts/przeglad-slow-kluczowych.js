@@ -31,7 +31,7 @@ import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'fs';
 import { join, isAbsolute, resolve } from 'path';
 import { execFileSync } from 'child_process';
 
-import { runRawQuery, resolveAccount, getAccountTimezone } from './connector.js';
+import { runRawQuery, resolveAccount, getAccountTimezone, accountSlug } from './connector.js';
 import { setCurrency, getDates, formatDate, fmt, fmtMoney } from './format.js';
 import {
     fetchKeywordList, fetchMetrics30, fetchMetricsYear, fetchCampaignTargets,
@@ -66,7 +66,11 @@ if (!args.account) {
 async function ustalKonto(selector, accountsDir) {
     const cyfry = String(selector).replace(/\D/g, '');
     const czyId = /^\d{10}$/.test(cyfry);
-    const zRejestru = czyId ? null : resolveAccount(selector, accountsDir);
+    // ZAWSZE próbuj rejestru — `resolveAccount` znajduje wpis po `id`, aliasie, kluczu
+    // albo nazwie. Wcześniejszy warunek `czyId ? null : …` pomijał rejestr, gdy user
+    // podał ID; tracono wtedy zdefiniowany alias i folder klienta lądował z surową
+    // liczbą (`Klienci/1234567890/`) mimo że w rejestrze siedział sensowny slug.
+    const zRejestru = resolveAccount(selector, accountsDir);
 
     if (!zRejestru && !czyId) {
         console.error(`Konto „${selector}" nie znalezione w .claude/accounts.json (szukano od: ${accountsDir}).`);
@@ -83,7 +87,8 @@ async function ustalKonto(selector, accountsDir) {
         // dat tak, jak liczy je Google Ads (unika off-by-one, gdy operator jest w innej
         // strefie niż konto).
         timezone: zRejestru?.timezone,
-        key: zRejestru?.key || cyfry,
+        // `key` ustawiamy niżej — po dociągnięciu nazwy z API, żeby dla kont spoza
+        // rejestru dało się zbudować czytelny slug zamiast folderu-liczby.
     };
 
     if (!konto.name || !konto.currency) {
@@ -101,7 +106,123 @@ async function ustalKonto(selector, accountsDir) {
         konto.timezone = await getAccountTimezone(konto.id, konto.login_customer_id);
     }
     konto.name ||= konto.id;
+    // Klucz folderu — hierarchia od najczytelniejszego. Zasada: NIGDY surowe cyfry.
+    // Jeśli żadne ze źródeł nie da sensownej nazwy → wyjście z sygnałem dla orchestratora
+    // (SKILL.md: zapytaj usera przez AskUserQuestion, re-run z `--out=Klienci/<nazwa>/…`).
+    let key = zRejestru?.key || accountSlug(konto.name, konto.id);
+    let zrodlo = zRejestru?.key ? 'rejestr' : (key ? 'nazwa konta z API' : null);
+    let urlKandydat = null;
+    let brandKandydat = null;
+    if (!key) {
+        const url = await urlHostname(konto);
+        urlKandydat = url.hostname; // do wypisania w komunikacie
+        const slug = accountSlug(url.baseDomain);
+        if (slug && slug.length >= 3) { key = slug; zrodlo = `domena z reklam (${url.hostname})`; }
+    }
+    if (!key) {
+        const brand = await brandKeywordCore(konto);
+        brandKandydat = brand.tokens.slice(0, 5).join(', ') || null;
+        const slug = accountSlug(brand.top);
+        if (slug && slug.length >= 3) { key = slug; zrodlo = `słowa kluczowe kampanii Brand (top: „${brand.top}")`; }
+    }
+    if (!key) {
+        console.error(`\n⚠  Nie umiem sam wybrać czytelnej nazwy folderu dla konta ${konto.id}.`);
+        console.error(`   Sygnały które widziałem:`);
+        console.error(`     • nazwa konta z API: ${konto.name === konto.id ? '(niedostępna)' : `"${konto.name}"`}`);
+        console.error(`     • URL reklam: ${urlKandydat || '(brak włączonych reklam z final_urls)'}`);
+        console.error(`     • słowa w kampanii Brand: ${brandKandydat || '(brak kampanii z „brand" w nazwie)'}`);
+        console.error(`   Zapytaj usera jaką nazwę nadać folderowi (małe litery i cyfry, bez separatorów),`);
+        console.error(`   następnie uruchom ponownie z --out=Klienci/<nazwa>/Optymalizacja.`);
+        process.exit(78);
+    }
+    konto.key = key;
+    if (!zRejestru) {
+        console.log(`   ↳ Folder klienta: "${key}" (źródło: ${zrodlo})`);
+    }
     return konto;
+}
+
+// Slug nazw kont mieszka w konektorze (`accountSlug`), bo ta sama wartość jest
+// kluczem wpisu w `accounts.json` i nazwą folderu klienta — gdyby te dwa źródła
+// się rozjechały, dopisanie konta do rejestru przemianowałoby folder i osierociło
+// wcześniejsze raporty.
+
+// Domena z URL reklam: `sklep.zielonyogrod.pl` → baseDomain `zielonyogrod`.
+// Zwracamy też `hostname` do wypisania w komunikacie diagnostycznym, gdyby dalsze
+// fallbacki też padły.
+async function urlHostname(account) {
+    try {
+        const rows = await runRawQuery(account.id,
+            "SELECT ad_group_ad.ad.final_urls FROM ad_group_ad WHERE ad_group_ad.status='ENABLED' LIMIT 20",
+            { loginCustomerId: account.login_customer_id });
+        const urls = rows.flatMap(r => r['ad_group_ad.ad.final_urls'] || []);
+        for (const u of urls) {
+            try {
+                const hostname = new URL(u).hostname.replace(/^www\./, '');
+                const parts = hostname.split('.').filter(Boolean);
+                if (parts.length < 2) continue;
+                const TLD = new Set(['pl', 'com', 'eu', 'net', 'org', 'es', 'de', 'uk', 'co', 'io', 'app', 'shop', 'store']);
+                let base = '';
+                for (let i = parts.length - 1; i >= 0; i--) {
+                    if (!TLD.has(parts[i])) { base = parts[i]; break; }
+                }
+                return { hostname, baseDomain: base };
+            } catch { /* nie-URL, pomijamy */ }
+        }
+    } catch { /* API padło */ }
+    return { hostname: null, baseDomain: '' };
+}
+
+// SŁOWA KLUCZOWE (nie nazwa!) kampanii Brand. Kampania „Brand" zwykle ma słowa typu
+// `[nazwa marki]`, `nazwa marki opinie`, `www nazwa marki` — nazwa marki jest
+// najczęstszym tokenem po odsianiu generycznych dodatków. Zwracamy top token
+// + listę najczęstszych do wypisania w komunikacie diagnostycznym.
+async function brandKeywordCore(account) {
+    try {
+        const rows = await runRawQuery(account.id,
+            `SELECT campaign.name, ad_group_criterion.keyword.text
+             FROM ad_group_criterion
+             WHERE campaign.status='ENABLED'
+               AND ad_group_criterion.type='KEYWORD'
+               AND ad_group_criterion.negative=FALSE
+               AND ad_group_criterion.status='ENABLED'`,
+            { loginCustomerId: account.login_customer_id });
+
+        const brandKws = rows
+            .filter(r => /brand/i.test(r['campaign.name'] || ''))
+            .map(r => r['ad_group_criterion.keyword.text'] || '')
+            .filter(Boolean);
+
+        if (!brandKws.length) return { top: '', tokens: [] };
+
+        // Stopwords: generyczne dodatki występujące „przy marce" (opinie, kontakt,
+        // logowanie, sklep, oficjalna, strona, www itp.) + polskie/angielskie
+        // przyimki + typowe TLD/subdomeny.
+        const STOP = new Set([
+            'a', 'i', 'o', 'u', 'w', 'z', 'na', 'do', 'od', 'po', 'za', 'ze',
+            'the', 'and', 'or', 'of', 'for', 'to', 'in', 'on',
+            'pl', 'com', 'eu', 'net', 'org', 'de', 'es', 'uk', 'www', 'http', 'https',
+            'opinie', 'opinia', 'kontakt', 'oficjalna', 'oficjalny', 'strona', 'sklep', 'shop',
+            'online', 'sale', 'sales', 'promocja', 'promo', 'rabat', 'kupon', 'code',
+            'login', 'logowanie', 'app', 'aplikacja', 'apka',
+            'cena', 'ceny', 'cennik', 'tanio', 'najtaniej', 'oferta',
+        ]);
+
+        const counts = new Map();
+        for (const kw of brandKws) {
+            for (const token of kw.toLowerCase().split(/[^a-ząćęłńóśźż0-9]+/).filter(Boolean)) {
+                if (STOP.has(token)) continue;
+                if (/^\d+$/.test(token)) continue;
+                if (token.length < 3) continue;
+                counts.set(token, (counts.get(token) || 0) + 1);
+            }
+        }
+        const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+        return {
+            top: sorted[0]?.[0] || '',
+            tokens: sorted.map(([t, n]) => `${t} (${n})`),
+        };
+    } catch { return { top: '', tokens: [] }; }
 }
 
 // ============================================================

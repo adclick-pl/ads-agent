@@ -101,6 +101,18 @@ co widziałeś na koncie i stronie.
 o zgodę — zapis jest bezpieczny, a przy kolejnym uruchomieniu detekcja się nie
 powtórzy. Poinformuj usera jednym zdaniem, co zapisałeś.
 
+## KROK 1,7 — Gdy skrypt nie umie sam nazwać folderu
+
+Skrypt sam próbuje kolejno: alias z rejestru → `customer.descriptive_name` → domenę
+z `ad_group_ad.final_urls` → najczęstszy niebrandowy token ze słów kluczowych kampanii
+Brand. Jeśli **wszystkie 4 źródła zawiodą**, wychodzi **exit code 78** i wypisuje
+na stderr sygnały które widział. NIGDY nie tworzy folderu z surowych cyfr.
+
+Gdy dostaniesz exit 78 — **zapytaj usera** (`AskUserQuestion`) jaką nazwę nadać
+folderowi klienta, wklejając do pytania listę zebranych sygnałów jako podpowiedź.
+Slug małymi literami, myślniki zamiast spacji, bez polskich znaków. Potem uruchom
+ponownie z `--out=Klienci/<slug>/Optymalizacja`.
+
 ## KROK 2 — Przepływ (dwuprzebiegowy)
 
 Ocena haseł niepewnych (warstwa 3b) **nie idzie przez płatne API**. Skrypt zapisuje je

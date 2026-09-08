@@ -19,7 +19,8 @@ Ads-Agent/                          ← package root (this folder)
         ├── ga4-connector/          ← Google Analytics 4 connector (CLI, read-only)
         ├── gsc-connector/          ← Google Search Console connector (CLI, read-only)
         ├── gads-reklamy/           ← Google Ads RSA ad writer (Polish, no setup)
-        └── gads-wykluczenia-hasel/ ← negative keyword finder (report + copy-paste lists)
+        ├── gads-wykluczenia-hasel/ ← negative keyword finder (report + copy-paste lists)
+        └── gads-przeglad-slow-kluczowych/ ← keyword audit: which of your keywords to pause
         #   …more skills added here over time
 ```
 
@@ -66,6 +67,7 @@ Getting the Google Ads API credentials is covered step by step in
 | `ga4-connector` | Read **Google Analytics 4**: reports (channels, campaigns, landing pages, products, monthly cohorts, realtime) and property configuration (data streams, key events, custom dimensions, attribution settings, Google Ads links). Read-only — the OAuth scope is `analytics.readonly`, so it can never change a client's property. **No npm dependencies**; reuses the Google Ads OAuth client, so setup is two APIs to enable plus one consent. Supports several Google logins side by side via token profiles. |
 | `gsc-connector` | Read **Google Search Console**: search performance (clicks, impressions, CTR, position by query, page, country, device), submitted sitemaps and their errors, and URL Inspection — whether a URL is indexed, which canonical Google picked, when it was last crawled, and where it knows the URL from. Read-only — the OAuth scope is `webmasters.readonly`, so it can never touch a client's property. **No npm dependencies**; reuses the Google Ads OAuth client, so setup is one API to enable plus one consent. Knows that `sc-domain:` and URL-prefix properties are different objects, and says what your login actually has when Google answers 403. |
 | `gads-wykluczenia-hasel` | Find **negative keywords**: an HTML report, per campaign, splitting wasteful search terms into "certain — exclude" and "check by hand", each with 30-day and 12-month numbers plus a plain-language reason, and copy-paste-ready lists. Combines four signals (30-day spend, a full year without conversions, keyword-match distance, and an AI relevance verdict that knows your offer). Read-only — it never changes the account. Needs `gads-connector` configured. |
+| `gads-przeglad-slow-kluczowych` | Audit the **keywords you added** to the account (not search terms — that's `gads-wykluczenia-hasel`): an HTML report, per campaign, listing pause candidates as "certain" and "check by hand", each with 30-day and 12-month numbers, the reason, and the benchmark it was measured against (campaign tROAS/tCPA → account target → campaign yearly average). Keywords that hit the target in either period are protected. Numbers only, no LLM — one pass takes seconds. The script never changes the account; pausing goes through `gads-connector` (`update-keyword-status`, reversible) only after you confirm. Needs `gads-connector` configured. |
 
 *(More skills will be added to `.claude/skills/` over time. What each release
 brought, in Polish: [`CHANGELOG.md`](CHANGELOG.md).)*

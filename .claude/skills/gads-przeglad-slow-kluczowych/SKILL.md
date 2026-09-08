@@ -117,6 +117,24 @@ na podstawie X, dopisałem do `Klienci/<alias>/config.json`"). Nie pytaj o zgod�
 zapis jest bezpieczny (folder klienta i tak powstałby przy zapisie raportu w KROK 2,
 a config jest edytowalny).
 
+## KROK 1,7 — Gdy skrypt nie umie sam nazwać folderu
+
+Skrypt sam próbuje kolejno: alias z rejestru → `customer.descriptive_name` → domenę
+z `ad_group_ad.final_urls` → najczęstszy niebrandowy token ze słów kluczowych kampanii
+Brand. Jeśli **wszystkie 4 źródła zawiodą**, wychodzi **exit code 78** i wypisuje
+na stderr sygnały które widział (nazwa konta z API, URL reklam, najczęstsze słowa
+w kampanii Brand). NIGDY nie tworzy folderu z surowych cyfr.
+
+Gdy dostaniesz exit 78 — **zapytaj usera** (`AskUserQuestion`) jaką nazwę nadać
+folderowi klienta, wklejając do pytania listę zebranych sygnałów jako podpowiedź.
+Slug małymi literami, myślniki zamiast spacji, bez polskich znaków. Potem uruchom
+ponownie z:
+
+```bash
+node .claude/skills/gads-przeglad-slow-kluczowych/scripts/przeglad-slow-kluczowych.js \
+  --account={alias|ID} --out=Klienci/<slug>/Optymalizacja
+```
+
 ## KROK 2 — Uruchom
 
 ```bash

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { writeFileSync, readFileSync } from 'fs';
+import { writeFileSync, readFileSync, existsSync } from 'fs';
 import path from 'path';
 import { getApiClient } from './client.js';
 import {
@@ -53,7 +53,10 @@ import {
   createConversionActions,
   updateConversionActions,
 } from './mutator.js';
-import { resolveAccount, loadAccounts } from './accounts.js';
+import {
+  resolveAccount, loadAccounts, registryConflicts, findAccountsFile,
+  registryPath, buildRegistryDraft, writeRegistry,
+} from './accounts.js';
 import { rowsToCsv, parseCsv } from './csv.js';
 import { chooseOutputMode, defaultCsvPath, DEFAULT_INLINE_THRESHOLD } from './output.js';
 import { DEFAULT_MAX_BUDGET_CHANGE_PCT } from './safety.js';
@@ -91,6 +94,28 @@ function resolveTarget() {
     timezone: undefined,
     name: undefined,
   };
+}
+
+/**
+ * When there is no registry yet, PROPOSE building one.
+ *
+ * `test-connection` is the last step of the install and `list-accessible` is the
+ * natural first command when you don't know your account IDs. Both succeed
+ * silently on a fresh checkout, and the only mention of the registry sits in
+ * --help, which nobody reads after a command that just worked. Same lesson the
+ * gsc-connector learned. Proposal only: the write goes through
+ * `--action=init-accounts --commit` and needs the user's word.
+ */
+function proposeRegistry(accountCount) {
+  if (findAccountsFile()) return;
+  console.log(`\n💡 Rejestru kont (.claude/accounts.json) jeszcze nie ma — dlatego konto trzeba`);
+  console.log(`   podawać 10-cyfrowym ID. Rejestr pozwala pisać --account=zielonyogrod, sam`);
+  console.log(`   dobiera MCC i strefę czasową, a klucz wpisu jest zarazem nazwą folderu`);
+  console.log(`   klienta w Klienci/ i działa tak samo w konektorach GA4 i Search Console.`);
+  if (accountCount) console.log(`   Kont do zarejestrowania: ${accountCount}.`);
+  console.log(`   Zobacz, co zostałoby zapisane (nic nie zmienia):`);
+  console.log(`   node scripts/cli.js --action=init-accounts`);
+  console.log(`   Zapis dopiero z --commit. Pełny format pól: references/accounts.example.json`);
 }
 
 /** Write rows to a CSV file and print a small JSON summary + preview. */
@@ -224,6 +249,10 @@ Akcje odczytu:
                           udostępnione (np. konto klienta spoza MCC) + dzieci
                           każdego MCC. Pokazuje, jaki --login-customer-id użyć.
   list-accounts           Konta klientów pod JEDNYM MCC (z API).
+  check-accounts          Sprawdza rejestr .claude/accounts.json pod kątem
+                          niejednoznaczności (powtórzone klucze, ID, aliasy;
+                          alias zasłonięty cudzym kluczem; kilka "default").
+                          Kod wyjścia 1, gdy coś znalazł.
   get-campaigns           Kampanie i statystyki.
   get-keywords            Słowa kluczowe i Quality Score.
   get-search-terms        Hasła wyszukiwania Search (do negatywów).
@@ -236,6 +265,15 @@ Akcje odczytu:
   raw-query               Własne zapytanie GAQL (wymaga --query).
 
 Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
+  init-accounts           Zakłada/uzupełnia rejestr .claude/accounts.json z kont
+                          widocznych dla tego loginu (list-accessible). Klucz
+                          buduje z nazwy konta, dopisuje ID, MCC, walutę i strefę.
+                          Pomija konta managerskie, nieaktywne i te już w rejestrze;
+                          istniejących wpisów NIE nadpisuje. Nie nadaje aliasów ani
+                          flagi "default" — te dopisujesz sam. Konta, których nazwa
+                          nie daje czytelnego klucza (albo daje klucz zajęty/zderzony
+                          z innym kontem), są pomijane z podaniem powodu.
+                          Opcje: --commit, --accounts-file=<ścieżka>.
   update-status           Zmiana statusu kampanii (--campaign, --status).
   update-ad-status        Wstrzymanie/wznowienie REKLAM po ID reklamy (tym z UI).
                           Pojedynczo/lista: --ad=<ID[,ID]> --status=<ENABLED|PAUSED>;
@@ -454,7 +492,18 @@ async function main() {
     process.exit(0);
   }
 
-  const { customerId, loginCustomerId, timezone, name } = resolveTarget();
+  // The registry actions exist to BUILD or REPAIR the registry, so they have to
+  // survive one that `resolveAccount` refuses to read — otherwise the only tool
+  // that reports a duplicate key is also the one the duplicate key crashes.
+  const REGISTRY_ACTIONS = new Set(['init-accounts', 'check-accounts']);
+  let target;
+  try {
+    target = resolveTarget();
+  } catch (e) {
+    if (!REGISTRY_ACTIONS.has(action)) throw e;
+    target = { customerId: undefined, loginCustomerId: undefined, timezone: undefined, name: undefined };
+  }
+  const { customerId, loginCustomerId, timezone, name } = target;
   const days = args.days ? Number(args.days) : 30;
 
   // Writes are opt-in, reads are free. The read-only actions are a closed set;
@@ -465,7 +514,7 @@ async function main() {
   const READ_ONLY_ACTIONS = new Set([
     'test-connection', 'list-accessible', 'list-accounts', 'get-campaigns', 'get-keywords',
     'get-search-terms', 'get-pmax-search-terms', 'keyword-ideas', 'get-budgets',
-    'get-change-history', 'raw-query', 'list-conversions',
+    'get-change-history', 'raw-query', 'list-conversions', 'check-accounts',
   ]);
   const isMutation = !READ_ONLY_ACTIONS.has(action);
   const dryRun = isMutation && (!args.commit || !!args['dry-run']);
@@ -499,6 +548,7 @@ async function main() {
         accounts.slice(0, 5).forEach((acc) => {
           console.log(`  • [${acc['customer_client.id']}] ${acc['customer_client.descriptive_name'] || 'Brak nazwy'} (Manager: ${acc['customer_client.manager']})`);
         });
+        proposeRegistry(accounts.length);
       }
     }
 
@@ -513,7 +563,82 @@ async function main() {
           Status: a.status,
           'Login (MCC)': a.login_customer_id || '— bezpośrednio —',
         })));
+        proposeRegistry(rows.filter((a) => !a.manager).length);
       }, 'list-accessible');
+    }
+
+    else if (action === 'init-accounts') {
+      // Bootstraps `.claude/accounts.json` from the accounts this login can reach.
+      // Like every writing action here it SIMULATES by default; `--commit` writes.
+      const file = args['accounts-file'] || registryPath();
+      const rows = await listAccessibleAccounts();
+      let existing = {};
+      if (existsSync(file)) {
+        try {
+          existing = JSON.parse(readFileSync(file, 'utf8'));
+        } catch (e) {
+          console.error(`\n❌ Rejestr ${file} nie jest poprawnym JSON-em (${e.message}). Napraw go ręcznie.`);
+          process.exit(1);
+        }
+      }
+
+      const { add, skipped } = buildRegistryDraft(rows, existing);
+      const entries = Object.entries(add);
+
+      console.log(`\n🗂  Rejestr kont: ${file}`);
+      console.log(`   Kont widocznych dla tego loginu: ${rows.length}`);
+      console.log(`   Do dopisania: ${entries.length}   ·   pominiętych: ${skipped.length}`);
+
+      if (entries.length) {
+        console.log(`\n➕ Nowe wpisy:`);
+        console.table(entries.map(([key, e]) => ({
+          Klucz: key,
+          Nazwa: e.name,
+          ID: e.id,
+          'Login (MCC)': e.login_customer_id || '— bezpośrednio —',
+          Waluta: e.currency || '—',
+          Strefa: e.timezone || '—',
+        })));
+      }
+
+      if (skipped.length) {
+        console.log(`\n⏭  Pominięte — każde wymaga decyzji człowieka albo już jest w rejestrze:`);
+        for (const s of skipped) {
+          console.log(`   • ${s.id}  ${s.name || '(bez nazwy)'} — ${s.reason}`);
+        }
+      }
+
+      // Aliases and `default` are never generated; say so once, here, rather than
+      // leaving the operator to wonder why the file looks sparse.
+      console.log(`\nℹ  Generator nie nadaje aliasów ani flagi "default" — alias, którego nikt nie sprawdził,`);
+      console.log(`   to ryzyko trafienia w złe konto. Dopisz je ręcznie tam, gdzie są potrzebne.`);
+
+      if (!entries.length) {
+        console.log(`\n✅ Nie ma czego dopisywać.`);
+      } else if (!dryRun) {
+        writeRegistry(file, add);
+        console.log(`\n✅ Zapisano ${entries.length} wpisów do ${file}`);
+        const problems = registryConflicts();
+        if (problems.length) {
+          console.log(`\n⚠  Rejestr po zapisie ma niejednoznaczności:`);
+          for (const p of problems) console.log(`   • ${p}`);
+        }
+      } else {
+        console.log(`\n🧪 SYMULACJA — nic nie zapisano. Powtórz z --commit, żeby zapisać.`);
+      }
+    }
+
+    else if (action === 'check-accounts') {
+      const file = findAccountsFile();
+      const problems = registryConflicts();
+      console.log(`\n🔎 Rejestr: ${file || '(nie znaleziono .claude/accounts.json)'}`);
+      if (!problems.length) {
+        console.log('✅ Bez niejednoznaczności — każdy selektor wskazuje dokładnie jedno konto.');
+      } else {
+        console.log(`\n⚠  Znaleziono ${problems.length}:`);
+        for (const p of problems) console.log(`   • ${p}`);
+        process.exitCode = 1;
+      }
     }
 
     else if (action === 'list-accounts') {

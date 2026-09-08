@@ -7,6 +7,107 @@ restarcie sesji. Szczegóły każdego skilla: `.claude/skills/<skill>/SKILL.md`.
 
 ---
 
+## 2026-09-08
+
+### Dodane
+
+- **Nowy skill `gads-przeglad-slow-kluczowych`** — audyt **słów kluczowych dodanych
+  do konta** (nie wyszukiwanych haseł — od tego jest `gads-wykluczenia-hasel`). Raport
+  HTML z kandydatami do wstrzymania, rozbitymi na kampanie, w dwóch listach: „pewne"
+  (rok bez konwersji przy koszcie ≥ 3× rocznego kosztu konwersji kampanii, albo słaby
+  miesiąc potwierdzony słabym rokiem) i „do sprawdzenia" (konwersje są, ale wynik
+  wyraźnie poniżej celu). Przy każdym słowie liczby z 30 dni i z roku, powód oraz
+  poprzeczka, do której zostało porównane. Same liczby, bez modelu językowego —
+  jeden przebieg trwa kilkanaście–kilkadziesiąt sekund.
+
+  ```bash
+  node ".claude/skills/gads-przeglad-slow-kluczowych/scripts/przeglad-slow-kluczowych.js" --account=zielonyogrod --open
+  ```
+
+  Poprzeczka od najbardziej konkretnej: cel ustawiony w kampanii (tROAS/tCPA ze
+  strategii licytacji) → cel konta z `Klienci/<alias>/config.json` → średnia roczna
+  kampanii → średnia roczna konta. **Ochrona przez wynik działa w obie strony**: słowo
+  trzymające cel w skali roku nie trafia na listę mimo słabego miesiąca, a słowo, które
+  w ostatnich 30 dniach zaczęło dowozić (min. 1 pełna konwersja, pełna poprzeczka), jest
+  chronione mimo słabego roku. Przed listami do cięcia raport pokazuje obraz konta
+  (udział wydatku w słowa bez konwersji, rozkład typów dopasowania bez brandu, cel obok
+  wyniku rocznego) i 10 głównych źródeł konwersji poza kampaniami brandowymi.
+
+  Sam skrypt niczego nie zmienia na koncie. Obok raportu powstaje
+  `…-kandydaci.csv` z kluczami kryteriów — Claude proponuje wstrzymanie listy „pewnych",
+  o „do sprawdzenia" pyta osobno i wstrzymuje tylko potwierdzone, przez
+  `update-keyword-status` w konektorze (`PAUSED`, odwracalne — nigdy usunięcie).
+  Wstrzymane słowa zapisuje w `Klienci/<alias>/Optymalizacja/status-slowa-kluczowe.md`.
+  Wymaga skonfigurowanego `gads-connector`.
+
+- **Typ konta (ecom / leadgen) ustalany przez Claude'a, nie zgadywany z danych.**
+  Od typu zależy cała ocena (ROAS vs koszt konwersji). Skill sprawdza po kolei:
+  `businessType` w `Klienci/<alias>/config.json` → kategorie aktywnych akcji konwersji
+  (`list-conversions` w konektorze: zakup/koszyk = ecom, lead/formularz/telefon = leadgen)
+  → stronę WWW klienta → w razie wątpliwości pyta. Ustalony typ zapisuje do `config.json`,
+  więc przy kolejnym uruchomieniu nie powtarza detekcji. Nadpisanie ręczne: `--typ=ecom|leadgen`.
+
+- **Rejestr kont zakłada się sam: `--action=init-accounts`.** Rejestr
+  `.claude/accounts.json`, który do tej pory wypełniało się ręcznie, konektor potrafi
+  teraz zbudować sam — przy kilkudziesięciu kontach pod MCC to różnica między minutą
+  a popołudniem. Akcja czyta wszystkie konta widoczne dla loginu, buduje klucz
+  z nazwy konta i uzupełnia `id`, `login_customer_id`, `currency` oraz `timezone`.
+
+  ```bash
+  node ".claude/skills/gads-connector/scripts/cli.js" --action=init-accounts           # symulacja
+  node ".claude/skills/gads-connector/scripts/cli.js" --action=init-accounts --commit  # zapis
+  ```
+
+  Jak każda akcja zapisująca domyślnie **symuluje** — bez `--commit` tylko pokazuje, co
+  zapisze. Pomija konta managerskie, nieaktywne i te już obecne w rejestrze, każde
+  z podanym powodem. **Istniejących wpisów nie nadpisuje**, więc bezpiecznie odpalić
+  ponownie po dostaniu dostępu do nowych kont.
+
+  Dwie rzeczy zostawia człowiekowi. Nie nadaje **aliasów** — alias trafia do narzędzia,
+  które zmienia budżety, więc powinien przejść przez człowieka — ani flagi `default`.
+  Gdy dwa konta dają ten sam klucz albo z nazwy nie da się zbudować czytelnego,
+  **pomija oba i mówi dlaczego**, zamiast dorabiać końcówkę w rodzaju `klient2`.
+
+  Konektor sam o tym przypomina: gdy rejestru nie ma, `test-connection`
+  i `list-accessible` kończą się podpowiedzią z gotową komendą.
+
+- **Kontrola rejestru: `--action=check-accounts`.** Wypisuje powtórzone klucze, ID
+  i aliasy, aliasy zasłonięte cudzym kluczem lub nazwą oraz kilka kont z flagą `default`.
+  Kod wyjścia 1, gdy coś znajdzie.
+
+### Zmienione
+
+- **Niejednoznaczny selektor konta zatrzymuje wywołanie.** Gdy `--account` pasuje do
+  dwóch wpisów rejestru (ten sam klucz, alias albo ID) lub gdy bez `--account` kilka
+  kont ma flagę `default`, konektor kończy błędem i wypisuje kolidujące wpisy, zamiast
+  brać pierwsze trafienie z pliku. Takie wpisy wyłapuje z wyprzedzeniem
+  `--action=check-accounts`.
+
+- **Nazwa folderu klienta: małe litery bez separatorów.** Klucz rejestru i nazwa folderu
+  w `Klienci/` liczone są teraz jedną funkcją w konektorze, w konwencji zgodnej z tą,
+  którą proponują konektory GA4 i Search Console (`zielonyogrod`). Wcześniej skille
+  budowały nazwę z myślnikami, a konektory bez, więc dopisanie konta do rejestru
+  przemianowywało folder. Formy prawne i końcówki domenowe są wycinane, żeby sklejona
+  nazwa dała się przeczytać: „Nowak i Syn sp. z o.o." daje `nowakisyn`, nie
+  `nowakisynspzoo`. **Konto, które nie jest w rejestrze i miało już raporty, dostanie
+  przy następnym uruchomieniu folder o nowej nazwie** — stare raporty zostają
+  w poprzednim, przenieś je ręcznie albo dopisz konto do rejestru.
+
+- **`list-accessible` zwraca strefę czasową i walutę** (`customer.time_zone`,
+  `customer_client.currency_code`). Strefa jest polem nośnym: okna `--days` liczone są
+  w strefie konta, więc rejestr bez niej rozjeżdża się o dzień dla kont spoza strefy
+  operatora.
+
+### Naprawione
+
+- **`gads-wykluczenia-hasel` oceniał konta leadowe ROAS-em.** Typ konta był zgadywany
+  z wartości konwersji (`> 0` = ecom), więc konto leadgen ze sztywno przypisaną wartością
+  leada (np. „formularz = 200 zł") było traktowane jak sklep. Heurystyka usunięta; bez
+  `businessType` w configu i bez `--typ` skrypt przyjmuje leadgen i wypisuje ostrzeżenie,
+  a typ ustala Claude tą samą drogą co w nowym skillu.
+
+---
+
 ## 2026-08-26
 
 ### Dodane

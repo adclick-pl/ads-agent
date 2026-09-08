@@ -10,7 +10,9 @@
  * Exit code 0 = all good, 1 = a check failed.
  */
 
-import { readFileSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
 
 let passed = 0;
 let failed = 0;
@@ -856,6 +858,160 @@ check('getExistingSitelinks reports descriptions, so the idempotency key can use
   assert(/description1: r\['asset\.sitelink_asset\.description1'\]/.test(fn.slice(0, 3000)), 'opisy nie wracają z getExistingSitelinks');
   const mut = readFileSync(new URL('./mutator.js', import.meta.url), 'utf8');
   assert(/const keyOf = \(level, parent, text, url, d1, d2\)/.test(mut), 'klucz idempotencji sitelinków nie obejmuje opisów');
+});
+
+// The slug is the registry key AND the client's folder name under `Klienci/`.
+// Both readings must come from here, or adding a registry entry renames the
+// folder and orphans the reports written before it.
+check('accountSlug: joined lowercase, no separators', () => {
+  assert(accounts.accountSlug('Zielony Ogród.pl') === 'zielonyogrod', accounts.accountSlug('Zielony Ogród.pl'));
+  assert(accounts.accountSlug('Zielony Ogród - GA4') === 'zielonyogrod');
+});
+check('accountSlug: legal forms stripped before joining', () => {
+  // Without stripping, joining turns this into `nowakisynspzoo`.
+  assert(accounts.accountSlug('Nowak i Syn sp. z o.o.') === 'nowakisyn', accounts.accountSlug('Nowak i Syn sp. z o.o.'));
+  assert(accounts.accountSlug('Nowak i Syn Sp. z o.o.') === 'nowakisyn');
+});
+check('accountSlug: matches the keys ga4/gsc connectors already propose', () => {
+  // Those two are self-contained by design, so agreement is checked, not imported.
+  const ga4Style = (s) => String(s).toLowerCase().normalize('NFD')
+    .replace(/[̀-ͯ]/g, '').replace(/ł/g, 'l')
+    .replace(/\.(pl|com|eu|net|es|info|org)\b/gi, ' ').replace(/[^a-z0-9]/g, '');
+  for (const n of ['Zielony Ogród.pl', 'Fabryka Wzorów', 'kwiaciarnia24']) {
+    assert(accounts.accountSlug(n) === ga4Style(n), `${n}: ${accounts.accountSlug(n)} vs ${ga4Style(n)}`);
+  }
+});
+check('accountSlug: refuses digits, so no client folder is a bare number', () => {
+  assert(accounts.accountSlug('1234567890') === '');
+  assert(accounts.accountSlug('1234567890', '1234567890') === '');
+  assert(accounts.accountSlug('') === '');
+  assert(accounts.accountSlug(null) === '');
+});
+check('accountSlug: keeps a name that is only noise from becoming a folder', () => {
+  assert(accounts.accountSlug('sp. z o.o.') === '');
+  assert(accounts.accountSlug('Google Ads MCC') === '');
+});
+check('accountSlug: capped at 40 chars', () => {
+  assert(accounts.slugifyName('a'.repeat(90)).length === 40);
+});
+
+// --- Registry bootstrap (init-accounts) -----------------------------------
+// The policy lives in a pure function precisely so it can be checked without an
+// API or a filesystem. Every rule below is one the operator relies on being true
+// before they pass --commit.
+
+const ROWS = [
+  { id: '1111111111', descriptive_name: 'Zielony Ogród.pl', manager: false, status: 'ENABLED', currency_code: 'PLN', time_zone: 'Europe/Warsaw', login_customer_id: '9990000001' },
+  { id: '2222222222', descriptive_name: 'Agencja MCC', manager: true, status: 'ENABLED', currency_code: null, time_zone: null, login_customer_id: null },
+  { id: '3333333333', descriptive_name: 'Fabryka Wzorów', manager: false, status: 'CANCELED', currency_code: 'PLN', time_zone: 'Europe/Warsaw', login_customer_id: '9990000001' },
+  { id: '4444444444', descriptive_name: '', manager: false, status: 'ENABLED', currency_code: 'EUR', time_zone: 'Europe/Berlin', login_customer_id: null },
+];
+
+check('init-accounts: builds an entry with id, MCC, currency and timezone', () => {
+  const { add } = accounts.buildRegistryDraft(ROWS, {});
+  const e = add.zielonyogrod;
+  assert(e, 'brak wpisu zielonyogrod');
+  assert(e.id === '1111111111' && e.login_customer_id === '9990000001');
+  assert(e.currency === 'PLN' && e.timezone === 'Europe/Warsaw', JSON.stringify(e));
+});
+check('init-accounts: never invents an alias or a default', () => {
+  const { add } = accounts.buildRegistryDraft(ROWS, {});
+  for (const e of Object.values(add)) {
+    assert(!('aliases' in e), 'wygenerowany alias');
+    assert(!('default' in e), 'wygenerowana flaga default');
+  }
+});
+check('init-accounts: skips managers, non-enabled and unnameable accounts', () => {
+  const { add, skipped } = accounts.buildRegistryDraft(ROWS, {});
+  assert(Object.keys(add).length === 1, JSON.stringify(Object.keys(add)));
+  const why = Object.fromEntries(skipped.map((s) => [s.id, s.reason]));
+  assert(/managerskie/.test(why['2222222222']), why['2222222222']);
+  assert(/CANCELED/.test(why['3333333333']), why['3333333333']);
+  assert(/czytelnego klucza/.test(why['4444444444']), why['4444444444']);
+});
+check('init-accounts: an account already in the registry is left alone', () => {
+  const existing = { cokolwiek: { name: 'Stara nazwa', id: '1111111111' } };
+  const { add, skipped } = accounts.buildRegistryDraft(ROWS, existing);
+  assert(Object.keys(add).length === 0, 'dopisano konto, które już jest w rejestrze');
+  assert(/cokolwiek/.test(skipped.find((s) => s.id === '1111111111').reason));
+});
+check('init-accounts: two accounts sharing a key are BOTH skipped, never suffixed', () => {
+  const rows = [
+    { id: '5555555555', descriptive_name: 'Kwiaciarnia', manager: false, status: 'ENABLED' },
+    { id: '6666666666', descriptive_name: 'kwiaciarnia sp. z o.o.', manager: false, status: 'ENABLED' },
+  ];
+  const { add, skipped } = accounts.buildRegistryDraft(rows, {});
+  assert(Object.keys(add).length === 0, JSON.stringify(Object.keys(add)));
+  assert(skipped.length === 2 && skipped.every((s) => /ten sam klucz/.test(s.reason)));
+});
+check('init-accounts: a key already taken by another account is not reused', () => {
+  const existing = { zielonyogrod: { name: 'Inny klient', id: '9999999999' } };
+  const { add, skipped } = accounts.buildRegistryDraft(ROWS, existing);
+  assert(!add.zielonyogrod, 'nadpisano cudzy klucz');
+  assert(/zajęty/.test(skipped.find((s) => s.id === '1111111111').reason));
+});
+check('init-accounts: re-running over its own output adds nothing', () => {
+  const { add } = accounts.buildRegistryDraft(ROWS, {});
+  const second = accounts.buildRegistryDraft(ROWS, add);
+  assert(Object.keys(second.add).length === 0, 'drugi przebieg dopisał wpisy');
+});
+
+// --- Ambiguity in the registry --------------------------------------------
+// A selector that matches two entries used to resolve to whichever came first in
+// file order. In a tool that pauses keywords and moves budgets, silently picking
+// the wrong account is worse than stopping, so these checks pin the loud failure.
+
+const tmpRegistry = (obj) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ads-agent-reg-'));
+  mkdirSync(join(dir, '.claude'), { recursive: true });
+  writeFileSync(join(dir, '.claude', 'accounts.json'), JSON.stringify(obj, null, 2));
+  return dir;
+};
+
+check('resolveAccount: a duplicated id stops the run instead of guessing', () => {
+  const dir = tmpRegistry({
+    klientjeden: { name: 'Klient Jeden', id: '1234567890' },
+    klientdwa: { name: 'Klient Dwa', id: '1234567890' },
+  });
+  let threw = null;
+  try { accounts.resolveAccount('1234567890', dir); } catch (e) { threw = e; }
+  assert(threw, 'niejednoznaczne ID nie zatrzymało wywołania');
+  assert(/klientjeden/.test(threw.message) && /klientdwa/.test(threw.message), threw.message);
+});
+check('resolveAccount: an unambiguous selector still resolves normally', () => {
+  const dir = tmpRegistry({
+    klientjeden: { name: 'Klient Jeden', id: '1234567890' },
+    klientdwa: { name: 'Klient Dwa', id: '2222222222', aliases: ['dwojka'] },
+  });
+  assert(accounts.resolveAccount('klientdwa', dir).id === '2222222222');
+  assert(accounts.resolveAccount('dwojka', dir).id === '2222222222');
+  assert(accounts.resolveAccount('nieistnieje', dir) === null);
+});
+check('resolveAccount: two accounts flagged default stop a bare call', () => {
+  const dir = tmpRegistry({
+    a: { name: 'A', id: '1111111111', default: true },
+    b: { name: 'B', id: '2222222222', default: true },
+  });
+  let threw = null;
+  try { accounts.resolveAccount(undefined, dir); } catch (e) { threw = e; }
+  assert(threw && /default/.test(threw.message), threw && threw.message);
+});
+check('registryConflicts: reports duplicates and shadowed aliases, one line each', () => {
+  const dir = tmpRegistry({
+    klientjeden: { name: 'Klient Jeden', id: '1234567890', aliases: ['klientdwa'] },
+    klientdwa: { name: 'Klient Dwa', id: '1234567890' },
+  });
+  const problems = accounts.registryConflicts(dir);
+  assert(problems.some((p) => /ID konta/.test(p)), JSON.stringify(problems));
+  assert(problems.some((p) => /nigdy nie wskaże/.test(p)), JSON.stringify(problems));
+});
+check('registryConflicts: a clean registry reports nothing', () => {
+  const dir = tmpRegistry({
+    _README: 'dokumentacja, nie konto',
+    klientjeden: { name: 'Klient Jeden', id: '1111111111', default: true },
+    klientdwa: { name: 'Klient Dwa', id: '2222222222', aliases: ['dwojka'] },
+  });
+  assert(accounts.registryConflicts(dir).length === 0, JSON.stringify(accounts.registryConflicts(dir)));
 });
 
 console.log(`\nResult: ${passed} passed, ${failed} failed.\n`);
