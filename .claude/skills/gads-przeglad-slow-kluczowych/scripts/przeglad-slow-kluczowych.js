@@ -174,13 +174,23 @@ async function main() {
     const avg30 = campaignAverages(keywords, 'd30');
     const avgRok = campaignAverages(keywords, 'rok');
 
-    // Typ konta: flaga CLI > config > wykrycie automatyczne. Automat: konto raportujące
-    // wartość konwersji traktujemy jak ecommerce — tylko tam ROAS jest sensowną miarą.
-    const wartoscRoczna = keywords.reduce((s, kw) => s + (kw.rok.value || 0), 0);
+    // Typ konta: flaga CLI > config.businessType. Świadomie BEZ auto-detekcji z danych —
+    // wcześniejsza heurystyka `wartoscRoczna > 0 → ecom` była fałszywa: konta leadgen
+    // często mają przypisaną sztywną wartość akcjom leadowym (np. „formularz = 200 zł"),
+    // przez co czysty leadgen dostawał tryb ecom i był oceniany ROAS-em zamiast kosztu
+    // konwersji. Wykrywaniem typu (API + strona + dopytanie) zajmuje się orchestrator
+    // skilla (patrz KROK 0 w SKILL.md) — skrypt dostaje już gotową decyzję.
+    //
+    // Ostateczny fallback: leadgen. Koszt konwersji ma sens dla każdego konta z konwersjami,
+    // ROAS wymaga realnego przychodu — pomyłka „ecom → leadgen" pokazuje inne liczby,
+    // pomyłka „leadgen → ecom" na koncie z przypisaną wartością akcji da fałszywy ROAS.
     const typ = String(args.typ || cfg.businessType || '').toLowerCase();
-    const isEcom = typ ? ['ecom', 'ecommerce'].includes(typ) : wartoscRoczna > 0;
+    const isEcom = ['ecom', 'ecommerce'].includes(typ);
+    if (!typ) {
+        console.log(`   ⚠ Nie podano typu konta (brak config.businessType i --typ) — zakładam leadgen.`);
+        console.log(`     Dla konta ecom uruchom z --typ=ecom albo dopisz \`"businessType":"ecom"\` do Klienci/${account.key}/config.json.`);
+    }
     console.log(`   Tryb: ${isEcom ? 'e-commerce (ROAS)' : 'lead gen (koszt konwersji)'}`
-        + `${typ ? '' : ' — wykryty automatycznie'}`
         + `${isEcom && targetRoas ? ` · cel ROAS ${targetRoas}` : ''}`
         + `${!isEcom && targetCpa ? ` · cel koszt konw. ${fmtMoney(targetCpa)}` : ''}`);
 

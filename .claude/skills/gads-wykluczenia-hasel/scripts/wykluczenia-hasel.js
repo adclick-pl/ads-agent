@@ -24,7 +24,7 @@
  *   --accounts-dir  katalog, od którego szukamy `.claude/accounts.json` (domyślnie: bieżący)
  *   --out           folder raportu (domyślnie: Klienci/{alias}/Optymalizacja)
  *   --kontekst      ścieżka do kontekst.md (domyślnie: Klienci/{alias}/Kontekst/kontekst.md)
- *   --typ           ecom | leadgen — nadpisuje config.json i wykrywanie automatyczne
+ *   --typ           ecom | leadgen — nadpisuje config.json (bez tego: WARN + leadgen)
  *   --cel-roas      docelowy ROAS (ecom) — nadpisuje targetRoas z config.json
  *   --open          otwórz raport po wygenerowaniu (macOS)
  */
@@ -315,7 +315,7 @@ const KONTEKST_FILE = 'kontekst.md';
 
 function kontekstTemplate(accountName) {
     return `---
-typ:                # ecom | leadgen — puste = wykryj automatycznie (po wartości konwersji)
+typ:                # ecom | leadgen — puste = fallback leadgen z WARN; ustawia to normalnie config.businessType
 celRoas:            # tylko ecom, np. 3.5 — punkt odniesienia zamiast średniej kampanii
 branza:             # np. sklep ogrodniczy, kancelaria prawna, serwis rowerowy
 ---
@@ -674,17 +674,27 @@ async function main() {
     const status = ensureStatusFile(outputDir, account.name);
     if (status.created) console.log(`   ✓ Utworzono ${STATUS_FILE} (pamięć między rundami)`);
 
-    // Typ konta i cel: flaga CLI > config.json > frontmatter kontekstu > wykrycie automatyczne.
-    // Automat: konto raportujące wartość konwersji traktujemy jak ecommerce, bo tylko
-    // tam ROAS jest sensowną miarą.
+    // Typ konta i cel: flaga CLI > config.businessType > frontmatter kontekstu.
+    // Świadomie BEZ auto-detekcji z danych — wcześniejsza heurystyka
+    // `wartoscKonwersji > 0 → ecom` była fałszywa: konta leadgen często mają przypisaną
+    // sztywną wartość akcjom leadowym (np. „formularz = 200 zł"), przez co czysty leadgen
+    // dostawał tryb ecom i był oceniany ROAS-em zamiast kosztu konwersji. Wykrywaniem
+    // typu (API + strona + dopytanie) zajmuje się orchestrator skilla (patrz KROK 1,5
+    // w SKILL.md) — skrypt dostaje już gotową decyzję.
+    //
+    // Ostateczny fallback: leadgen. Koszt konwersji ma sens dla każdego konta
+    // z konwersjami, ROAS wymaga realnego przychodu.
     const cfg = loadClientConfig(clientDir);
     const fm = parseFrontmatter(kontekst.text || (existsSync(kontekst.path) ? readFileSync(kontekst.path, 'utf8') : ''));
-    const wartoscKonwersji = st30.reduce((s, t) => s + (t.value || 0), 0);
     const typ = String(args.typ || cfg.businessType || fm.typ || '').toLowerCase();
-    const isEcom = typ ? ['ecom', 'ecommerce'].includes(typ) : wartoscKonwersji > 0;
+    const isEcom = ['ecom', 'ecommerce'].includes(typ);
     const celRoas = args['cel-roas'] ?? cfg.targetRoas ?? fm.celRoas ?? null;
     const branza = cfg.industry || fm.branza || '';
-    console.log(`   Tryb oceny: ${isEcom ? 'ecommerce (ROAS)' : 'leadgen (koszt konwersji)'}${typ ? '' : ' — wykryty automatycznie'}`);
+    if (!typ) {
+        console.log(`   ⚠ Nie podano typu konta (brak config.businessType, frontmattera i --typ) — zakładam leadgen.`);
+        console.log(`     Dla konta ecom uruchom z --typ=ecom albo dopisz \`"businessType":"ecom"\` do Klienci/${account.key}/config.json.`);
+    }
+    console.log(`   Tryb oceny: ${isEcom ? 'ecommerce (ROAS)' : 'leadgen (koszt konwersji)'}`);
 
     // Warstwa 3b: hasła niepewne → plik do oceny; negatywy z poprzedniego przebiegu → analiza
     const uncertainTerms = collectUncertainTerms(st30, adGroupKeywords);

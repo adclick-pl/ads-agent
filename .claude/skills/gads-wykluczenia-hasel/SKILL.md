@@ -53,6 +53,54 @@ Obie ścieżki zmieniają flagi `--out` i `--kontekst`; pełna lista flag jest n
 
 Skrypt **tylko czyta** konto — nie potrzebuje uprawnień do zmian i niczego nie modyfikuje.
 
+## KROK 1,5 — Ustal typ konta (ecom / leadgen)
+
+Poprzeczka oceny haseł zależy od typu: ecom → ROAS, leadgen → koszt konwersji. Skrypt
+przyjmuje typ z `--typ` albo `config.businessType` klienta; bez tego leci fallbackiem
+na leadgen z WARN — nie licz na to. **Ustal typ, zanim wywołasz skrypt.**
+
+Sprawdzaj po kolei, kończ na pierwszym pewnym sygnale:
+
+**1,5a. Config klienta.** Jeśli `Klienci/<alias>/config.json` ma pole `businessType`
+(`ecom` / `ecommerce` / `leadgen`) — użyj i idź do KROK 2.
+
+**1,5b. Aktywne akcje konwersji na koncie.**
+
+```bash
+node .claude/skills/gads-connector/scripts/cli.js \
+  --action=list-conversions --account={alias} --json
+```
+
+Klasyfikuj po polu `category` (tylko akcje `status=ENABLED` i primary):
+
+- **ecom**: `PURCHASE`, `ADD_TO_CART`, `BEGIN_CHECKOUT`, `SUBSCRIBE_PAID`, `STORE_SALE`, `STORE_VISIT`
+- **leadgen**: `LEAD`, `SIGNUP`, `PHONE_CALL_LEAD`, `IMPORTED_LEAD`, `SUBMIT_LEAD_FORM`, `BOOK_APPOINTMENT`, `REQUEST_QUOTE`, `CONTACT`, `QUALIFIED_LEAD`, `CONVERTED_LEAD`, `GET_DIRECTIONS`
+- **neutralne** (nie decydują): `DEFAULT`, `PAGE_VIEW`, `DOWNLOAD`, `OUTBOUND_CLICK`, `ENGAGEMENT`
+
+Wszystkie decydujące akcje w jednej kategorii → mamy typ, idź do 1,5e. Mieszanka albo
+same neutralne → dalej.
+
+**1,5c. Strona WWW klienta.** URL bierz z `Klienci/<alias>/Kontekst/kontekst.md`, a jak
+nie ma:
+
+```bash
+node .claude/skills/gads-connector/scripts/cli.js --action=raw-query --account={alias} --json \
+  --query="SELECT ad_group_ad.ad.final_urls FROM ad_group_ad WHERE ad_group_ad.status='ENABLED' LIMIT 5"
+```
+
+WebFetch homepage. Ecom: koszyk, checkout, kategorie produktowe, „dodaj do koszyka".
+Leadgen: „zapytaj o wycenę", formularz kontaktowy, oferta usługowa, brak sklepu.
+Jasny sygnał → mamy typ. Hybryda → dalej.
+
+**1,5d. Dopytaj usera** (AskUserQuestion) jednym zdaniem z podsumowaniem tego,
+co widziałeś na koncie i stronie.
+
+**1,5e. Zapisz typ automatycznie do configu.** Gdy ustaliłeś typ w tej sesji
+(nie odczytany w 1,5a), zapisz go na stałe do `Klienci/<alias>/config.json`
+(pole `businessType`). Utwórz plik i folder klienta, jeśli nie istnieją. Bez pytania
+o zgodę — zapis jest bezpieczny, a przy kolejnym uruchomieniu detekcja się nie
+powtórzy. Poinformuj usera jednym zdaniem, co zapisałeś.
+
 ## KROK 2 — Przepływ (dwuprzebiegowy)
 
 Ocena haseł niepewnych (warstwa 3b) **nie idzie przez płatne API**. Skrypt zapisuje je
@@ -307,13 +355,14 @@ zostaje na nowe tematy.
 | `--accounts-dir` | katalog, od którego szukamy `.claude/accounts.json` (domyślnie: bieżący) |
 | `--out` | folder raportu (domyślnie `Klienci/{alias}/Optymalizacja`) |
 | `--kontekst` | ścieżka do `kontekst.md` (domyślnie `Klienci/{alias}/Kontekst/kontekst.md`) |
-| `--typ` | `ecom` \| `leadgen` — nadpisuje `config.json` i wykrywanie automatyczne |
+| `--typ` | `ecom` \| `leadgen` — nadpisuje `config.json`. Bez ustawienia skrypt wypisze WARN i zakłada leadgen — normalnie typ ustala KROK 1,5. |
 | `--cel-roas` | docelowy ROAS (ecom) — nadpisuje `targetRoas` z `config.json` |
 | `--open` | otwórz raport po wygenerowaniu (macOS) |
 
-**Typ konta** ustala się w kolejności: flaga → `config.json` → frontmatter `kontekst.md`
-→ wykrycie automatyczne (konto raportujące wartość konwersji = ecommerce, bo tylko tam
-ROAS jest sensowną miarą).
+**Typ konta** ustala się w kolejności: flaga → `config.json` (`businessType`) →
+frontmatter `kontekst.md` (`typ:`). Bez żadnego z tych źródeł skrypt idzie leadgenem
+z WARN — detekcja (akcje konwersji + strona + dopytanie + auto-zapis do configu)
+należy do KROK 1,5, wykonywanego przed uruchomieniem skryptu.
 
 **Cel ROAS** (z `config.json` albo frontmattera) wygrywa ze średnią własnej kampanii przy ocenie haseł. Powód:
 przy porównaniu do średniej **własnej** kampanii połowa haseł jest poniżej niej
