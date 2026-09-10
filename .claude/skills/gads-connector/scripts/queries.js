@@ -1157,6 +1157,55 @@ export async function getCampaignBasics(customerId, campaignId, opts = {}) {
   };
 }
 
+/**
+ * Read a campaign's bidding strategy as it is actually set on the account.
+ *
+ * Deliberately does NOT translate `bidding_strategy_type` into a name: the enum
+ * numbering shifts between API versions, and a wrong label here would be worse
+ * than no label. What is unambiguous is which field of the protobuf `oneof` is
+ * populated, so that is what we report — plus `portfolio`, because a campaign
+ * attached to a shared strategy cannot be switched field-by-field at all.
+ *
+ * @param {string} customerId
+ * @param {string|number} campaignId
+ * @param {{loginCustomerId?: string}} [opts]
+ * @returns {Promise<{campaignId: string, name: string, strategyField: string|null,
+ *   targetCpa: number|null, targetRoas: number|null, typeCode: number|string|null,
+ *   portfolio: string|null}|null>}
+ */
+export async function getCampaignBiddingInfo(customerId, campaignId, opts = {}) {
+  const clean = String(customerId).replace(/-/g, '');
+  const id = String(campaignId).replace(/[^0-9]/g, '');
+  if (!id) return null;
+  const rows = await runRawQuery(clean,
+    `SELECT campaign.id, campaign.name, campaign.bidding_strategy,
+            campaign.bidding_strategy_type,
+            campaign.maximize_conversions.target_cpa_micros,
+            campaign.maximize_conversion_value.target_roas,
+            campaign.target_spend.cpc_bid_ceiling_micros
+     FROM campaign WHERE campaign.id = ${id}`,
+    { loginCustomerId: opts.loginCustomerId });
+  const r = rows[0];
+  if (!r) return null;
+  const cpaMicros = r['campaign.maximize_conversions.target_cpa_micros'] ?? null;
+  const roas = r['campaign.maximize_conversion_value.target_roas'] ?? null;
+  const ceilMicros = r['campaign.target_spend.cpc_bid_ceiling_micros'] ?? null;
+  // Only one of these can be set at a time, so the first hit is the answer.
+  let strategyField = null;
+  if (cpaMicros !== null) strategyField = 'maximize_conversions';
+  else if (roas !== null) strategyField = 'maximize_conversion_value';
+  else if (ceilMicros !== null) strategyField = 'target_spend';
+  return {
+    campaignId: String(r['campaign.id']),
+    name: r['campaign.name'] || '',
+    strategyField,
+    targetCpa: cpaMicros === null ? null : Number(cpaMicros) / 1e6,
+    targetRoas: roas === null ? null : Number(roas),
+    typeCode: r['campaign.bidding_strategy_type'] ?? null,
+    portfolio: r['campaign.bidding_strategy'] || null,
+  };
+}
+
 /** Status enums come back as numbers from raw GAQL; map them to the string form. */
 function normaliseStatus(raw) {
   const BY_NUM = { 2: 'ENABLED', 3: 'PAUSED', 4: 'REMOVED' };
@@ -1511,6 +1560,55 @@ export async function getExistingDemandGenAds(customerId, adGroupIds, opts = {})
         finalUrls: r['ad_group_ad.ad.final_urls'] || [],
         // Each entry is an AdVideoAsset; we only need the asset resource name.
         videoAssets: list.map((v) => String(v?.asset ?? v ?? '')).filter(Boolean),
+        status: r['ad_group_ad.status'],
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * List the Demand Gen PRODUCT ads already in the given ad groups.
+ *
+ * Kept separate from `getExistingDemandGenAds` because the two ad types carry
+ * different identity: a video ad is identified by its video asset, a product ad
+ * by its headline. Selecting both shapes in one query would return a row per ad
+ * with half the fields empty, and the caller would have to guess which is which.
+ *
+ * Used for idempotency in `add-demand-gen-product-ads`: a product ad with the
+ * same headline and the same Final URL in the same group counts as present.
+ *
+ * @param {string} customerId
+ * @param {Array<string|number>} adGroupIds
+ * @param {{loginCustomerId?: string}} [opts]
+ * @returns {Promise<Array<{adGroupId:string, adId:string, name:string, finalUrls:string[], headline:string, status:string}>>}
+ */
+export async function getExistingDemandGenProductAds(customerId, adGroupIds, opts = {}) {
+  const clean = String(customerId).replace(/-/g, '');
+  const ids = [...new Set((adGroupIds || []).map((a) => String(a).replace(/[^0-9]/g, '')).filter(Boolean))];
+  if (ids.length === 0) return [];
+  const out = [];
+  for (let i = 0; i < ids.length; i += 200) {
+    const part = ids.slice(i, i + 200);
+    const rows = await runRawQuery(clean,
+      `SELECT ad_group.id, ad_group_ad.ad.id, ad_group_ad.ad.name, ad_group_ad.ad.final_urls,
+              ad_group_ad.status, ad_group_ad.ad.demand_gen_product_ad.headline
+       FROM ad_group_ad
+       WHERE ad_group.id IN (${part.join(',')})
+         AND ad_group_ad.ad.type = 'DEMAND_GEN_PRODUCT_AD'
+         AND ad_group_ad.status != 'REMOVED'`,
+      { loginCustomerId: opts.loginCustomerId });
+    for (const r of rows) {
+      // The API returns the AdTextAsset flattened as `...headline.text`.
+      const headline = r['ad_group_ad.ad.demand_gen_product_ad.headline.text']
+        ?? r['ad_group_ad.ad.demand_gen_product_ad.headline']?.text
+        ?? '';
+      out.push({
+        adGroupId: String(r['ad_group.id']),
+        adId: String(r['ad_group_ad.ad.id'] ?? ''),
+        name: r['ad_group_ad.ad.name'] || '',
+        finalUrls: r['ad_group_ad.ad.final_urls'] || [],
+        headline: String(headline || ''),
         status: r['ad_group_ad.status'],
       });
     }

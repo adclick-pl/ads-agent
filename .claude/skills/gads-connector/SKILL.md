@@ -518,6 +518,11 @@ node scripts/cli.js --action=copy-ad-group-targeting --account=zielonyogrod --in
 # 4. The video responsive ad itself.
 node scripts/cli.js --action=add-demand-gen-ads --account=zielonyogrod --input=reklamy.csv --domain=zielonyogrod.example
 
+# 4b. The PRODUCT ad — this is what makes the campaign dynamic.
+node scripts/cli.js --action=add-demand-gen-product-ads --account=zielonyogrod --input=produktowe.csv --domain=zielonyogrod.example
+#    produktowe.csv: ad_group_id,final_url,headline,description,logo_asset_id,business_name,cta
+#                    111222333,https://zielonyogrod.example,Meble ogrodowe od producenta,Komplety na taras. Sprawdz oferte.,987654321,Zielony Ogrod,SHOP_NOW
+
 # 5. Product feed, restricted to chosen products.
 node scripts/cli.js --action=add-listing-groups --account=zielonyogrod --input=produkty.csv
 #    produkty.csv: ad_group_id,product_item_ids
@@ -545,6 +550,19 @@ Allowed names: `LEARN_MORE`, `SHOP_NOW`, `BUY_NOW`, `ORDER_NOW`, `SIGN_UP`,
 `BOOK_NOW`, `GET_QUOTE`, `CONTACT_US`, `SUBSCRIBE`, `DOWNLOAD`, `DONATE_NOW`,
 `PLAY_NOW`, `SEE_MORE`, `START_NOW`, `VISIT_SITE`, `WATCH_NOW`, `APPLY_NOW`.
 
+**A multi-asset ad is not dynamic; a product ad is.** `add-demand-gen-ads`
+creates the video/multi-asset kind, which shows the same creative to everyone in
+the audience. `add-demand-gen-product-ads` creates the kind that renders items
+from the ad group's listing tree — the difference between "remarketing" and
+"dynamic remarketing". Both types can sit in one ad group.
+
+A product ad carries exactly **one** headline and **one** description (the video
+ad takes lists of up to five), and its CTA field is singular — `call_to_action`,
+not `call_to_actions`. Same character limits apply, plus 15 characters for each
+optional breadcrumb. The action refuses an ad group that has no listing tree
+yet, because a product ad with no feed has nothing to render — run
+`add-listing-groups` first, then come back to it.
+
 **The product tree always carries an excluded "everything else" node.** Without
 it the whole catalogue would run alongside the ad. `add-listing-groups` builds
 root + one node per product + that exclusion, in a single request per ad group
@@ -552,9 +570,10 @@ root + one node per product + that exclusion, in a single request per ad group
 group that already has a feed** — changing one means removing criteria, and this
 connector does not delete. Do that in the UI.
 
-**The simulation is checked by Google, not just locally.** All four structural
+**The simulation is checked by Google, not just locally.** All five structural
 actions (`create-demand-gen-ad-groups`, `copy-ad-group-targeting`,
-`add-demand-gen-ads`, `add-listing-groups`) re-send their batch with
+`add-demand-gen-ads`, `add-demand-gen-product-ads`, `add-listing-groups`)
+re-send their batch with
 `validate_only`, so a dry run reports `apiValidated: true` only when Google
 itself accepted the structure. If it did not, `apiError` carries the reason and
 nothing was written. This is not decoration: it is what caught `ad.name` being

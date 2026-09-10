@@ -1,6 +1,6 @@
 import { getCustomer, unpackError } from './client.js';
-import { getKeywordsByCriteria, getCampaignBasics, getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts, getExistingStructuredSnippets, getExistingPriceAssets, getExistingPromotions, promotionIdentity, getAdGroupAdsByAdIds, getAdGroupsByIds, getExistingYoutubeAssets, getExistingDemandGenAds, getExistingListingGroups, getAdGroupTargetingCriteria, getCampaignChannelTypes, getCallToActionAssets, getConversionActions, getExistingCampaigns, getBudgetsByName, COPYABLE_CRITERION_TYPES } from './queries.js';
-import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkPriceOfferings, checkPromotion, checkDemandGenAdTexts, checkDemandGenChannels, checkConversionAction, checkCampaignSpec } from './safety.js';
+import { getKeywordsByCriteria, getCampaignBasics, getCampaignBiddingInfo, getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts, getExistingStructuredSnippets, getExistingPriceAssets, getExistingPromotions, promotionIdentity, getAdGroupAdsByAdIds, getAdGroupsByIds, getExistingYoutubeAssets, getExistingDemandGenAds, getExistingDemandGenProductAds, getExistingListingGroups, getAdGroupTargetingCriteria, getCampaignChannelTypes, getCallToActionAssets, getConversionActions, getExistingCampaigns, getBudgetsByName, COPYABLE_CRITERION_TYPES } from './queries.js';
+import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkPriceOfferings, checkPromotion, checkDemandGenAdTexts, checkDemandGenChannels, DEMAND_GEN_LIMITS, adTextLength, checkConversionAction, checkCampaignSpec } from './safety.js';
 
 /**
  * Entity metadata for Final URL updates. Maps our short entity key to the
@@ -536,6 +536,190 @@ export async function updateKeywordStatus(customerId, items, dryRun = false, log
     lookup: (ids, opts) => getKeywordsByCriteria(customerId, ids, opts),
     describe: (row) => ({ text: row.text, matchType: row.matchType, adGroupName: row.adGroupName }),
   }, customerId, items, dryRun, loginCustomerId);
+}
+
+/**
+ * Renames a campaign.
+ *
+ * Trivial as a mutation, easy to regret in a report: the name is how a campaign
+ * is recognised in every export, dashboard and past screenshot, so this refuses
+ * an empty name and reports the old one next to the new so a dry-run reads like
+ * a decision rather than a formality. Google requires names to be unique among
+ * non-removed campaigns, which is why a clash is checked before sending.
+ *
+ * @param {string} customerId
+ * @param {string|number} campaignId
+ * @param {string} newName
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>} from→to plan (dry-run) or the mutate response
+ */
+export async function renameCampaign(customerId, campaignId, newName, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  const cleanCampaignId = String(campaignId).replace(/[^0-9]/g, '');
+  if (!cleanCampaignId) throw new Error('rename-campaign: brak poprawnego --campaign=<ID>.');
+  const name = String(newName ?? '').trim();
+  if (!name) throw new Error('rename-campaign: --name nie może być puste.');
+
+  const before = await getCampaignBasics(cleanCustomerId, cleanCampaignId, { loginCustomerId });
+  if (!before) throw new Error(`rename-campaign: nie znaleziono kampanii ${cleanCampaignId} na koncie ${cleanCustomerId}.`);
+  if (before.name === name) {
+    return { success: true, dryRun, campaignId: cleanCampaignId, from: before.name, to: name, unchanged: true };
+  }
+
+  // getExistingCampaigns takes (customerId, opts) and returns every ENABLED/PAUSED
+  // campaign — there is no name filter, so the match happens here.
+  const existing = await getExistingCampaigns(cleanCustomerId, { loginCustomerId });
+  const clash = (existing || []).find((c) => c.name.toLowerCase() === name.toLowerCase()
+    && c.campaignId !== cleanCampaignId);
+  if (clash) {
+    throw new Error(`🛑 Nazwa "${name}" jest już zajęta przez inną kampanię na tym koncie — Google wymaga unikalnych nazw.`);
+  }
+
+  const plan = { campaignId: cleanCampaignId, from: before.name, to: name, unchanged: false };
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Renaming campaign ${cleanCampaignId}: "${before.name}" → "${name}"...`);
+  if (dryRun) return { success: true, dryRun: true, ...plan };
+
+  try {
+    const customer = getCustomer(cleanCustomerId, loginCustomerId);
+    const response = await customer.campaigns.update([
+      { resource_name: `customers/${cleanCustomerId}/campaigns/${cleanCampaignId}`, name },
+    ]);
+    return { success: true, dryRun: false, ...plan, response };
+  } catch (error) {
+    throw new Error(`Failed to rename campaign: ${unpackError(error)}`);
+  }
+}
+
+/** The four strategies this connector can set on a Search campaign. */
+export const BIDDING_STRATEGIES = ['MAXIMIZE_CLICKS', 'MAXIMIZE_CONVERSIONS', 'MAXIMIZE_CONVERSION_VALUE', 'MANUAL_CPC'];
+
+/**
+ * Writes a bidding strategy onto a campaign resource.
+ *
+ * These fields are a protobuf `oneof`, so exactly one may be set — which is also
+ * why switching a live campaign works at all: setting the new field clears the
+ * old one. Shared by `create-campaigns` and `update-bidding` so both speak the
+ * same dialect, including the important part: no target given means no target
+ * set, and Google is left to learn rather than handed a number we invented.
+ *
+ * @param {object} campaign - Campaign resource being built (mutated in place).
+ * @param {{biddingStrategy: string, cpcBidCeiling?: number|string|null,
+ *   targetCpa?: number|string|null, targetRoas?: number|string|null,
+ *   enhancedCpc?: boolean}} spec
+ * @param {{forUpdate?: boolean}} [opts] - true when the resource goes to campaigns.update()
+ * @returns {object} The same campaign resource, for chaining.
+ */
+export function setBiddingStrategy(campaign, spec, opts = {}) {
+  const { forUpdate = false } = opts;
+  // CREATE and UPDATE need different shapes for "no target". On create a bare
+  // `{}` is fine. On update the client derives the field mask from the object we
+  // send, and a mask pointing at a message field that has subfields is rejected
+  // with FIELD_HAS_SUBFIELDS — so on update the subfield is named explicitly and
+  // set to 0, which is how the API spells "no target".
+  const noTarget = (subfield) => (forUpdate ? { [subfield]: 0 } : {});
+  const strategy = String(spec.biddingStrategy ?? '').trim().toUpperCase();
+  if (strategy === 'MAXIMIZE_CLICKS') {
+    campaign.target_spend = spec.cpcBidCeiling
+      ? { cpc_bid_ceiling_micros: standardToMicros(spec.cpcBidCeiling) }
+      : noTarget('cpc_bid_ceiling_micros');
+  } else if (strategy === 'MAXIMIZE_CONVERSIONS') {
+    campaign.maximize_conversions = spec.targetCpa
+      ? { target_cpa_micros: standardToMicros(spec.targetCpa) }
+      : noTarget('target_cpa_micros');
+  } else if (strategy === 'MAXIMIZE_CONVERSION_VALUE') {
+    campaign.maximize_conversion_value = spec.targetRoas
+      ? { target_roas: Number(spec.targetRoas) }
+      : noTarget('target_roas');
+  } else {
+    campaign.manual_cpc = { enhanced_cpc_enabled: spec.enhancedCpc === true };
+  }
+  return campaign;
+}
+
+/**
+ * Switches a LIVE campaign to a different bidding strategy.
+ *
+ * Three things make this less routine than it looks, and each is handled here:
+ *
+ *  - A campaign attached to a PORTFOLIO (shared) strategy cannot be switched
+ *    field-by-field; the portfolio has to be detached first. We refuse with a
+ *    plain sentence instead of letting the API return a bare mutate error.
+ *  - Dropping a tCPA/tROAS target is a real change of behaviour, not a tidy-up:
+ *    Google restarts the learning phase either way. The dry-run says so.
+ *  - Experiment/draft campaigns reject the mutation outright, so we check that
+ *    before promising anything.
+ *
+ * @param {string} customerId
+ * @param {string|number} campaignId
+ * @param {{biddingStrategy: string, targetCpa?: number|null, targetRoas?: number|null,
+ *   cpcBidCeiling?: number|null, enhancedCpc?: boolean}} spec
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>} from→to plan (dry-run) or the mutate response
+ */
+export async function updateCampaignBidding(customerId, campaignId, spec, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  const cleanCampaignId = String(campaignId).replace(/[^0-9]/g, '');
+  if (!cleanCampaignId) throw new Error('update-bidding: brak poprawnego --campaign=<ID>.');
+
+  const strategy = String(spec.biddingStrategy ?? '').trim().toUpperCase();
+  if (!BIDDING_STRATEGIES.includes(strategy)) {
+    throw new Error(`update-bidding: --strategy musi być jedną z: ${BIDDING_STRATEGIES.join(' | ')} (podano: "${spec.biddingStrategy ?? ''}").`);
+  }
+
+  const before = await getCampaignBiddingInfo(cleanCustomerId, cleanCampaignId, { loginCustomerId });
+  if (!before) throw new Error(`update-bidding: nie znaleziono kampanii ${cleanCampaignId} na koncie ${cleanCustomerId}.`);
+  if (before.portfolio) {
+    throw new Error(
+      `🛑 Kampania "${before.name}" korzysta ze strategii PORTFOLIO (${before.portfolio}). ` +
+      'Google nie pozwala nadpisać jej pojedynczym polem — najpierw odepnij kampanię od strategii współdzielonej w panelu, potem powtórz tę komendę.'
+    );
+  }
+  const basics = await getCampaignBasics(cleanCustomerId, cleanCampaignId, { loginCustomerId });
+  if (basics && basics.experimentType && basics.experimentType !== 'BASE') {
+    throw new Error(
+      `🛑 Kampania "${before.name}" jest typu ${basics.experimentType} (wersja robocza / eksperyment). ` +
+      'Google odrzuca zmianę stawek dla takich kampanii (CANNOT_MODIFY_FOR_TRIAL_CAMPAIGN).'
+    );
+  }
+
+  const campaign = { resource_name: `customers/${cleanCustomerId}/campaigns/${cleanCampaignId}` };
+  setBiddingStrategy(campaign, { ...spec, biddingStrategy: strategy }, { forUpdate: true });
+
+  const hadTarget = before.targetCpa !== null || before.targetRoas !== null;
+  const wantsTarget = spec.targetCpa != null || spec.targetRoas != null;
+  const notes = [];
+  if (before.strategyField !== null || hadTarget) {
+    notes.push('Zmiana strategii restartuje fazę uczenia — pierwsze dni po przełączeniu nie są miarodajne.');
+  }
+  if (hadTarget && !wantsTarget) {
+    notes.push('Zdejmujesz cel (tCPA/tROAS) — kampania przestanie być nim ograniczana i może zacząć wydawać cały budżet.');
+  }
+
+  const plan = {
+    campaignId: cleanCampaignId,
+    campaignName: before.name,
+    from: { strategyField: before.strategyField, targetCpa: before.targetCpa, targetRoas: before.targetRoas },
+    to: {
+      strategy,
+      targetCpa: spec.targetCpa ?? null,
+      targetRoas: spec.targetRoas ?? null,
+      cpcBidCeiling: spec.cpcBidCeiling ?? null,
+    },
+    notes,
+  };
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Switching campaign ${cleanCampaignId} to ${strategy}...`);
+  if (dryRun) return { success: true, dryRun: true, ...plan };
+
+  try {
+    const customer = getCustomer(cleanCustomerId, loginCustomerId);
+    const response = await customer.campaigns.update([campaign]);
+    return { success: true, dryRun: false, ...plan, response };
+  } catch (error) {
+    throw new Error(`Failed to update campaign bidding strategy: ${unpackError(error)}`);
+  }
 }
 
 /**
@@ -1246,16 +1430,7 @@ export async function createSearchCampaigns(customerId, items, dryRun = false, l
     if (r.startDate) campaign.start_date = r.startDate;
     if (r.endDate) campaign.end_date = r.endDate;
 
-    // Bidding strategy is a protobuf oneof — exactly one of these may be set.
-    if (r.biddingStrategy === 'MAXIMIZE_CLICKS') {
-      campaign.target_spend = r.cpcBidCeiling ? { cpc_bid_ceiling_micros: standardToMicros(r.cpcBidCeiling) } : {};
-    } else if (r.biddingStrategy === 'MAXIMIZE_CONVERSIONS') {
-      campaign.maximize_conversions = r.targetCpa ? { target_cpa_micros: standardToMicros(r.targetCpa) } : {};
-    } else if (r.biddingStrategy === 'MAXIMIZE_CONVERSION_VALUE') {
-      campaign.maximize_conversion_value = r.targetRoas ? { target_roas: Number(r.targetRoas) } : {};
-    } else {
-      campaign.manual_cpc = { enhanced_cpc_enabled: r.enhancedCpc };
-    }
+    setBiddingStrategy(campaign, r);
     mutations.push({ entity: 'Campaign', operation: 'create', resource: campaign });
 
     for (const geo of r.geoTargets) {
@@ -2965,6 +3140,197 @@ export async function addDemandGenAds(customerId, items, dryRun = false, loginCu
     return { success: true, dryRun: false, entity: 'ad_group_ad', created: toCreate.length, skipped: skipped.length, chunks: responses.length, plan, resourceNames: mutatedResourceNames(responses) };
   } catch (error) {
     throw new Error(`Nie udało się utworzyć reklam Demand Gen: ${unpackError(error)}`);
+  }
+}
+
+/**
+ * Create Demand Gen PRODUCT ads — the ad type that renders items from the feed.
+ *
+ * This is the piece that turns a Demand Gen remarketing campaign into a DYNAMIC
+ * one: a multi-asset ad shows the same creative to everyone, a product ad shows
+ * products drawn from the ad group's listing tree. Both can live in one group.
+ *
+ * Unlike the video ad, a product ad carries exactly ONE headline and ONE
+ * description (not lists), so the shared text check runs on single-element
+ * lists — same limits, same policy rules, one code path.
+ *
+ * Two guardrails, both of which would otherwise surface as an opaque API error
+ * or, worse, as an ad that serves nothing:
+ *   • the ad group must sit in a Demand Gen campaign;
+ *   • the ad group must already have a product feed (listing group), because a
+ *     product ad with no feed has nothing to render.
+ *
+ * The call-to-action is an ASSET reference (as in `add-demand-gen-ads`), but the
+ * field is singular here: `call_to_action`, not `call_to_actions`.
+ *
+ * Idempotent: a product ad in the same group with the same headline and the
+ * same Final URL counts as present.
+ *
+ * @param {string} customerId
+ * @param {Array<object>} items
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @param {{domain?: string}} [opts] - domain lock for Final URLs
+ * @returns {Promise<object>}
+ */
+export async function addDemandGenProductAds(customerId, items, dryRun = false, loginCustomerId, opts = {}) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  if (!Array.isArray(items) || items.length === 0) throw new Error('Brak reklam do dodania (pusta lista).');
+
+  const problems = [];
+  const rows = items.map((it, i) => {
+    const ref = it.label || `wiersz ${i + 1}`;
+    const adGroupId = String(it.adGroupId ?? '').replace(/[^0-9]/g, '');
+    if (!adGroupId) problems.push(`${ref}: brak ad_group_id.`);
+
+    const logoAssetId = String(it.logoAssetId ?? '').replace(/[^0-9]/g, '');
+    if (!logoAssetId) problems.push(`${ref}: brak logo_asset_id (logo jest wymagane przez API).`);
+
+    const finalUrl = String(it.finalUrl ?? '').trim();
+    const urlCheck = validateFinalUrl(finalUrl, { domain: opts.domain });
+    if (!urlCheck.valid) problems.push(`${ref}: ${urlCheck.reason}`);
+
+    const headline = String(it.headline ?? '').trim();
+    const description = String(it.description ?? '').trim();
+    const businessName = String(it.businessName ?? '').trim();
+    const textCheck = checkDemandGenAdTexts({
+      headlines: headline ? [headline] : [],
+      descriptions: description ? [description] : [],
+      businessName,
+    });
+    if (!textCheck.valid) textCheck.reasons.forEach((r) => problems.push(`${ref}: ${r}`));
+
+    const breadcrumb1 = String(it.breadcrumb1 ?? '').trim();
+    const breadcrumb2 = String(it.breadcrumb2 ?? '').trim();
+    for (const [field, b] of [['breadcrumb1', breadcrumb1], ['breadcrumb2', breadcrumb2]]) {
+      if (b && adTextLength(b) > DEMAND_GEN_LIMITS.breadcrumbChars) {
+        problems.push(`${ref}: ${field} ${adTextLength(b)} zn. (limit ${DEMAND_GEN_LIMITS.breadcrumbChars}): "${b}"`);
+      }
+    }
+
+    const cta = String(it.cta ?? '').trim().toUpperCase();
+    const status = String(it.status ?? 'ENABLED').trim().toUpperCase();
+    assertNotRemoval(status);
+    if (!['ENABLED', 'PAUSED'].includes(status)) problems.push(`${ref}: status musi być ENABLED lub PAUSED (jest "${it.status}").`);
+
+    return { adGroupId, logoAssetId, finalUrl, headline, description, businessName, breadcrumb1, breadcrumb2, cta, status, name: String(it.name ?? '').trim(), label: ref };
+  });
+  if (problems.length) {
+    throw new Error(`🛑 Zablokowano — ${problems.length} problem(ów) walidacji, nic nie zapisano:\n${problems.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  const groupIds = [...new Set(rows.map((r) => r.adGroupId))];
+
+  // Guardrail 1 — the ad group exists and its campaign is Demand Gen.
+  const groups = await getAdGroupsByIds(cleanCustomerId, groupIds, { loginCustomerId });
+  const groupById = new Map(groups.map((g) => [g.adGroupId, g]));
+  const campaigns = await getCampaignChannelTypes(cleanCustomerId, [...new Set(groups.map((g) => g.campaignId))], { loginCustomerId });
+  const wrongTarget = [];
+  for (const r of rows) {
+    const g = groupById.get(r.adGroupId);
+    if (!g) { wrongTarget.push(`${r.label}: grupa ${r.adGroupId} nie istnieje, jest usunięta albo niedostępna.`); continue; }
+    const c = campaigns.get(g.campaignId);
+    if (!c) wrongTarget.push(`${r.label}: nie udało się odczytać kampanii grupy ${r.adGroupId}.`);
+    else if (c.channelType !== DEMAND_GEN_CHANNEL_TYPE) {
+      wrongTarget.push(`${r.label}: grupa "${g.name}" leży w kampanii "${c.name}" (${g.campaignId}), która nie jest Demand Gen (advertising_channel_type=${c.channelType}).`);
+    }
+  }
+  if (wrongTarget.length) {
+    throw new Error(`🛑 Zablokowano — nieprawidłowe grupy docelowe, nic nie zapisano:\n${wrongTarget.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  // Guardrail 2 — no feed, nothing to render.
+  const listing = await getExistingListingGroups(cleanCustomerId, groupIds, { loginCustomerId });
+  const withFeed = new Set(listing.map((l) => String(l.adGroupId)));
+  const noFeed = [...new Set(rows.filter((r) => !withFeed.has(r.adGroupId)).map((r) => r.adGroupId))];
+  if (noFeed.length) {
+    throw new Error(`🛑 Zablokowano — te grupy nie mają kanału produktowego, więc reklama produktowa nie miałaby czego pokazać: ${noFeed.join(', ')}.\n   Podepnij feed najpierw: --action=add-listing-groups`);
+  }
+
+  // Skip product ads that already exist (same group + same headline + same URL).
+  const existingAds = await getExistingDemandGenProductAds(cleanCustomerId, groupIds, { loginCustomerId });
+  const existingKeys = new Set();
+  for (const a of existingAds) {
+    for (const u of (a.finalUrls || [])) existingKeys.add(`${a.adGroupId}|${a.headline.toLowerCase()}|${u}`);
+  }
+
+  const toCreate = [];
+  const skipped = [];
+  for (const r of rows) {
+    const key = `${r.adGroupId}|${r.headline.toLowerCase()}|${r.finalUrl}`;
+    if (existingKeys.has(key)) { skipped.push({ ...r, reason: 'reklama produktowa z tym nagłówkiem i tym URL już jest w grupie' }); continue; }
+    existingKeys.add(key);
+    toCreate.push(r);
+  }
+
+  const plan = {
+    toCreate: toCreate.map((r) => ({ adGroupId: r.adGroupId, headline: r.headline, description: r.description, finalUrl: r.finalUrl, businessName: r.businessName, cta: r.cta || '(brak — Google dobierze)', status: r.status })),
+    skipped: skipped.map((r) => ({ adGroupId: r.adGroupId, headline: r.headline, reason: r.reason })),
+  };
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Reklamy produktowe Demand Gen: do utworzenia ${toCreate.length}, pominięte ${skipped.length}...`);
+  if (!dryRun && toCreate.length === 0) return { success: true, dryRun: false, entity: 'ad_group_ad', created: 0, skipped: skipped.length, plan, response: null };
+
+  try {
+    const customer = getCustomer(cleanCustomerId, loginCustomerId);
+
+    // Pre-pass: make sure every requested CTA exists as an asset, then reuse it.
+    const ctaWanted = [...new Set(toCreate.map((r) => r.cta).filter(Boolean))];
+    let ctaAssets = ctaWanted.length ? await getCallToActionAssets(cleanCustomerId, { loginCustomerId }) : new Map();
+    const ctaEnumOf = (name) => CALL_TO_ACTION_VALUES[name];
+    const unknownCta = ctaWanted.filter((c) => ctaEnumOf(c) === undefined);
+    if (unknownCta.length) {
+      throw new Error(`Nieznane CTA: ${unknownCta.join(', ')}. Dozwolone: ${Object.keys(CALL_TO_ACTION_VALUES).join(', ')}.`);
+    }
+    const ctaToCreate = ctaWanted.filter((c) => !ctaAssets.has(ctaEnumOf(c)));
+    // A simulation must not create assets — same rule as add-demand-gen-ads.
+    const ctaDeferred = dryRun ? ctaToCreate : [];
+    if (ctaToCreate.length && !dryRun) {
+      await customer.mutateResources(ctaToCreate.map((c) => ({
+        entity: 'Asset',
+        operation: 'create',
+        resource: { call_to_action_asset: { call_to_action: c } },
+      })));
+      ctaAssets = await getCallToActionAssets(cleanCustomerId, { loginCustomerId });
+    }
+
+    const mutations = toCreate.map((r) => {
+      const productAd = {
+        headline: { text: r.headline },
+        description: { text: r.description },
+        logo_image: { asset: `customers/${cleanCustomerId}/assets/${r.logoAssetId}` },
+        business_name: { text: r.businessName },
+      };
+      if (r.breadcrumb1) productAd.breadcrumb1 = r.breadcrumb1;
+      if (r.breadcrumb2) productAd.breadcrumb2 = r.breadcrumb2;
+      if (r.cta) {
+        const rn = ctaAssets.get(ctaEnumOf(r.cta));
+        if (!rn && !dryRun) throw new Error(`Nie udało się ustalić zasobu CTA dla "${r.cta}".`);
+        // Singular here — a product ad takes one CTA, a video ad takes a list.
+        if (rn) productAd.call_to_action = { asset: rn };
+      }
+      const ad = { final_urls: [r.finalUrl], demand_gen_product_ad: productAd };
+      // `ad.name` is REQUIRED for Demand Gen ads — same as the video variant.
+      ad.name = r.name || `${r.headline.slice(0, 60)} [produktowa]`;
+      return {
+        entity: 'AdGroupAd',
+        operation: 'create',
+        resource: { ad_group: `customers/${cleanCustomerId}/adGroups/${r.adGroupId}`, status: r.status, ad },
+      };
+    });
+
+    if (dryRun) {
+      const check = await validateWithApi(customer, chunk(mutations));
+      if (!check.ok) console.log(`[Mutator] ⚠️  Google odrzucił reklamę w walidacji: ${check.error}`);
+      if (ctaDeferred.length) console.log(`[Mutator] ℹ️  CTA do utworzenia przy --commit: ${ctaDeferred.join(', ')} (walidacja poszła bez nich).`);
+      return { success: check.ok, dryRun: true, entity: 'ad_group_ad', toCreate: toCreate.length, skipped: skipped.length, plan, apiValidated: check.ok, apiError: check.error, ctaToCreate: ctaDeferred };
+    }
+
+    const responses = [];
+    for (const part of chunk(mutations)) responses.push(await customer.mutateResources(part));
+    return { success: true, dryRun: false, entity: 'ad_group_ad', created: toCreate.length, skipped: skipped.length, chunks: responses.length, plan, resourceNames: mutatedResourceNames(responses) };
+  } catch (error) {
+    throw new Error(`Nie udało się utworzyć reklam produktowych Demand Gen: ${unpackError(error)}`);
   }
 }
 

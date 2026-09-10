@@ -28,6 +28,22 @@ function check(name, fn) {
   }
 }
 
+/**
+ * Async variant of `check`. Without it an async test body returns a promise that
+ * `check` never awaits, so the test passes even when its assertions fail — a
+ * green tick that proves nothing. Always `await checkAsync(...)`.
+ */
+async function checkAsync(name, fn) {
+  try {
+    await fn();
+    passed++;
+    console.log(`  ✅ ${name}`);
+  } catch (err) {
+    failed++;
+    console.error(`  ❌ ${name}\n       ${err.message}`);
+  }
+}
+
 function assert(cond, msg) {
   if (!cond) throw new Error(msg || 'assertion failed');
 }
@@ -517,6 +533,36 @@ check('checkDemandGenAdTexts enforces per-field character limits', () => {
   });
   assert(!r.valid);
   assert(r.reasons.length === 4, `oczekiwano 4 bledow, jest ${r.reasons.length}`);
+});
+
+check('DEMAND_GEN_LIMITS carries the product-ad breadcrumb limit', () => {
+  assert(safety.DEMAND_GEN_LIMITS.breadcrumbChars === 15, 'breadcrumb limit powinien byc 15');
+});
+
+check('product ad texts validate through the shared Demand Gen check (single-element lists)', () => {
+  // A product ad carries one headline and one description, so the same check
+  // runs on lists of one — that is exactly how addDemandGenProductAds calls it.
+  const ok = safety.checkDemandGenAdTexts({
+    headlines: ['Producent mebli ogrodowych'],
+    descriptions: ['Komplety na taras i do ogrodu. Sprawdz oferte.'],
+    businessName: 'Zielony Ogrod',
+  });
+  assert(ok.valid, JSON.stringify(ok.reasons));
+
+  const tooLong = safety.checkDemandGenAdTexts({
+    headlines: ['x'.repeat(41)],
+    descriptions: ['z'.repeat(91)],
+    businessName: 'Zielony Ogrod',
+  });
+  assert(!tooLong.valid);
+  assert(tooLong.reasons.length === 2, `oczekiwano 2 bledow, jest ${tooLong.reasons.length}`);
+});
+
+await checkAsync('addDemandGenProductAds is exported and refuses an empty list', async () => {
+  assert(typeof mutator.addDemandGenProductAds === 'function', 'brak eksportu addDemandGenProductAds');
+  let threw = false;
+  try { await mutator.addDemandGenProductAds('1234567890', [], true); } catch (e) { threw = /pusta lista/.test(e.message); }
+  assert(threw, 'pusta lista powinna zostac odrzucona przed jakimkolwiek zapytaniem');
 });
 
 check('checkDemandGenAdTexts rejects too many headlines / descriptions', () => {
@@ -1012,6 +1058,50 @@ check('registryConflicts: a clean registry reports nothing', () => {
     klientdwa: { name: 'Klient Dwa', id: '2222222222', aliases: ['dwojka'] },
   });
   assert(accounts.registryConflicts(dir).length === 0, JSON.stringify(accounts.registryConflicts(dir)));
+});
+
+// 12. Bidding strategy mapping — the protobuf `oneof` shared by create-campaigns
+//     and update-bidding. Exactly one field may be set, and "no target given"
+//     must mean "no target set", never a number we invented.
+check('setBiddingStrategy: on CREATE, no target means an empty oneof', () => {
+  const c = mutator.setBiddingStrategy({}, { biddingStrategy: 'MAXIMIZE_CONVERSION_VALUE' });
+  assert(JSON.stringify(c.maximize_conversion_value) === '{}', JSON.stringify(c));
+  assert(c.maximize_conversions === undefined, 'previous strategy field must stay unset');
+  assert(c.target_spend === undefined && c.manual_cpc === undefined, 'only one oneof field allowed');
+});
+check('setBiddingStrategy: on UPDATE, no target names the subfield as 0', () => {
+  // A bare {} here would build a field mask the API rejects (FIELD_HAS_SUBFIELDS).
+  const c = mutator.setBiddingStrategy({}, { biddingStrategy: 'MAXIMIZE_CONVERSION_VALUE' }, { forUpdate: true });
+  assert(c.maximize_conversion_value.target_roas === 0, JSON.stringify(c));
+  const d = mutator.setBiddingStrategy({}, { biddingStrategy: 'MAXIMIZE_CONVERSIONS' }, { forUpdate: true });
+  assert(d.maximize_conversions.target_cpa_micros === 0, JSON.stringify(d));
+});
+check('setBiddingStrategy: tROAS is passed through as a ratio, not micros', () => {
+  const c = mutator.setBiddingStrategy({}, { biddingStrategy: 'MAXIMIZE_CONVERSION_VALUE', targetRoas: 6.5 });
+  assert(c.maximize_conversion_value.target_roas === 6.5, JSON.stringify(c));
+});
+check('setBiddingStrategy: tCPA is converted to micros', () => {
+  const c = mutator.setBiddingStrategy({}, { biddingStrategy: 'MAXIMIZE_CONVERSIONS', targetCpa: 60 });
+  assert(c.maximize_conversions.target_cpa_micros === 60000000, JSON.stringify(c));
+});
+check('setBiddingStrategy: unknown strategy falls back to manual CPC', () => {
+  const c = mutator.setBiddingStrategy({}, { biddingStrategy: 'NIE_ISTNIEJE' });
+  assert(c.manual_cpc && c.manual_cpc.enhanced_cpc_enabled === false, JSON.stringify(c));
+});
+check('setBiddingStrategy: strategy name is case- and whitespace-insensitive', () => {
+  const c = mutator.setBiddingStrategy({}, { biddingStrategy: '  maximize_clicks ', cpcBidCeiling: 2.5 });
+  assert(c.target_spend.cpc_bid_ceiling_micros === 2500000, JSON.stringify(c));
+});
+check('BIDDING_STRATEGIES: lists exactly the four the CLI accepts', () => {
+  assert(mutator.BIDDING_STRATEGIES.length === 4, String(mutator.BIDDING_STRATEGIES));
+  ['MAXIMIZE_CLICKS', 'MAXIMIZE_CONVERSIONS', 'MAXIMIZE_CONVERSION_VALUE', 'MANUAL_CPC']
+    .forEach((k) => assert(mutator.BIDDING_STRATEGIES.includes(k), `missing ${k}`));
+});
+await checkAsync('updateCampaignBidding: refuses a strategy that is not on the list', async () => {
+  let threw = false;
+  try { await mutator.updateCampaignBidding('123', '456', { biddingStrategy: 'TARGET_ROAS' }, true); }
+  catch (e) { threw = /--strategy musi być/.test(e.message); }
+  assert(threw, 'an unsupported strategy must be rejected before any API call');
 });
 
 console.log(`\nResult: ${passed} passed, ${failed} failed.\n`);

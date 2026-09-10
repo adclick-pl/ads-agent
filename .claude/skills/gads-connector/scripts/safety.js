@@ -590,6 +590,8 @@ export const DEMAND_GEN_LIMITS = {
   maxLongHeadlines: 5,
   minDescriptions: 1,
   maxDescriptions: 5,
+  // Product ads only: the two optional path crumbs shown under the URL.
+  breadcrumbChars: 15,
 };
 
 /**

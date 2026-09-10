@@ -25,6 +25,9 @@ import {
   updateAdGroupStatus,
   updateKeywordStatus,
   updateCampaignBudget,
+  updateCampaignBidding,
+  renameCampaign,
+  BIDDING_STRATEGIES,
   addCampaignNegativeKeywords,
   addAccountNegativePlacements,
   addAccountNegativeYouTubeChannels,
@@ -49,6 +52,7 @@ import {
   createDemandGenAdGroups,
   copyAdGroupTargeting,
   addDemandGenAds,
+  addDemandGenProductAds,
   addListingGroups,
   createConversionActions,
   updateConversionActions,
@@ -290,6 +294,18 @@ Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
                           (jest idempotentne i pomija istniejące).
   update-budget           Zmiana budżetu dziennego (--budget-id, --amount).
                           SafetyLimits blokuje skok > ${DEFAULT_MAX_BUDGET_CHANGE_PCT}% — użyj --force, by wymusić.
+  update-bidding          Zmiana STRATEGII STAWEK istniejącej kampanii.
+                          --campaign=<ID> --strategy=<MAXIMIZE_CLICKS|MAXIMIZE_CONVERSIONS|
+                          MAXIMIZE_CONVERSION_VALUE|MANUAL_CPC>, opcjonalnie --target-cpa=<x>,
+                          --target-roas=<x> (np. 6.5 = 650%), --cpc-bid-ceiling=<x>,
+                          --enhanced-cpc. Pominięcie celu = brak celu: kampania nie jest
+                          nim ograniczana i Google uczy się sam. Symulacja pokazuje plan
+                          from→to i ostrzega, że przełączenie restartuje fazę uczenia.
+                          Odmawia dla kampanii na strategii PORTFOLIO (trzeba ją najpierw
+                          odpiąć w panelu) i dla kampanii roboczych/eksperymentów.
+  rename-campaign         Zmiana NAZWY kampanii (--campaign=<ID> --name="Nowa nazwa").
+                          Odmawia, gdy nazwa jest już zajęta przez inną kampanię
+                          (Google wymaga unikalnych nazw wśród nieusuniętych).
   add-negatives           Negatywne słowa kluczowe (--campaign, --keywords, --match-type).
   add-negative-placements Wykluczenia miejsc docelowych — domeny (--domains).
   add-negative-youtube-channels  Wykluczenia kanałów YouTube na poziomie konta (--channels).
@@ -386,6 +402,17 @@ Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
                           (grupa + film + Final URL). --input=mapa.csv (kolumny: ad_group_id,
                           final_url,video,logo_asset_id,business_name,headline1..5,
                           long_headline1..5,description1..5[,cta,status,name]).
+  add-demand-gen-product-ads
+                          4b/5. Tworzy reklamy PRODUKTOWE Demand Gen — ten typ renderuje
+                          produkty z feedu, czyli robi z remarketingu DemGen remarketing
+                          DYNAMICZNY (multi-asset pokazuje wszystkim tę samą kreację).
+                          Może stać w grupie obok reklamy wideo. Jeden nagłówek i jeden
+                          tekst (nie listy). Odmawia, gdy grupa nie jest w kampanii DemGen
+                          albo nie ma jeszcze kanału produktowego (→ add-listing-groups).
+                          Idempotentne po (grupa + nagłówek + Final URL).
+                          --input=mapa.csv (kolumny: ad_group_id,final_url,headline,
+                          description,logo_asset_id,business_name[,cta,breadcrumb1,
+                          breadcrumb2,status,name]).
   add-listing-groups      5/5. Podpina kanał produktowy do grupy DemGen, zawężony do wskazanych
                           produktów — buduje drzewo: korzeń + po jednym węźle na produkt +
                           węzeł "wszystko inne" jako WYKLUCZONY (bez niego poszedłby cały
@@ -441,6 +468,8 @@ Przykłady:
   node scripts/cli.js --action=raw-query --account=client-one --query="SELECT campaign.name, metrics.cost_micros FROM campaign WHERE segments.date DURING LAST_30_DAYS" --json
   node scripts/cli.js --action=update-budget --customer=1234567890 --budget-id=111222333 --amount=150.00
   node scripts/cli.js --action=update-budget --customer=1234567890 --budget-id=111222333 --amount=150.00 --commit
+  node scripts/cli.js --action=update-bidding --customer=1234567890 --campaign=987654321 --strategy=MAXIMIZE_CONVERSION_VALUE
+  node scripts/cli.js --action=update-bidding --customer=1234567890 --campaign=987654321 --strategy=MAXIMIZE_CONVERSION_VALUE --target-roas=6.5 --commit
 
   Konwersje (wdrożenie śledzenia — Google Ads, potem GTM):
   node scripts/cli.js --action=list-conversions --account=zielonyogrod --days=30
@@ -854,6 +883,34 @@ async function main() {
       console.log(JSON.stringify(result, null, 2));
     }
 
+    else if (action === 'rename-campaign') {
+      const campaignId = args.campaign;
+      const newName = args.name;
+      if (!campaignId || !newName) throw new Error('rename-campaign requires --campaign=<ID> and --name="Nowa nazwa"');
+      const result = await renameCampaign(customerId, campaignId, String(newName), dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'update-bidding') {
+      const campaignId = args.campaign;
+      const strategy = String(args.strategy || '').trim().toUpperCase();
+      if (!campaignId || !strategy) {
+        throw new Error(`update-bidding requires --campaign=<ID> and --strategy=<${BIDDING_STRATEGIES.join('|')}>`);
+      }
+      // A target is optional on purpose: omitting it means "no target", which is
+      // the right start for a campaign that has too little data to aim at one.
+      const num = (v) => (v === undefined || v === '' ? null : Number(v));
+      const spec = {
+        biddingStrategy: strategy,
+        targetCpa: num(args['target-cpa']),
+        targetRoas: num(args['target-roas']),
+        cpcBidCeiling: num(args['cpc-bid-ceiling']),
+        enhancedCpc: !!args['enhanced-cpc'],
+      };
+      const result = await updateCampaignBidding(customerId, campaignId, spec, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
     else if (action === 'add-negatives') {
       const campaignId = args.campaign;
       const keywordsString = args.keywords;
@@ -1246,6 +1303,28 @@ async function main() {
         label: `grupa ${r.ad_group_id} (wiersz ${i + 2})`,
       }));
       const result = await addDemandGenAds(customerId, items, dryRun, loginCustomerId, { domain: args.domain });
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'add-demand-gen-product-ads') {
+      if (!args.input) throw new Error('add-demand-gen-product-ads wymaga --input=mapa.csv (kolumny: ad_group_id,final_url,headline,description,logo_asset_id,business_name[,cta,breadcrumb1,breadcrumb2,status,name])');
+      const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+      if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
+      const items = rows.map((r, i) => ({
+        adGroupId: r.ad_group_id,
+        finalUrl: r.final_url,
+        headline: r.headline || r.headline1 || '',
+        description: r.description || r.description1 || '',
+        logoAssetId: r.logo_asset_id,
+        businessName: r.business_name,
+        cta: r.cta || '',
+        breadcrumb1: r.breadcrumb1 || '',
+        breadcrumb2: r.breadcrumb2 || '',
+        status: r.status || 'ENABLED',
+        name: r.name || '',
+        label: `grupa ${r.ad_group_id} (wiersz ${i + 2})`,
+      }));
+      const result = await addDemandGenProductAds(customerId, items, dryRun, loginCustomerId, { domain: args.domain });
       console.log(JSON.stringify(result, null, 2));
     }
 

@@ -7,6 +7,111 @@ restarcie sesji. Szczegóły każdego skilla: `.claude/skills/<skill>/SKILL.md`.
 
 ---
 
+## 2026-09-10
+
+### Dodane
+
+- **Reklamy produktowe Demand Gen: `--action=add-demand-gen-product-ads`.**
+  Konektor umiał w kampanii DemGen wszystko poza jedną rzeczą, która decyduje o tym,
+  czy remarketing jest *dynamiczny*: reklamę produktową. `add-demand-gen-ads` tworzy
+  wariant wideo/multi-asset, a ten pokazuje tę samą kreację całej grupie odbiorców.
+  Produkty z feedu renderuje dopiero `DEMAND_GEN_PRODUCT_AD` — i tego typu nie dało
+  się dotąd utworzyć inaczej niż w panelu. Oba typy mogą stać w jednej grupie.
+
+  ```bash
+  # symulacja — Google sprawdza strukturę przez validate_only
+  node ".claude/skills/gads-connector/scripts/cli.js" --action=add-demand-gen-product-ads \
+    --account=zielonyogrod --input=produktowe.csv --domain=zielonyogrod.example
+
+  # zapis
+  node ".claude/skills/gads-connector/scripts/cli.js" --action=add-demand-gen-product-ads \
+    --account=zielonyogrod --input=produktowe.csv --domain=zielonyogrod.example --commit
+  ```
+
+  CSV: `ad_group_id,final_url,headline,description,logo_asset_id,business_name`
+  plus opcjonalne `cta,breadcrumb1,breadcrumb2,status,name`.
+
+  Reklama produktowa ma **jeden** nagłówek i **jeden** tekst (wideo bierze listy do
+  pięciu), a pole CTA jest w liczbie pojedynczej — `call_to_action`, nie
+  `call_to_actions`. To dwie pułapki, przez które przepisanie kodu z wariantu wideo
+  kończy się odrzuceniem przez API. Limity znaków te same co dla wideo, plus 15 na
+  każdy opcjonalny breadcrumb (`DEMAND_GEN_LIMITS.breadcrumbChars`); walidację
+  tekstu robi ta sama `checkDemandGenAdTexts()`, wywołana na jednoelementowych
+  listach — jeden zestaw reguł dla obu typów reklam.
+
+  Akcja odmawia w dwóch sytuacjach, zamiast pozwolić API zwrócić surowy błąd albo —
+  co gorsza — utworzyć reklamę, która nic nie wyświetli:
+  grupa leży w kampanii, która nie jest Demand Gen, oraz grupa nie ma jeszcze kanału
+  produktowego (→ najpierw `add-listing-groups`). Idempotentna po
+  (grupa + nagłówek + Final URL), więc ponowne uruchomienie nie mnoży reklam.
+
+  Do sprawdzania duplikatów doszło osobne zapytanie `getExistingDemandGenProductAds()`,
+  zamiast rozszerzania `getExistingDemandGenAds()`: oba typy mają inną tożsamość —
+  reklamę wideo identyfikuje zasób filmu, produktową nagłówek. Jedno zapytanie na
+  oba kształty zwracałoby wiersz z połową pól pustych i zgadywanie po stronie
+  wywołującego.
+
+- **Zmiana strategii licytacji istniejącej kampanii: `--action=update-bidding`.**
+  Konektor umiał ustawić strategię tylko przy zakładaniu kampanii
+  (`create-campaigns`) — mapowanie było wpisane na sztywno w środku tej akcji, więc
+  przestawienie żywej kampanii trzeba było klikać w panelu. Teraz jest osobna akcja,
+  a samo mapowanie żyje we wspólnej funkcji `setBiddingStrategy()`, z której
+  korzystają obie ścieżki.
+
+  ```bash
+  # symulacja: pokazuje plan from→to i ostrzeżenia
+  node ".claude/skills/gads-connector/scripts/cli.js" --action=update-bidding \
+    --account=zielonyogrod --campaign=987654321 --strategy=MAXIMIZE_CONVERSION_VALUE
+
+  # zapis, z celem ROAS 650%
+  node ".claude/skills/gads-connector/scripts/cli.js" --action=update-bidding \
+    --account=zielonyogrod --campaign=987654321 --strategy=MAXIMIZE_CONVERSION_VALUE \
+    --target-roas=6.5 --commit
+  ```
+
+  Strategie: `MAXIMIZE_CLICKS`, `MAXIMIZE_CONVERSIONS`, `MAXIMIZE_CONVERSION_VALUE`,
+  `MANUAL_CPC`. Cel (`--target-cpa`, `--target-roas`, `--cpc-bid-ceiling`) jest
+  opcjonalny i **pominięcie go znaczy „bez celu"** — to właściwy start dla kampanii,
+  która ma za mało danych, by w cokolwiek celować. Symulacja wypisuje obecną
+  strategię obok nowej i dwa ostrzeżenia, gdy są na miejscu: że przełączenie
+  restartuje fazę uczenia i że zdjęcie celu przestaje ograniczać wydatek.
+
+  Akcja odmawia w dwóch sytuacjach, zamiast pozwolić API zwrócić surowy błąd:
+  kampania podpięta pod strategię **portfolio** (trzeba ją najpierw odpiąć w panelu)
+  oraz kampania robocza/eksperymentalna (Google i tak odrzuca takie zmiany przez
+  `CANNOT_MODIFY_FOR_TRIAL_CAMPAIGN`).
+
+- **Zmiana nazwy kampanii: `--action=rename-campaign`.** Drobiazg, którego dotąd nie
+  dało się zrobić z konektora, a wraca za każdym razem, gdy kampania przestaje robić
+  to, co zapowiada jej nazwa — na przykład gdy nazwa niesie strategię licytacji, która
+  już nie obowiązuje, albo typ kampanii, który jest dziś tylko jej częścią.
+
+  ```bash
+  node ".claude/skills/gads-connector/scripts/cli.js" --action=rename-campaign \
+    --account=zielonyogrod --campaign=987654321 --name="[Search]" --commit
+  ```
+
+  Symulacja pokazuje starą nazwę obok nowej. Akcja odmawia, gdy nazwa jest już zajęta
+  przez inną kampanię — Google wymaga unikalnych nazw wśród nieusuniętych — i nie robi
+  nic, gdy nazwa się nie zmienia.
+
+### Naprawione
+
+- **`create` i `update` wymagają różnego zapisu „brak celu".** Przy zakładaniu
+  kampanii pusty obiekt (`maximize_conversion_value: {}`) jest poprawny, ale przy
+  aktualizacji klient buduje maskę pól z wysyłanego obiektu i taka maska wskazuje na
+  pole, które ma podpola — API odrzuca to jako `FIELD_HAS_SUBFIELDS`. Na ścieżce
+  aktualizacji podpole jest więc nazwane wprost i ustawione na 0
+  (`{ target_roas: 0 }`), co jest sposobem API na wyrażenie „bez celu".
+  `setBiddingStrategy()` przyjmuje `{ forUpdate: true }` i rozróżnia oba przypadki.
+
+- **Testy asynchroniczne w `smoke-test.js` przechodziły zawsze.** `check()` wywołuje
+  ciało testu, ale nie czeka na obietnicę, więc test z `async` kończył się zielonym
+  ptaszkiem niezależnie od asercji w środku. Doszło `checkAsync()` — używaj go
+  (z `await`) wszędzie tam, gdzie ciało testu jest asynchroniczne.
+
+---
+
 ## 2026-09-08
 
 ### Dodane
