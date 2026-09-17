@@ -8,3 +8,7 @@ accounts.json
 *.csv
 npm-debug.log*
 .DS_Store
+
+# Migawki drzewa grup plików PMax — cli.js zapisuje je w katalogu roboczym
+# (listing-tree-<ID>-<data>.json) i zawierają realne ID konta klienta.
+listing-tree-*.json

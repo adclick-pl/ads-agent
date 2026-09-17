@@ -644,6 +644,14 @@ check('promotionIdentity separates the same target at different discounts', () =
   assert(a === queries.promotionIdentity('todo el pedido', null, 7000000, 'eur'), 'tożsamość wrażliwa na wielkość liter');
 });
 
+check('promotionIdentity separates the same discount at different minimum orders', () => {
+  const at59 = queries.promotionIdentity('Todo el pedido', null, 7000000, 'EUR', 59000000);
+  const at69 = queries.promotionIdentity('Todo el pedido', null, 7000000, 'EUR', 69000000);
+  assert(at59 !== at69, 'podniesiony próg zamówienia wygląda jak duplikat — nowa promocja zostałaby pominięta');
+  assert(queries.promotionIdentity('Todo el pedido', null, 7000000, 'EUR') === queries.promotionIdentity('Todo el pedido', null, 7000000, 'EUR', null),
+    'promocja bez progu musi mieć tożsamość jak dotąd');
+});
+
 check('mutatedResourceNames reads a real mutate response (mutate_operation_responses)', () => {
   const got = mutator.mutatedResourceNames([{ mutate_operation_responses: [
     { asset_result: { resource_name: 'customers/1/assets/9' } },
@@ -1102,6 +1110,422 @@ await checkAsync('updateCampaignBidding: refuses a strategy that is not on the l
   try { await mutator.updateCampaignBidding('123', '456', { biddingStrategy: 'TARGET_ROAS' }, true); }
   catch (e) { threw = /--strategy musi być/.test(e.message); }
   assert(threw, 'an unsupported strategy must be rejected before any API call');
+});
+
+/* ── Performance Max: asset-group status + listing-filter flip ────────────── */
+
+// A miniature tree in the shape `getListingFilterTree` returns. Fictional
+// account, fictional product types — the package ships no real client data.
+function pmaxTree() {
+  const root = {
+    id: '100', resourceName: 'customers/1234567890/assetGroupListingGroupFilters/55~100',
+    type: 2, typeName: 'SUBDIVISION', listingSource: 2, parentResourceName: null,
+    assetGroupName: 'Wszystkie produkty', assetGroupStatus: 'ENABLED',
+    dimension: { kind: null, value: null, level: null, index: null, label: '(ROOT)' },
+    childIds: ['101', '102', '103'],
+  };
+  const leaf = (id, type, value, extra = {}) => ({
+    id, resourceName: `customers/1234567890/assetGroupListingGroupFilters/55~${id}`,
+    type, typeName: { 3: 'UNIT_INCLUDED', 4: 'UNIT_EXCLUDED' }[type], listingSource: 2,
+    parentResourceName: root.resourceName,
+    assetGroupName: 'Wszystkie produkty', assetGroupStatus: 'ENABLED',
+    dimension: { kind: 'product_type', value, level: 1, index: null, label: value === null ? '(POZOSTAŁE)' : `product_type=${value}` },
+    childIds: [], ...extra,
+  });
+  return [root, leaf('101', 3, 'donice ogrodowe'), leaf('102', 4, 'nawozy'), leaf('103', 4, null)];
+}
+
+const OPTS_LT = { customerId: '1234567890', assetGroupId: '55' };
+
+check('checkListingFilterFlip: an excluded leaf may be turned back on', () => {
+  const tree = pmaxTree();
+  const r = safety.checkListingFilterFlip(tree[2], tree, 'INCLUDED');
+  assert(r.ok && !r.noop && r.targetType === 3, JSON.stringify(r));
+});
+check('checkListingFilterFlip: a leaf already in the target state is a no-op, not an error', () => {
+  const tree = pmaxTree();
+  const r = safety.checkListingFilterFlip(tree[1], tree, 'INCLUDED');
+  assert(r.ok && r.noop, JSON.stringify(r));
+});
+check('checkListingFilterFlip: refuses the ROOT node', () => {
+  const tree = pmaxTree();
+  const r = safety.checkListingFilterFlip(tree[0], tree, 'EXCLUDED');
+  assert(!r.ok && /KORZE/.test(r.reason), JSON.stringify(r));
+});
+check('checkListingFilterFlip: refuses a SUBDIVISION that is not the root (would cascade)', () => {
+  const tree = pmaxTree();
+  const mid = { ...tree[1], type: 2, typeName: 'SUBDIVISION', childIds: ['201'] };
+  const r = safety.checkListingFilterFlip(mid, tree, 'EXCLUDED');
+  assert(!r.ok && /podzia/.test(r.reason), JSON.stringify(r));
+});
+check('checkListingFilterFlip: refuses a node that still has children', () => {
+  const tree = pmaxTree();
+  const parent = { ...tree[1], childIds: ['201'] };
+  const r = safety.checkListingFilterFlip(parent, tree, 'EXCLUDED');
+  assert(!r.ok && /nie jest li/.test(r.reason), JSON.stringify(r));
+});
+check('checkListingFilterFlip: refuses to exclude the LAST included leaf', () => {
+  const tree = pmaxTree();
+  const r = safety.checkListingFilterFlip(tree[1], tree, 'EXCLUDED');
+  assert(!r.ok && /ostatni w/.test(r.reason), JSON.stringify(r));
+});
+check('checkListingFilterFlip: rejects a target that is not INCLUDED/EXCLUDED', () => {
+  const tree = pmaxTree();
+  const r = safety.checkListingFilterFlip(tree[2], tree, 'ENABLED');
+  assert(!r.ok && /Nieprawid/.test(r.reason), JSON.stringify(r));
+});
+
+check('selectListingFilterNode: finds a leaf by product type, ignoring case and padding', () => {
+  const { node, error } = mutator.selectListingFilterNode(pmaxTree(), { productType: '  NAWOZY ' });
+  assert(!error && node.id === '102', error || node.id);
+});
+check('selectListingFilterNode: refuses an ambiguous product type instead of guessing', () => {
+  const tree = pmaxTree();
+  tree.push({ ...tree[2], id: '104', resourceName: 'customers/1234567890/assetGroupListingGroupFilters/55~104' });
+  const { node, error } = mutator.selectListingFilterNode(tree, { productType: 'nawozy' });
+  assert(!node && /nie zgaduj/.test(error), error);
+  assert(/102/.test(error) && /104/.test(error), 'both candidates must be named');
+});
+check('selectListingFilterNode: an unknown type lists what the group actually has', () => {
+  const { node, error } = mutator.selectListingFilterNode(pmaxTree(), { productType: 'rowery' });
+  assert(!node && /donice ogrodowe/.test(error) && /nawozy/.test(error), error);
+});
+check('selectListingFilterNode: --filter-id wins and reports a bad id', () => {
+  const ok = mutator.selectListingFilterNode(pmaxTree(), { filterId: '102' });
+  assert(!ok.error && ok.node.id === '102', ok.error);
+  const bad = mutator.selectListingFilterNode(pmaxTree(), { filterId: '999' });
+  assert(!bad.node && /999/.test(bad.error), bad.error);
+});
+
+check('buildListingTypeMutations: a type missing from the tree is added as a new leaf', () => {
+  const r = mutator.buildListingTypeMutations(pmaxTree(), [{ productType: 'kora', to: 'EXCLUDED' }], OPTS_LT);
+  assert(r.added === 1 && r.flipped === 0 && r.removed === 0, JSON.stringify(r));
+  const [op] = r.mutations;
+  assert(op.operation === 'create' && op.resource.type === 4, JSON.stringify(op));
+  assert(op.resource.case_value.product_type.value === 'kora', JSON.stringify(op));
+  // Nowy liść musi wisieć tam, gdzie reszta typów — inaczej znaczy co innego.
+  assert(op.resource.parent_listing_group_filter === pmaxTree()[0].resourceName, JSON.stringify(op));
+});
+check('buildListingTypeMutations: an existing leaf in the wrong state is remove+create, never update', () => {
+  const r = mutator.buildListingTypeMutations(pmaxTree(), [{ productType: 'nawozy', to: 'INCLUDED' }], OPTS_LT);
+  assert(r.flipped === 1 && r.mutations.length === 2, JSON.stringify(r));
+  assert(r.mutations[0].operation === 'remove' && r.mutations[1].operation === 'create', JSON.stringify(r.mutations));
+});
+check('buildListingTypeMutations: a leaf already in the target state costs no operation', () => {
+  const r = mutator.buildListingTypeMutations(pmaxTree(), [{ productType: 'donice ogrodowe', to: 'INCLUDED' }], OPTS_LT);
+  assert(r.noop === 1 && r.mutations.length === 0, JSON.stringify(r));
+});
+check('buildListingTypeMutations: REMOVE drops a dead leaf, and is silent when it is already gone', () => {
+  const r = mutator.buildListingTypeMutations(pmaxTree(), [{ productType: 'nawozy', to: 'REMOVE' }], OPTS_LT);
+  assert(r.removed === 1 && r.mutations[0].operation === 'remove', JSON.stringify(r));
+  const brak = mutator.buildListingTypeMutations(pmaxTree(), [{ productType: 'nie ma', to: 'REMOVE' }], OPTS_LT);
+  assert(brak.noop === 1 && brak.mutations.length === 0, JSON.stringify(brak));
+});
+check('buildListingTypeMutations: refuses to leave the branch with nothing to serve', () => {
+  // Jedyny włączony typ na wykluczony, przy wykluczonym „wszystko inne".
+  let err = null;
+  try { mutator.buildListingTypeMutations(pmaxTree(), [{ productType: 'donice ogrodowe', to: 'EXCLUDED' }], OPTS_LT); }
+  catch (e) { err = e.message; }
+  assert(err && /ANI JEDEN/.test(err), String(err));
+});
+check('buildListingTypeMutations: the same type twice in one file is refused, not silently merged', () => {
+  let err = null;
+  try {
+    mutator.buildListingTypeMutations(pmaxTree(), [
+      { productType: 'nawozy', to: 'INCLUDED' }, { productType: 'Nawozy', to: 'EXCLUDED' },
+    ], OPTS_LT);
+  } catch (e) { err = e.message; }
+  assert(err && /dwa razy/.test(err), String(err));
+});
+check('buildListingTypeMutations: refuses a tree that does not split on product type', () => {
+  const root = { ...pmaxTree()[0], childIds: [] };
+  let err = null;
+  try { mutator.buildListingTypeMutations([root], [{ productType: 'kora', to: 'EXCLUDED' }], OPTS_LT); }
+  catch (e) { err = e.message; }
+  assert(err && /nie dzieli si/.test(err), String(err));
+});
+check('buildListingTypeMutations: refuses an unknown action instead of guessing', () => {
+  let err = null;
+  try { mutator.buildListingTypeMutations(pmaxTree(), [{ productType: 'kora', to: 'WLACZ' }], OPTS_LT); }
+  catch (e) { err = e.message; }
+  assert(err && /nieznana operacja/.test(err), String(err));
+});
+
+check('rebuildListingCaseValue: reproduces a product-type leaf exactly', () => {
+  const cv = mutator.rebuildListingCaseValue({ kind: 'product_type', value: 'nawozy', level: 1, index: null });
+  assert(cv.product_type.value === 'nawozy' && cv.product_type.level === 1, JSON.stringify(cv));
+});
+check('rebuildListingCaseValue: the catch-all keeps its level and stays value-less', () => {
+  const cv = mutator.rebuildListingCaseValue({ kind: 'product_type', value: null, level: 2, index: null });
+  assert(!('value' in cv.product_type) && cv.product_type.level === 2, JSON.stringify(cv));
+});
+check('rebuildListingCaseValue: custom attribute keeps its index', () => {
+  const cv = mutator.rebuildListingCaseValue({ kind: 'product_custom_attribute', value: 'wyklucz', level: null, index: 0 });
+  assert(cv.product_custom_attribute.value === 'wyklucz' && cv.product_custom_attribute.index === 0, JSON.stringify(cv));
+});
+check('rebuildListingCaseValue: an unknown dimension returns null so the caller refuses', () => {
+  assert(mutator.rebuildListingCaseValue({ kind: 'nieznany', value: 'x' }) === null);
+  assert(mutator.rebuildListingCaseValue(null) === null);
+});
+
+await checkAsync('update-listing-filter: refuses without a selector, before any API call', async () => {
+  let threw = false;
+  try { await mutator.updateListingFilter('1234567890', '', {}, 'INCLUDED', true); }
+  catch (e) { threw = /asset-group/.test(e.message); }
+  assert(threw, 'a missing asset group must be rejected locally');
+});
+
+// ── add-label-exclusion ─────────────────────────────────────────────────────
+// Fictional shop, fictional labels — the package ships no real client data.
+function labelNode(id, type, value, parentRn, extra = {}) {
+  return {
+    id, resourceName: `customers/1234567890/assetGroupListingGroupFilters/55~${id}`,
+    type, typeName: { 2: 'SUBDIVISION', 3: 'UNIT_INCLUDED', 4: 'UNIT_EXCLUDED' }[type],
+    listingSource: 2, parentResourceName: parentRn,
+    assetGroupName: 'Wszystkie produkty', assetGroupStatus: 'ENABLED',
+    // INDEX0 arrives from the API as 2 — the offset the check has to absorb.
+    dimension: { kind: 'product_custom_attribute', value, level: null, index: 2, label: value ?? '(POZOSTAŁE)' },
+    childIds: [], ...extra,
+  };
+}
+/** Root splits on custom_label_0: "wyklucz" excluded, everything else included. */
+function labelTree(exclType = 4) {
+  const t = pmaxTree();
+  const root = t[0];
+  return [
+    root,
+    labelNode('201', 2, null, root.resourceName, { childIds: ['301'] }),
+    labelNode('202', exclType, 'wyklucz', root.resourceName),
+    { ...t[1], id: '301', resourceName: 'customers/1234567890/assetGroupListingGroupFilters/55~301', parentResourceName: 'customers/1234567890/assetGroupListingGroupFilters/55~201' },
+  ];
+}
+const WYKLUCZ = { index: 0, value: 'wyklucz' };
+
+check('checkLabelExclusion: already excluded is a no-op, not an error', () => {
+  const r = safety.checkLabelExclusion(labelTree(4), WYKLUCZ);
+  assert(r.ok && r.mode === 'noop', JSON.stringify(r));
+});
+check('checkLabelExclusion: present but included → flip one leaf', () => {
+  const r = safety.checkLabelExclusion(labelTree(3), WYKLUCZ);
+  assert(r.ok && r.mode === 'flip' && r.node.id === '202', JSON.stringify(r));
+});
+check('checkLabelExclusion: root already splits on this label → add a sibling', () => {
+  const tree = labelTree(4).filter((n) => n.id !== '202');
+  const r = safety.checkLabelExclusion(tree, WYKLUCZ);
+  assert(r.ok && r.mode === 'add', JSON.stringify(r));
+});
+check('checkLabelExclusion: root splits on something else → rebuild', () => {
+  const r = safety.checkLabelExclusion(pmaxTree(), WYKLUCZ);
+  assert(r.ok && r.mode === 'rebuild' && r.root.id === '100', JSON.stringify(r));
+});
+check('checkLabelExclusion: a label slot outside 0-4 is refused', () => {
+  const r = safety.checkLabelExclusion(pmaxTree(), { index: 7, value: 'wyklucz' });
+  assert(!r.ok && /etykieta/i.test(r.reason), JSON.stringify(r));
+});
+check('checkLabelExclusion: an empty value is refused', () => {
+  const r = safety.checkLabelExclusion(pmaxTree(), { index: 0, value: '  ' });
+  assert(!r.ok, JSON.stringify(r));
+});
+check('checkLabelExclusion: refuses a group with nothing included left to protect', () => {
+  const tree = pmaxTree().map((n) => (n.type === 3 ? { ...n, type: 4, typeName: 'UNIT_EXCLUDED' } : n));
+  const r = safety.checkLabelExclusion(tree, WYKLUCZ);
+  assert(!r.ok && /włączonego/.test(r.reason), JSON.stringify(r));
+});
+check('checkLabelExclusion: the label slot is read as INDEX0, not as enum 0', () => {
+  // A tree whose label nodes carry enum index 2 must answer for custom_label_0,
+  // and must NOT answer for custom_label_2.
+  assert(safety.checkLabelExclusion(labelTree(4), { index: 0, value: 'wyklucz' }).mode === 'noop');
+  assert(safety.checkLabelExclusion(labelTree(4), { index: 2, value: 'wyklucz' }).mode === 'rebuild');
+});
+
+const BUILD_OPTS = { customerId: '1234567890', assetGroupId: '55', index: 0, value: 'wyklucz' };
+
+check('buildLabelExclusionMutations: "add" touches nothing that exists', () => {
+  const tree = labelTree(4).filter((n) => n.id !== '202');
+  const plan = safety.checkLabelExclusion(tree, WYKLUCZ);
+  const { mutations, removed, created } = mutator.buildLabelExclusionMutations(tree, plan, BUILD_OPTS);
+  assert(removed === 0 && created === 1, `${removed}/${created}`);
+  assert(mutations[0].resource.case_value.product_custom_attribute.index === 2, 'INDEX0 must go out as enum 2');
+  assert(mutations[0].resource.type === 4, 'the new leaf must be excluded');
+});
+check('buildLabelExclusionMutations: rebuild keeps every node and re-parents them', () => {
+  const tree = pmaxTree();
+  const plan = safety.checkLabelExclusion(tree, WYKLUCZ);
+  const { mutations, removed, created } = mutator.buildLabelExclusionMutations(tree, plan, BUILD_OPTS);
+  // 3 old children removed; recreated plus the two new label nodes.
+  assert(removed === 3, `removed=${removed}`);
+  assert(created === 5, `created=${created}`);
+  const removes = mutations.filter((m) => m.operation === 'remove');
+  assert(removes.length === 3 && mutations.slice(0, 3).every((m) => m.operation === 'remove'),
+    'removals must all come before creations');
+  // The root itself is never removed — it has no case value to lose.
+  assert(!removes.some((m) => m.resource === tree[0].resourceName), 'the root must survive');
+});
+check('buildLabelExclusionMutations: every child is created after its parent', () => {
+  const tree = pmaxTree();
+  const plan = safety.checkLabelExclusion(tree, WYKLUCZ);
+  const { mutations } = mutator.buildLabelExclusionMutations(tree, plan, BUILD_OPTS);
+  const seen = new Set([tree[0].resourceName]);
+  for (const m of mutations.filter((x) => x.operation === 'create')) {
+    assert(seen.has(m.resource.parent_listing_group_filter),
+      `parent ${m.resource.parent_listing_group_filter} created after its child`);
+    if (m.resource.resource_name) seen.add(m.resource.resource_name);
+  }
+});
+check('buildLabelExclusionMutations: rebuild preserves each node type and case value', () => {
+  const tree = pmaxTree();
+  const plan = safety.checkLabelExclusion(tree, WYKLUCZ);
+  const { mutations } = mutator.buildLabelExclusionMutations(tree, plan, BUILD_OPTS);
+  const odtworzone = mutations
+    .filter((m) => m.operation === 'create' && m.resource.case_value.product_type)
+    .map((m) => `${m.resource.type}:${m.resource.case_value.product_type.value ?? '(else)'}`);
+  assert(odtworzone.includes('3:donice ogrodowe'), JSON.stringify(odtworzone));
+  assert(odtworzone.includes('4:nawozy'), JSON.stringify(odtworzone));
+  assert(odtworzone.includes('4:(else)'), JSON.stringify(odtworzone));
+});
+check('buildLabelExclusionMutations: refuses a tree with a node hanging off nothing', () => {
+  // Sierota jest węzłem product_type, nie etykiety: węzeł etykiety zatrzymałby wcześniej
+  // strażnik kolizji wymiarów i test nie dotknąłby już sprawdzanego warunku.
+  const sierota = {
+    ...pmaxTree()[1], id: '999',
+    resourceName: 'customers/1234567890/assetGroupListingGroupFilters/55~999',
+    parentResourceName: 'customers/1234567890/assetGroupListingGroupFilters/55~zniknal',
+  };
+  const tree = [...pmaxTree(), sierota];
+  const plan = safety.checkLabelExclusion(tree, WYKLUCZ);
+  let threw = false;
+  try { mutator.buildLabelExclusionMutations(tree, plan, BUILD_OPTS); }
+  catch (e) { threw = /nie wisi pod korzeniem/.test(e.message); }
+  assert(threw, 'an incomplete read must stop the rebuild');
+});
+
+/* ── wykluczanie po product_item_id ───────────────────────────────────────── */
+
+// Drzewo dzielone po ID produktu: jedno wykluczone, jedno włączone, plus (POZOSTAŁE).
+function itemNode(id, type, value, parentRn, extra = {}) {
+  return {
+    id, resourceName: `customers/1234567890/assetGroupListingGroupFilters/55~${id}`,
+    type, typeName: { 2: 'SUBDIVISION', 3: 'UNIT_INCLUDED', 4: 'UNIT_EXCLUDED' }[type],
+    listingSource: 2, parentResourceName: parentRn,
+    assetGroupName: 'Wszystkie produkty', assetGroupStatus: 'ENABLED',
+    dimension: { kind: 'product_item_id', value, level: null, index: null, label: value ?? '(POZOSTAŁE)' },
+    childIds: [], ...extra,
+  };
+}
+function itemTree() {
+  const root = pmaxTree()[0];
+  return [
+    root,
+    itemNode('401', 4, 'sku-a', root.resourceName),
+    itemNode('402', 3, 'sku-b', root.resourceName),
+    itemNode('403', 3, null, root.resourceName),
+  ];
+}
+const ITEM_OPTS = { customerId: '1234567890', assetGroupId: '55' };
+
+check('checkItemExclusion: all ids already excluded is a no-op, not an error', () => {
+  const r = safety.checkItemExclusion(itemTree(), ['sku-a']);
+  assert(r.ok && r.mode === 'noop' && r.juzWykluczone.length === 1, JSON.stringify(r));
+});
+check('checkItemExclusion: ids are matched case-insensitively', () => {
+  const r = safety.checkItemExclusion(itemTree(), ['SKU-A']);
+  assert(r.ok && r.mode === 'noop', JSON.stringify(r));
+});
+check('checkItemExclusion: root splits on item id → flip what exists, add what does not', () => {
+  const r = safety.checkItemExclusion(itemTree(), ['sku-b', 'sku-c']);
+  assert(r.ok && r.mode === 'apply', JSON.stringify(r));
+  assert(r.doPrzelaczenia.length === 1 && r.doPrzelaczenia[0].id === '402', 'flip');
+  assert(r.doDodania.length === 1 && r.doDodania[0] === 'sku-c', 'add');
+});
+check('checkItemExclusion: root splits on something else → rebuild', () => {
+  const r = safety.checkItemExclusion(pmaxTree(), ['sku-c']);
+  assert(r.ok && r.mode === 'rebuild', JSON.stringify(r));
+});
+check('checkItemExclusion: refuses a rebuild that would repeat product_item_id on one path', () => {
+  // PMax odrzuca taki plan (SAME_DIMENSION_TYPE_BETWEEN_ANCESTORS) — łapiemy to przed wysyłką.
+  const tree = pmaxTree();
+  tree.push(itemNode('501', 3, 'sku-x', tree[1].resourceName));
+  const r = safety.checkItemExclusion(tree, ['sku-c']);
+  assert(!r.ok && /dwa razy na jednej ścieżce/.test(r.reason), JSON.stringify(r));
+});
+check('checkItemExclusion: refuses when one of the ids is a SUBDIVISION, not a leaf', () => {
+  const tree = itemTree();
+  tree[1] = { ...tree[1], type: 2, typeName: 'SUBDIVISION', childIds: ['501'] };
+  const r = safety.checkItemExclusion(tree, ['sku-a']);
+  assert(!r.ok && /PODZIA/.test(r.reason), JSON.stringify(r));
+});
+check('checkItemExclusion: refuses an empty id list instead of doing nothing quietly', () => {
+  const r = safety.checkItemExclusion(itemTree(), []);
+  assert(!r.ok && /Podaj ID/.test(r.reason), JSON.stringify(r));
+});
+
+check('buildItemExclusionMutations: "apply" removes only what it flips', () => {
+  const tree = itemTree();
+  const plan = safety.checkItemExclusion(tree, ['sku-b', 'sku-c']);
+  const { mutations, removed, created } = mutator.buildItemExclusionMutations(tree, plan, ITEM_OPTS);
+  assert(removed === 1 && created === 2, `${removed}/${created}`);
+  const usuniete = mutations.filter((m) => m.operation === 'remove').map((m) => m.resource);
+  assert(usuniete.length === 1 && /55~402$/.test(usuniete[0]), JSON.stringify(usuniete));
+  assert(mutations.filter((m) => m.operation === 'create').every((m) => m.resource.type === 4), 'wszystko wykluczone');
+});
+check('buildItemExclusionMutations: ids go to the API lower-cased', () => {
+  const plan = safety.checkItemExclusion(itemTree(), ['SKU-C']);
+  const { mutations } = mutator.buildItemExclusionMutations(itemTree(), plan, ITEM_OPTS);
+  const wartosci = mutations.filter((m) => m.operation === 'create').map((m) => m.resource.case_value.product_item_id.value);
+  assert(wartosci.includes('sku-c') && !wartosci.includes('SKU-C'), JSON.stringify(wartosci));
+});
+check('buildItemExclusionMutations: rebuild keeps the old tree under an "everything else" branch', () => {
+  const tree = pmaxTree();
+  const plan = safety.checkItemExclusion(tree, ['sku-c']);
+  const { mutations, removed } = mutator.buildItemExclusionMutations(tree, plan, ITEM_OPTS);
+  assert(removed === tree.length - 1, `usunieto ${removed} z ${tree.length - 1}`);
+  const creates = mutations.filter((m) => m.operation === 'create');
+  const katchAll = creates.find((m) => m.resource.case_value?.product_item_id && !m.resource.case_value.product_item_id.value);
+  assert(katchAll && katchAll.resource.type === 2, 'brak gałęzi „wszystko inne" jako podziału');
+  // Każdy odtworzony węzeł wisi pod czymś, co powstaje wcześniej w tym samym żądaniu.
+  const powstale = new Set([tree[0].resourceName]);
+  for (const m of creates) {
+    assert(powstale.has(m.resource.parent_listing_group_filter), `rodzic przed dzieckiem: ${m.resource.parent_listing_group_filter}`);
+    if (m.resource.resource_name) powstale.add(m.resource.resource_name);
+  }
+});
+
+check('inferCatchAllDimensions: an item-id catch-all takes its dimension from a sibling', () => {
+  // The API returns no case_value fields at all for this node: product_item_id
+  // has no `level`, and the catch-all has no value.
+  const root = pmaxTree()[0];
+  const nagi = {
+    id: '400', resourceName: 'customers/1234567890/assetGroupListingGroupFilters/55~400',
+    type: 2, typeName: 'SUBDIVISION', listingSource: 2, parentResourceName: root.resourceName,
+    assetGroupName: 'x', assetGroupStatus: 'ENABLED',
+    dimension: { kind: null, value: null, level: null, index: null, label: '(ROOT)' }, childIds: [],
+  };
+  const siostra = {
+    ...nagi, id: '401', resourceName: 'customers/1234567890/assetGroupListingGroupFilters/55~401', type: 4,
+    dimension: { kind: 'product_item_id', value: 'sku-1', level: null, index: null, label: 'product_item_id=sku-1' },
+  };
+  const out = mutator.inferCatchAllDimensions([root, nagi, siostra]);
+  assert(out[1].dimension.kind === 'product_item_id', JSON.stringify(out[1].dimension));
+  assert(out[1].dimension.value === null, 'the catch-all must stay value-less');
+  assert(mutator.rebuildListingCaseValue(out[1].dimension) !== null, 'it must now be rebuildable');
+  assert(out[0].dimension.kind === null, 'the root must be left alone');
+});
+check('inferCatchAllDimensions: with no sibling to learn from, the node stays unknown', () => {
+  const root = pmaxTree()[0];
+  const sam = {
+    id: '400', resourceName: 'customers/1234567890/assetGroupListingGroupFilters/55~400',
+    type: 2, typeName: 'SUBDIVISION', listingSource: 2, parentResourceName: root.resourceName,
+    assetGroupName: 'x', assetGroupStatus: 'ENABLED',
+    dimension: { kind: null, value: null, level: null, index: null, label: '(ROOT)' }, childIds: [],
+  };
+  assert(mutator.inferCatchAllDimensions([root, sam])[1].dimension.kind === null);
+});
+
+await checkAsync('add-label-exclusion: refuses without an asset group, before any API call', async () => {
+  let threw = false;
+  try { await mutator.addLabelExclusion('1234567890', '', WYKLUCZ, true); }
+  catch (e) { threw = /asset-group/.test(e.message); }
+  assert(threw, 'a missing asset group must be rejected locally');
 });
 
 console.log(`\nResult: ${passed} passed, ${failed} failed.\n`);

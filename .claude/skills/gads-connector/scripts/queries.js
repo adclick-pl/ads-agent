@@ -1332,12 +1332,13 @@ export async function getExistingCallouts(customerId, opts = {}) {
  */
 export async function getExistingPromotions(customerId, opts = {}) {
   return getExistingAssetLinks(customerId, 'PROMOTION',
-    'asset.promotion_asset.promotion_target, asset.promotion_asset.percent_off, asset.promotion_asset.money_amount_off.amount_micros, asset.promotion_asset.money_amount_off.currency_code',
+    'asset.promotion_asset.promotion_target, asset.promotion_asset.percent_off, asset.promotion_asset.money_amount_off.amount_micros, asset.promotion_asset.money_amount_off.currency_code, asset.promotion_asset.orders_over_amount.amount_micros',
     (r) => promotionIdentity(
       r['asset.promotion_asset.promotion_target'],
       r['asset.promotion_asset.percent_off'],
       r['asset.promotion_asset.money_amount_off.amount_micros'],
-      r['asset.promotion_asset.money_amount_off.currency_code']),
+      r['asset.promotion_asset.money_amount_off.currency_code'],
+      r['asset.promotion_asset.orders_over_amount.amount_micros']),
     opts);
 }
 
@@ -1346,11 +1347,15 @@ export async function getExistingPromotions(customerId, opts = {}) {
  * the idempotency check, so the CSV row and the API row have to agree here or a
  * re-run creates a duplicate.
  */
-export function promotionIdentity(target, percentMicros, moneyMicros, currency) {
+export function promotionIdentity(target, percentMicros, moneyMicros, currency, ordersOverMicros) {
   const t = String(target ?? '').trim().toLowerCase();
   const pct = percentMicros ? `p${Number(percentMicros)}` : '';
   const money = moneyMicros ? `m${Number(moneyMicros)}${String(currency ?? '').toUpperCase()}` : '';
-  return `${t}|${pct}${money}`;
+  // Minimum order value is part of the offer, not decoration: "7 € off 59 €" and
+  // "7 € off 69 €" are different promotions, and leaving it out of the identity
+  // made a raised threshold look like a duplicate and get skipped.
+  const min = ordersOverMicros ? `o${Number(ordersOverMicros)}` : '';
+  return `${t}|${pct}${money}${min}`;
 }
 
 export function sitelinkLinkLevel(rn) {
@@ -2007,4 +2012,152 @@ export async function getConversionTrackingSetting(customerId, opts = {}) {
     enhancedConversionsForLeads: r['customer.conversion_tracking_setting.enhanced_conversions_for_leads_enabled'] === true,
     conversionOwnerCustomer: r['customer.conversion_tracking_setting.google_ads_conversion_customer'] || null,
   };
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * Performance Max: asset groups and their listing-group filter trees
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Look up PMax ASSET GROUPS by bare id (the id shown in the Google Ads UI).
+ *
+ * Shaped exactly like `getAdGroupsByIds` so `applyStatusChange` can drive it
+ * without knowing PMax exists. REMOVED groups are filtered out: they cannot be
+ * revived, so letting one through would only produce a confusing API error on
+ * the write.
+ *
+ * @param {string} customerId
+ * @param {Array<string|number>} assetGroupIds
+ * @param {{loginCustomerId?: string}} [opts]
+ * @returns {Promise<Array<{assetGroupId:string, name:string, resourceName:string,
+ *   campaignId:string, campaignName:string, status:string}>>}
+ */
+export async function getAssetGroupsByIds(customerId, assetGroupIds, opts = {}) {
+  const clean = String(customerId).replace(/-/g, '');
+  const ids = [...new Set((assetGroupIds || []).map((a) => String(a).replace(/[^0-9]/g, '')).filter(Boolean))];
+  if (ids.length === 0) return [];
+  const out = [];
+  for (let i = 0; i < ids.length; i += 200) {
+    const part = ids.slice(i, i + 200);
+    const rows = await runRawQuery(clean,
+      `SELECT asset_group.id, asset_group.name, asset_group.resource_name, asset_group.status,
+              campaign.id, campaign.name
+       FROM asset_group
+       WHERE asset_group.id IN (${part.join(',')}) AND asset_group.status IN ('ENABLED', 'PAUSED')`,
+      { loginCustomerId: opts.loginCustomerId });
+    for (const r of rows) {
+      out.push({
+        assetGroupId: String(r['asset_group.id']),
+        name: r['asset_group.name'] || '',
+        resourceName: r['asset_group.resource_name'],
+        campaignId: String(r['campaign.id'] ?? ''),
+        campaignName: r['campaign.name'] || '',
+        status: normaliseStatus(r['asset_group.status']),
+      });
+    }
+  }
+  return out;
+}
+
+/** `asset_group_listing_group_filter.type` values (ListingGroupFilterType). */
+export const LISTING_FILTER_TYPE = { SUBDIVISION: 2, UNIT_INCLUDED: 3, UNIT_EXCLUDED: 4 };
+
+/** Reverse map, for messages. */
+export const LISTING_FILTER_TYPE_NAME = { 2: 'SUBDIVISION', 3: 'UNIT_INCLUDED', 4: 'UNIT_EXCLUDED' };
+
+/**
+ * Describe the `case_value` of one filter node — which product dimension it
+ * splits on, and at what value.
+ *
+ * A node with a dimension present but no value is the catch-all sibling Google
+ * shows as "Other / Wszystkie pozostałe": every subdivision must have exactly
+ * one, which is why it is labelled rather than treated as missing. The ROOT node
+ * has no case_value at all.
+ *
+ * @param {object} r - flattened row from `runRawQuery`
+ * @returns {{kind:string|null, value:string|null, level:number|null, index:number|null, label:string}}
+ */
+export function listingFilterDimension(r) {
+  const P = 'asset_group_listing_group_filter.case_value.';
+  const dims = [
+    { kind: 'product_type', value: r[`${P}product_type.value`], level: r[`${P}product_type.level`] },
+    { kind: 'product_category', value: r[`${P}product_category.category_id`], level: r[`${P}product_category.level`] },
+    { kind: 'product_brand', value: r[`${P}product_brand.value`] },
+    { kind: 'product_item_id', value: r[`${P}product_item_id.value`] },
+    { kind: 'product_custom_attribute', value: r[`${P}product_custom_attribute.value`], index: r[`${P}product_custom_attribute.index`] },
+    { kind: 'product_channel', value: r[`${P}product_channel.channel`] },
+    { kind: 'product_condition', value: r[`${P}product_condition.condition`] },
+  ];
+  // A dimension "is present" when the row carries either its value or its
+  // level/index — the catch-all node has only the latter.
+  const hit = dims.find((d) => d.value !== undefined && d.value !== null && d.value !== '')
+    || dims.find((d) => d.level !== undefined && d.level !== null)
+    || dims.find((d) => d.index !== undefined && d.index !== null);
+  if (!hit) return { kind: null, value: null, level: null, index: null, label: '(ROOT)' };
+  const value = hit.value === undefined || hit.value === null || hit.value === '' ? null : String(hit.value);
+  return {
+    kind: hit.kind,
+    value,
+    level: hit.level ?? null,
+    index: hit.index ?? null,
+    label: value === null ? '(POZOSTAŁE)' : `${hit.kind}=${value}`,
+  };
+}
+
+/**
+ * Read the COMPLETE listing-group filter tree of one PMax asset group, with a
+ * child index attached to every node.
+ *
+ * `update-listing-filter` needs the whole tree rather than the single node it is
+ * about to flip: the guards that make that flip safe are all statements about
+ * neighbours — is this node a leaf, is it the root, would the asset group still
+ * include anything afterwards.
+ *
+ * @param {string} customerId
+ * @param {string|number} assetGroupId
+ * @param {{loginCustomerId?: string}} [opts]
+ * @returns {Promise<Array<{id:string, resourceName:string, type:number, typeName:string,
+ *   listingSource:number|null, parentResourceName:string|null, assetGroupName:string,
+ *   assetGroupStatus:string, dimension:object, childIds:Array<string>}>>}
+ */
+export async function getListingFilterTree(customerId, assetGroupId, opts = {}) {
+  const clean = String(customerId).replace(/-/g, '');
+  const id = String(assetGroupId).replace(/[^0-9]/g, '');
+  if (!id) return [];
+  const P = 'asset_group_listing_group_filter.';
+  const rows = await runRawQuery(clean,
+    `SELECT asset_group.id, asset_group.name, asset_group.status,
+            ${P}id, ${P}resource_name, ${P}type, ${P}listing_source,
+            ${P}parent_listing_group_filter,
+            ${P}case_value.product_type.value, ${P}case_value.product_type.level,
+            ${P}case_value.product_category.category_id, ${P}case_value.product_category.level,
+            ${P}case_value.product_brand.value,
+            ${P}case_value.product_item_id.value,
+            ${P}case_value.product_custom_attribute.value, ${P}case_value.product_custom_attribute.index,
+            ${P}case_value.product_channel.channel,
+            ${P}case_value.product_condition.condition
+     FROM asset_group_listing_group_filter
+     WHERE asset_group.id = ${id}`,
+    { loginCustomerId: opts.loginCustomerId });
+
+  const nodes = rows.map((r) => ({
+    id: String(r[`${P}id`] ?? ''),
+    resourceName: r[`${P}resource_name`],
+    type: Number(r[`${P}type`]),
+    typeName: LISTING_FILTER_TYPE_NAME[Number(r[`${P}type`])] || String(r[`${P}type`]),
+    listingSource: r[`${P}listing_source`] ?? null,
+    parentResourceName: r[`${P}parent_listing_group_filter`] || null,
+    assetGroupName: r['asset_group.name'] || '',
+    assetGroupStatus: normaliseStatus(r['asset_group.status']),
+    dimension: listingFilterDimension(r),
+    childIds: [],
+  }));
+
+  const byResource = new Map(nodes.map((n) => [n.resourceName, n]));
+  for (const n of nodes) {
+    if (!n.parentResourceName) continue;
+    const parent = byResource.get(n.parentResourceName);
+    if (parent) parent.childIds.push(n.id);
+  }
+  return nodes;
 }

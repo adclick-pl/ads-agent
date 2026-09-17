@@ -1,6 +1,7 @@
+import { writeFileSync } from 'node:fs';
 import { getCustomer, unpackError } from './client.js';
-import { getKeywordsByCriteria, getCampaignBasics, getCampaignBiddingInfo, getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts, getExistingStructuredSnippets, getExistingPriceAssets, getExistingPromotions, promotionIdentity, getAdGroupAdsByAdIds, getAdGroupsByIds, getExistingYoutubeAssets, getExistingDemandGenAds, getExistingDemandGenProductAds, getExistingListingGroups, getAdGroupTargetingCriteria, getCampaignChannelTypes, getCallToActionAssets, getConversionActions, getExistingCampaigns, getBudgetsByName, COPYABLE_CRITERION_TYPES } from './queries.js';
-import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkPriceOfferings, checkPromotion, checkDemandGenAdTexts, checkDemandGenChannels, DEMAND_GEN_LIMITS, adTextLength, checkConversionAction, checkCampaignSpec } from './safety.js';
+import { getKeywordsByCriteria, getCampaignBasics, getCampaignBiddingInfo, getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts, getExistingStructuredSnippets, getExistingPriceAssets, getExistingPromotions, promotionIdentity, getAdGroupAdsByAdIds, getAdGroupsByIds, getExistingYoutubeAssets, getExistingDemandGenAds, getExistingDemandGenProductAds, getExistingListingGroups, getAssetGroupsByIds, getListingFilterTree, LISTING_FILTER_TYPE_NAME, getAdGroupTargetingCriteria, getCampaignChannelTypes, getCallToActionAssets, getConversionActions, getExistingCampaigns, getBudgetsByName, COPYABLE_CRITERION_TYPES } from './queries.js';
+import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkPriceOfferings, checkPromotion, checkDemandGenAdTexts, checkDemandGenChannels, DEMAND_GEN_LIMITS, adTextLength, checkConversionAction, checkCampaignSpec, checkListingFilterFlip, checkLabelExclusion, checkItemExclusion } from './safety.js';
 
 /**
  * Entity metadata for Final URL updates. Maps our short entity key to the
@@ -535,6 +536,34 @@ export async function updateKeywordStatus(customerId, items, dryRun = false, log
     normalizeId: (s) => s.replace(/[^0-9~]/g, ''),
     lookup: (ids, opts) => getKeywordsByCriteria(customerId, ids, opts),
     describe: (row) => ({ text: row.text, matchType: row.matchType, adGroupName: row.adGroupName }),
+  }, customerId, items, dryRun, loginCustomerId);
+}
+
+/**
+ * Enable / pause PMax ASSET GROUPS ("grupy plików") by id.
+ *
+ * The seasonal switch for a Performance Max account: a group built around a
+ * product type that only sells for part of the year is paused out of season and
+ * enabled back into it, instead of being rebuilt twice a year.
+ *
+ * Pausing an asset group stops that group serving; the products inside it keep
+ * serving from any other group whose filter still matches them — usually the
+ * catch-all "all products" group. So pausing a group narrows which creative and
+ * which signals a product runs with, it does not necessarily stop the product.
+ *
+ * @param {string} customerId
+ * @param {Array<{assetGroupId: string|number, status: 'ENABLED'|'PAUSED'}>} items
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>} Summary with a per-group from→to plan
+ */
+export async function updateAssetGroupStatus(customerId, items, dryRun = false, loginCustomerId) {
+  return applyStatusChange({
+    label: 'grup plików (asset groups)',
+    entity: 'AssetGroup',
+    idKey: 'assetGroupId',
+    lookup: (ids, opts) => getAssetGroupsByIds(customerId, ids, opts),
+    describe: (row) => ({ name: row.name, campaignId: row.campaignId, campaignName: row.campaignName }),
   }, customerId, items, dryRun, loginCustomerId);
 }
 
@@ -2491,7 +2520,8 @@ export async function addPromotionAssets(customerId, items, dryRun = false, logi
     r.promotionTarget,
     r.percentOff ? Math.round(r.percentOff * 1_000_000) : null,
     r.moneyAmountOff ? Math.round(r.moneyAmountOff * 1_000_000) : null,
-    r.currency);
+    r.currency,
+    r.ordersOverAmount ? Math.round(r.ordersOverAmount * 1_000_000) : null);
   const keyOf = (r) => `${r.level}:${parentOf(r)}|${identityOf(r)}`;
 
   let existing = new Set();
@@ -3742,4 +3772,938 @@ export async function updateConversionActions(customerId, items, dryRun = false,
   } catch (error) {
     throw new Error(`Nie udało się zmienić konwersji: ${unpackError(error)}`);
   }
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * Performance Max: flipping ONE listing-group filter leaf
+ *
+ * Why this is a remove+create and not an update: `type` is IMMUTABLE on
+ * AssetGroupListingGroupFilter (only `case_value` is mutable), so there is no
+ * update that turns an exclusion into an inclusion. See the carve-out note above
+ * `checkListingFilterFlip` in safety.js for what that costs and how it is fenced.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Rebuild the `case_value` payload of a node from the shape `getListingFilterTree`
+ * read back, so the replacement leaf splits on exactly the same dimension value.
+ *
+ * A catch-all node carries the dimension and its level/index but no value — that
+ * absence IS the meaning ("everything else at this level"), so it is preserved
+ * rather than filled in.
+ *
+ * @param {{kind:string|null, value:string|null, level:number|null, index:number|null}} dim
+ * @returns {object|null} case_value for the create operation
+ */
+export function rebuildListingCaseValue(dim) {
+  if (!dim || !dim.kind) return null;
+  const val = dim.value;
+  const withValue = (key) => (val === null ? {} : { [key]: val });
+  const withLevel = () => (dim.level === null || dim.level === undefined ? {} : { level: dim.level });
+  switch (dim.kind) {
+    case 'product_type':
+      return { product_type: { ...withValue('value'), ...withLevel() } };
+    case 'product_category':
+      return { product_category: { ...withValue('category_id'), ...withLevel() } };
+    case 'product_brand':
+      return { product_brand: { ...withValue('value') } };
+    case 'product_item_id':
+      return { product_item_id: { ...withValue('value') } };
+    case 'product_custom_attribute':
+      return {
+        product_custom_attribute: {
+          ...withValue('value'),
+          ...(dim.index === null || dim.index === undefined ? {} : { index: dim.index }),
+        },
+      };
+    case 'product_channel':
+      return { product_channel: { channel: val } };
+    case 'product_condition':
+      return { product_condition: { condition: val } };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Pick the one node a selector refers to, or explain why it can't.
+ *
+ * Refuses ambiguity rather than guessing: the same product type legitimately
+ * appears more than once in a tree (once per subdivision branch), and flipping
+ * the wrong copy is a silent mistake that only shows up in next month's spend.
+ *
+ * @param {Array<object>} tree
+ * @param {{filterId?: string|number, productType?: string}} selector
+ * @returns {{node: object|null, error: string|null}}
+ */
+export function selectListingFilterNode(tree, selector = {}) {
+  const nodes = tree || [];
+  const filterId = String(selector.filterId ?? '').replace(/[^0-9]/g, '');
+  if (filterId) {
+    const node = nodes.find((n) => String(n.id) === filterId);
+    if (!node) {
+      return { node: null, error: `Nie ma węzła o id ${filterId} w tej grupie plików. Dostępne id: ${nodes.map((n) => n.id).join(', ')}` };
+    }
+    return { node, error: null };
+  }
+
+  const wanted = String(selector.productType ?? '').trim().toLowerCase();
+  if (!wanted) {
+    return { node: null, error: 'Wskaż węzeł: --product-type="typ produktu" albo --filter-id=<ID>.' };
+  }
+  const hits = nodes.filter(
+    (n) => n.dimension.kind === 'product_type'
+      && n.dimension.value !== null
+      && String(n.dimension.value).trim().toLowerCase() === wanted
+  );
+  if (hits.length === 0) {
+    const available = nodes
+      .filter((n) => n.dimension.kind === 'product_type' && n.dimension.value !== null)
+      .map((n) => `"${n.dimension.value}"`)
+      .sort();
+    return {
+      node: null,
+      error: `Nie ma typu produktu "${selector.productType}" w tej grupie plików.`
+        + (available.length ? ` Są za to: ${[...new Set(available)].join(', ')}` : ' Ta grupa nie dzieli się po typie produktu.'),
+    };
+  }
+  if (hits.length > 1) {
+    const list = hits.map((n) => `id=${n.id} (${n.typeName}, poziom ${n.dimension.level ?? '?'})`).join('; ');
+    return {
+      node: null,
+      error: `Typ "${selector.productType}" występuje ${hits.length} razy w tym drzewie — nie zgaduję który. Wskaż --filter-id=<ID>. Kandydaci: ${list}`,
+    };
+  }
+  return { node: hits[0], error: null };
+}
+
+/**
+ * Flip ONE listing-group filter leaf between included and excluded.
+ *
+ * The routine seasonal edit on a Performance Max account: a product type that is
+ * excluded out of season has to be let back in, and no status field can express
+ * that. Scope is deliberately one leaf per call — a dry-run you can read in full
+ * is the only real protection on a tree this easy to break.
+ *
+ * @param {string} customerId
+ * @param {string|number} assetGroupId
+ * @param {{filterId?: string|number, productType?: string}} selector
+ * @param {'INCLUDED'|'EXCLUDED'} to
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>} plan (dry-run, validated by Google) or the mutate result
+ */
+export async function updateListingFilter(customerId, assetGroupId, selector, to, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  const cleanAssetGroupId = String(assetGroupId ?? '').replace(/[^0-9]/g, '');
+  if (!cleanAssetGroupId) throw new Error('update-listing-filter wymaga --asset-group=<ID grupy plików>.');
+
+  const tree = await getListingFilterTree(cleanCustomerId, cleanAssetGroupId, { loginCustomerId });
+  if (tree.length === 0) {
+    throw new Error(`🛑 Grupa plików ${cleanAssetGroupId} nie ma drzewa filtrów (albo nie istnieje / jest usunięta). Nic nie zmieniono.`);
+  }
+
+  const { node, error } = selectListingFilterNode(tree, selector);
+  if (error) throw new Error(`🛑 ${error}`);
+
+  const verdict = checkListingFilterFlip(node, tree, to);
+  if (!verdict.ok) throw new Error(`🛑 ${verdict.reason}`);
+
+  const assetGroupName = node.assetGroupName;
+  const base = {
+    assetGroupId: cleanAssetGroupId,
+    assetGroupName,
+    assetGroupStatus: node.assetGroupStatus,
+    filterId: node.id,
+    dimension: node.dimension.label,
+    from: node.typeName,
+    to: LISTING_FILTER_TYPE_NAME[verdict.targetType],
+  };
+
+  if (verdict.noop) {
+    console.log(`[Mutator] Węzeł ${node.id} już jest ${base.to} — nic do zrobienia.`);
+    return { success: true, dryRun, changed: 0, noop: true, ...base };
+  }
+
+  const caseValue = rebuildListingCaseValue(node.dimension);
+  if (!caseValue) {
+    throw new Error(
+      `🛑 Nie umiem odtworzyć warunku węzła ${node.id} (wymiar: ${node.dimension.kind || 'nieznany'}). ` +
+      'Bez wiernej kopii warunku przełączenie zmieniłoby zakres grupy plików. Zrób to ręcznie w panelu.'
+    );
+  }
+
+  // Order matters: the old leaf must be gone before its replacement lands, or
+  // the parent would momentarily hold two leaves with the same case value.
+  const mutations = [
+    {
+      entity: 'AssetGroupListingGroupFilter',
+      operation: 'remove',
+      resource: node.resourceName,
+    },
+    {
+      entity: 'AssetGroupListingGroupFilter',
+      operation: 'create',
+      resource: {
+        asset_group: `customers/${cleanCustomerId}/assetGroups/${cleanAssetGroupId}`,
+        type: verdict.targetType,
+        ...(node.listingSource === null || node.listingSource === undefined
+          ? {}
+          : { listing_source: node.listingSource }),
+        parent_listing_group_filter: node.parentResourceName,
+        case_value: caseValue,
+      },
+    },
+  ];
+
+  const warning = 'Węzeł dostanie NOWE id, więc jego historia statystyk w panelu zaczyna się od zera '
+    + '(historia kampanii i produktów zostaje nietknięta).';
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}${assetGroupName}: ${base.dimension} ${base.from} → ${base.to}...`);
+
+  if (dryRun) {
+    const customer = getCustomer(cleanCustomerId, loginCustomerId);
+    const check = await validateWithApi(customer, [mutations]);
+    return {
+      success: check.ok,
+      dryRun: true,
+      ...base,
+      operations: ['remove ' + node.resourceName, 'create ' + base.to],
+      warning,
+      googleValidation: check.ok ? 'OK' : `ODRZUCONE: ${check.error}`,
+    };
+  }
+
+  try {
+    const customer = getCustomer(cleanCustomerId, loginCustomerId);
+    const response = await customer.mutateResources(mutations);
+    return {
+      success: true,
+      dryRun: false,
+      changed: 1,
+      ...base,
+      warning,
+      resourceNames: mutatedResourceNames([response]),
+    };
+  } catch (error) {
+    throw new Error(`Nie udało się przełączyć filtra: ${unpackError(error)}`);
+  }
+}
+/* ────────────────────────────────────────────────────────────────────────────
+ * PMax: dorównanie węzłów `product_type` do feedu
+ *
+ * Drzewo filtrów trzyma nazwy kategorii przepisane z ręki, a feed potrafi je
+ * zmienić z dnia na dzień (inna aplikacja sklepu, przebudowa kategorii). Węzeł
+ * z nieistniejącą nazwą nie rzuca błędu — po prostu przestaje cokolwiek łapać:
+ * grupa plików głodnieje, a wykluczenie przestaje chronić. Widać to dopiero
+ * w wydatkach, bo produkty spadają do gałęzi „wszystko inne".
+ *
+ * `update-listing-filter` przełącza WYŁĄCZNIE istniejący liść, więc nie dokłada
+ * nowej nazwy ani nie sprząta martwej. Ta akcja robi jedno i drugie wsadowo,
+ * w jednym żądaniu na grupę plików.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** Dopuszczalne wartości kolumny `action` w pliku wsadowym. */
+const LISTING_TYPE_ACTIONS = new Set(['INCLUDED', 'EXCLUDED', 'REMOVE']);
+
+/**
+ * Plan operacji dorównujących węzły `product_type` jednej grupy plików.
+ *
+ * Czysta funkcja — żadnego wywołania API, więc plan da się obejrzeć i przetestować
+ * offline. Wszystkie liście muszą wisieć pod JEDNYM podziałem po typie produktu:
+ * ten sam typ w dwóch gałęziach znaczy co innego w każdej z nich, a zgadywanie
+ * której dotyczy wiersz to cicha pomyłka widoczna dopiero w wydatkach.
+ *
+ * @param {Array<object>} tree - drzewo z `getListingFilterTree`
+ * @param {Array<{productType: string, to: 'INCLUDED'|'EXCLUDED'|'REMOVE'}>} items
+ * @param {{customerId: string, assetGroupId: string}} opts
+ * @returns {{mutations: Array<object>, plan: Array<object>, added: number, flipped: number, removed: number, noop: number}}
+ */
+export function buildListingTypeMutations(tree, items, opts) {
+  const { customerId, assetGroupId } = opts;
+  const assetGroup = `customers/${customerId}/assetGroups/${assetGroupId}`;
+  const entity = 'AssetGroupListingGroupFilter';
+  const norm = (v) => String(v ?? '').trim().toLowerCase();
+
+  const typeNodes = (tree || []).filter(
+    (n) => n.dimension.kind === 'product_type' && n.dimension.value !== null,
+  );
+  if (typeNodes.length === 0) {
+    throw new Error(
+      '🛑 Ta grupa plików nie dzieli się po typie produktu, więc nie ma gdzie dołożyć węzła. '
+      + 'Podział trzeba najpierw założyć w panelu — dokładanie go tutaj oznaczałoby przebudowę całego drzewa.',
+    );
+  }
+  const parents = new Set(typeNodes.map((n) => n.parentResourceName));
+  if (parents.size > 1) {
+    throw new Error(
+      `🛑 Typy produktów wiszą pod ${parents.size} różnymi podziałami — ten sam typ znaczy co innego w każdej gałęzi. `
+      + 'Nie zgaduję której dotyczy wiersz. Zrób to w panelu. Nic nie zmieniono.',
+    );
+  }
+  const parent = [...parents][0];
+  const { level } = typeNodes[0].dimension;
+  const listingSource = typeNodes[0].listingSource;
+  const src = listingSource === null || listingSource === undefined ? {} : { listing_source: listingSource };
+
+  const mutations = [];
+  const plan = [];
+  let added = 0; let flipped = 0; let removed = 0; let noop = 0;
+  // Stan docelowy gałęzi, żeby sprawdzić, czy po zmianie zostaje co wyświetlać.
+  const finalType = new Map(typeNodes.map((n) => [norm(n.dimension.value), n.type]));
+  const seen = new Set();
+
+  for (const it of items) {
+    const wanted = norm(it.productType);
+    const to = String(it.to ?? '').trim().toUpperCase();
+    if (!wanted) throw new Error('🛑 Wiersz bez nazwy typu produktu (kolumna product_type).');
+    if (!LISTING_TYPE_ACTIONS.has(to)) {
+      throw new Error(`🛑 "${it.productType}": nieznana operacja "${it.to}". Dozwolone: INCLUDED, EXCLUDED, REMOVE.`);
+    }
+    if (seen.has(wanted)) throw new Error(`🛑 Typ "${it.productType}" występuje w pliku dwa razy — plan byłby niejednoznaczny.`);
+    seen.add(wanted);
+
+    const existing = typeNodes.find((n) => norm(n.dimension.value) === wanted);
+
+    if (to === 'REMOVE') {
+      if (!existing) { plan.push({ productType: it.productType, action: 'REMOVE', result: 'nie ma go w drzewie — pomijam' }); noop += 1; continue; }
+      if (existing.childIds.length) {
+        throw new Error(
+          `🛑 Węzeł "${it.productType}" ma pod sobą ${existing.childIds.length} podwęzłów — usunięcie zabrałoby też je. `
+          + 'Rozwiąż to w panelu. Nic nie zmieniono.',
+        );
+      }
+      mutations.push({ entity, operation: 'remove', resource: existing.resourceName });
+      finalType.delete(wanted);
+      plan.push({ productType: it.productType, action: 'REMOVE', result: `usuwam węzeł ${existing.id} (${existing.typeName})` });
+      removed += 1;
+      continue;
+    }
+
+    const targetType = to === 'INCLUDED' ? 3 : 4;
+    const caseValue = { product_type: { value: String(it.productType).trim(), ...(level === null || level === undefined ? {} : { level }) } };
+
+    if (!existing) {
+      mutations.push({
+        entity,
+        operation: 'create',
+        resource: { asset_group: assetGroup, type: targetType, ...src, parent_listing_group_filter: parent, case_value: caseValue },
+      });
+      finalType.set(wanted, targetType);
+      plan.push({ productType: it.productType, action: to, result: 'dokładam nowy węzeł' });
+      added += 1;
+      continue;
+    }
+    if (existing.type === targetType) {
+      plan.push({ productType: it.productType, action: to, result: `węzeł ${existing.id} już jest ${existing.typeName}` });
+      noop += 1;
+      continue;
+    }
+    // `type` jest niezmienne — przełączenie to usunięcie i utworzenie przeciwnego liścia.
+    mutations.push({ entity, operation: 'remove', resource: existing.resourceName });
+    mutations.push({
+      entity,
+      operation: 'create',
+      resource: { asset_group: assetGroup, type: targetType, ...src, parent_listing_group_filter: parent, case_value: caseValue },
+    });
+    finalType.set(wanted, targetType);
+    plan.push({ productType: it.productType, action: to, result: `przełączam węzeł ${existing.id}: ${existing.typeName} → ${LISTING_FILTER_TYPE_NAME[targetType]}` });
+    flipped += 1;
+  }
+
+  // Gałąź bez ani jednego włączonego liścia przestaje wyświetlać cokolwiek — chyba
+  // że ratuje ją włączone „wszystko inne" obok. To jedyny sposób, w jaki ta akcja
+  // może wyłączyć grupę plików, więc sprawdzamy to przed wysłaniem.
+  const catchAll = (tree || []).find((n) => n.parentResourceName === parent && n.dimension.value === null);
+  const catchAllServes = Boolean(catchAll && catchAll.type === 3);
+  const anyIncluded = [...finalType.values()].some((t) => t === 3);
+  if (!anyIncluded && !catchAllServes) {
+    throw new Error(
+      '🛑 Po tej zmianie w gałęzi nie zostaje ANI JEDEN włączony typ produktu, a „wszystko inne" jest wykluczone — '
+      + 'grupa plików przestałaby wyświetlać cokolwiek. Nic nie zmieniono.',
+    );
+  }
+
+  if (mutations.length > MUTATE_CHUNK) {
+    throw new Error(
+      `🛑 Plan to ${mutations.length} operacji, a jedno żądanie mieści ${MUTATE_CHUNK}. `
+      + 'Podziel plik na mniejsze partie — rozbicie jednej grupy plików na kilka żądań zostawiłoby drzewo w połowie zmienione.',
+    );
+  }
+  return { mutations, plan, added, flipped, removed, noop };
+}
+
+/**
+ * Dorównaj węzły `product_type` JEDNEJ grupy plików do podanej listy.
+ *
+ * @param {string} customerId
+ * @param {string|number} assetGroupId
+ * @param {Array<{productType: string, to: string}>} items
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @param {{snapshotPath?: string|null}} [opts]
+ * @returns {Promise<object>} plan (symulacja walidowana przez Google) albo wynik zapisu
+ */
+export async function syncListingTypes(customerId, assetGroupId, items, dryRun = false, loginCustomerId, opts = {}) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  const cleanAssetGroupId = String(assetGroupId ?? '').replace(/[^0-9]/g, '');
+  if (!cleanAssetGroupId) throw new Error('sync-listing-types wymaga ID grupy plików.');
+  if (!Array.isArray(items) || items.length === 0) throw new Error('Brak wierszy do wprowadzenia (pusta lista).');
+
+  const surowe = await getListingFilterTree(cleanCustomerId, cleanAssetGroupId, { loginCustomerId });
+  if (surowe.length === 0) {
+    throw new Error(`🛑 Grupa plików ${cleanAssetGroupId} nie ma drzewa filtrów (albo nie istnieje / jest usunięta). Nic nie zmieniono.`);
+  }
+  const tree = inferCatchAllDimensions(surowe);
+  const assetGroupName = (tree[0] && tree[0].assetGroupName) || '';
+
+  const { mutations, plan, added, flipped, removed, noop } = buildListingTypeMutations(tree, items, {
+    customerId: cleanCustomerId,
+    assetGroupId: cleanAssetGroupId,
+  });
+
+  const base = {
+    assetGroupId: cleanAssetGroupId,
+    assetGroupName,
+    assetGroupStatus: (tree[0] && tree[0].assetGroupStatus) || null,
+    nodesBefore: tree.length,
+    added,
+    flipped,
+    removed,
+    noop,
+    plan,
+  };
+
+  if (mutations.length === 0) {
+    console.log(`[Mutator] ${assetGroupName}: drzewo już zgadza się z listą — nic do zrobienia.`);
+    return { success: true, dryRun, changed: 0, noop: true, ...base };
+  }
+
+  const warning = 'Dołożone i przełączone węzły dostają NOWE id, więc ich statystyki w panelu startują od zera '
+    + '(historia kampanii i produktów zostaje nietknięta).';
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}${assetGroupName}: +${added} dołożone, ${flipped} przełączone, ${removed} usunięte...`);
+
+  const customer = getCustomer(cleanCustomerId, loginCustomerId);
+
+  if (dryRun) {
+    const check = await validateWithApi(customer, [mutations]);
+    return {
+      success: check.ok,
+      dryRun: true,
+      ...base,
+      operations: mutations.length,
+      warning,
+      googleValidation: check.ok ? 'OK' : `ODRZUCONE: ${check.error}`,
+    };
+  }
+
+  // Snapshot PRZED mutacją — jedyna droga powrotu do poprzedniego kształtu drzewa.
+  let snapshot = null;
+  if (opts.snapshotPath) {
+    writeFileSync(opts.snapshotPath, JSON.stringify({
+      customerId: cleanCustomerId, assetGroupId: cleanAssetGroupId, assetGroupName,
+      savedAt: new Date().toISOString(), tree,
+    }, null, 1));
+    snapshot = opts.snapshotPath;
+    console.log(`[Mutator] Snapshot drzewa sprzed zmiany: ${snapshot}`);
+  }
+
+  try {
+    const response = await customer.mutateResources(mutations);
+    return {
+      success: true,
+      dryRun: false,
+      changed: mutations.length,
+      ...base,
+      warning,
+      snapshot,
+      resourceNames: mutatedResourceNames([response]),
+    };
+  } catch (error) {
+    throw new Error(`Nie udało się dorównać typów produktów: ${unpackError(error)}`);
+  }
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * PMax: wykluczenie etykiety niestandardowej (custom_label_N)
+ *
+ * Feed oznacza śmieci etykietą, a każda grupa plików ma ją wykluczać — jeden
+ * przełącznik na cały katalog zamiast wyliczania pojedynczych produktów. Grupa,
+ * której ten węzeł brakuje, po cichu wyświetla wszystko, co reszta konta już
+ * wykluczyła, i widać to dopiero po miesiącach w wydatkach.
+ *
+ * Dlaczego ta jedna akcja USUWA kryteria, choć connector zasadniczo tego nie robi:
+ * podział rozdziela po JEDNYM wymiarze, więc etykieta wchodząca jako pierwszy
+ * podział wymaga przeniesienia dotychczasowego drzewa pod jej gałąź „wszystko
+ * inne" — a kryterium nie da się przepiąć, tylko odtworzyć. W drzewie filtrów
+ * PMax usunięcie jest odwracalne inaczej niż gdzie indziej: to czysta
+ * konfiguracja kierowania, historia wydatków siedzi na kampanii i produktach,
+ * a snapshot sprzed zmiany pozwala odtworzyć poprzedni kształt.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** `ProductCustomAttributeIndex`: INDEX0 = 2, bo 0 i 1 zajmują UNSPECIFIED i UNKNOWN. */
+const CUSTOM_LABEL_ENUM_OFFSET = 2;
+
+/**
+ * Dopisz wymiar węzłom „wszystko inne", których API nie opisuje.
+ *
+ * Węzeł zbiorczy nie ma wartości, a `product_item_id` i `product_brand` nie mają
+ * też pola `level` — więc w odczycie wychodzą BEZ ŚLADU tego, po czym dzielą,
+ * nie do odróżnienia od korzenia. Przy samym przełączaniu liścia to nie
+ * przeszkadzało; przy przebudowie oznacza węzeł, którego nie da się odtworzyć,
+ * i przebudowa słusznie odmawia.
+ *
+ * Rozstrzyga rodzeństwo: wszystkie dzieci jednego podziału dzielą po TYM SAMYM
+ * wymiarze, więc brakujący wymiar bierzemy od siostry, która go ma. Zgadywania
+ * tu nie ma — gdy żadna siostra nie ma wymiaru, węzeł zostaje nieopisany
+ * i wyżej odpala się odmowa.
+ *
+ * @param {Array<object>} tree
+ * @returns {Array<object>} kopia drzewa z uzupełnionymi wymiarami
+ */
+export function inferCatchAllDimensions(tree) {
+  return (tree || []).map((n) => {
+    if (!n.parentResourceName) return n;          // korzeń nie ma warunku
+    if (n.dimension && n.dimension.kind) return n;
+    const siostra = tree.find((s) => s.parentResourceName === n.parentResourceName
+      && s.resourceName !== n.resourceName
+      && s.dimension && s.dimension.kind);
+    if (!siostra) return n;
+    return {
+      ...n,
+      dimension: {
+        kind: siostra.dimension.kind,
+        value: null,
+        level: siostra.dimension.level ?? null,
+        index: siostra.dimension.index ?? null,
+        label: '(POZOSTAŁE)',
+      },
+    };
+  });
+}
+
+
+/**
+ * Wspólny mechanizm PRZEBUDOWY drzewa filtrów: nowy pierwszy podział z wykluczeniami
+ * obok gałęzi „wszystko inne", pod którą ląduje całe dotychczasowe drzewo.
+ *
+ * Używają go obie ścieżki wykluczania (etykieta i ID produktów), bo ryzykowna część jest
+ * dokładnie ta sama i ma istnieć raz: kolejność operacji, wykrycie sierot i limit jednego
+ * żądania. Kolejność jest istotna i jest tu zagwarantowana — usunięcia idą od liści w górę,
+ * tworzenia od korzenia w dół, wszystko w JEDNYM mutate (identyfikatory tymczasowe
+ * rozwiązują się tylko w obrębie jednego żądania, a częściowa przebudowa zostawiłaby grupę
+ * bez drzewa).
+ */
+function planujPrzebudowe(tree, root, { assetGroup, entity, temp, src, podzialBezWartosci, wykluczenia }) {
+  const create = (resource) => ({ entity, operation: 'create', resource });
+  const remove = (resourceName) => ({ entity, operation: 'remove', resource: resourceName });
+  const childrenOf = (rn) => tree.filter((n) => n.parentResourceName === rn);
+
+  // Usuwamy od najgłębszych: kasowanie podziału przed jego dziećmi bywa odrzucane,
+  // a nawet gdy przechodzi, plan przestaje być czytelny.
+  const depth = new Map([[root.resourceName, 0]]);
+  const queue = [root];
+  while (queue.length) {
+    const n = queue.shift();
+    for (const kid of childrenOf(n.resourceName)) {
+      depth.set(kid.resourceName, depth.get(n.resourceName) + 1);
+      queue.push(kid);
+    }
+  }
+  const stare = tree.filter((n) => n.resourceName !== root.resourceName);
+  const orphans = stare.filter((n) => !depth.has(n.resourceName));
+  if (orphans.length) {
+    throw new Error(
+      `🛑 ${orphans.length} węzłów nie wisi pod korzeniem — odczyt drzewa jest niepełny i przebudowa zgubiłaby je. Nic nie zmieniono.`
+    );
+  }
+  const removes = [...stare]
+    .sort((a, b) => depth.get(b.resourceName) - depth.get(a.resourceName))
+    .map((n) => remove(n.resourceName));
+
+  const elseRn = temp();
+  const creates = [
+    create({
+      asset_group: assetGroup,
+      resource_name: elseRn,
+      type: 2,
+      ...src(root),
+      parent_listing_group_filter: root.resourceName,
+      case_value: podzialBezWartosci,
+    }),
+    ...wykluczenia.map((caseValue) => create({
+      asset_group: assetGroup,
+      type: 4,
+      ...src(root),
+      parent_listing_group_filter: root.resourceName,
+      case_value: caseValue,
+    })),
+  ];
+
+  // Odtworzenie w kolejności BFS, żeby rodzic zawsze powstawał przed dzieckiem.
+  const nowyRn = new Map([[root.resourceName, elseRn]]);
+  const kolejka = [...childrenOf(root.resourceName)];
+  while (kolejka.length) {
+    const n = kolejka.shift();
+    const caseValue = rebuildListingCaseValue(n.dimension);
+    if (!caseValue) {
+      throw new Error(
+        `🛑 Nie umiem odtworzyć warunku węzła ${n.id} (wymiar: ${n.dimension.kind || 'nieznany'}). ` +
+        'Bez wiernej kopii przebudowa zmieniłaby zakres grupy plików. Nic nie zmieniono.'
+      );
+    }
+    const rn = temp();
+    nowyRn.set(n.resourceName, rn);
+    creates.push(create({
+      asset_group: assetGroup,
+      resource_name: rn,
+      type: n.type,
+      ...src(n),
+      parent_listing_group_filter: nowyRn.get(n.parentResourceName),
+      case_value: caseValue,
+    }));
+    kolejka.push(...childrenOf(n.resourceName));
+  }
+
+  const mutations = [...removes, ...creates];
+  if (mutations.length > MUTATE_CHUNK) {
+    throw new Error(
+      `🛑 Przebudowa to ${mutations.length} operacji, a jedno żądanie mieści ${MUTATE_CHUNK}. ` +
+      'Podziel listę ID na mniejsze partie albo przebuduj drzewo w panelu — podzielenie samej przebudowy na partie ' +
+      'zostawiłoby grupę bez drzewa między żądaniami.'
+    );
+  }
+  return { mutations, removed: removes.length, created: creates.length };
+}
+
+/**
+ * Zbuduj operacje wprowadzające `custom_label_<index> = <value>` jako WYKLUCZONY.
+ *
+ * Czysta funkcja — żadnego wywołania API, więc plan da się obejrzeć i przetestować
+ * offline. Kolejność operacji jest istotna i jest tu zagwarantowana:
+ * usunięcia idą od liści w górę, tworzenia od korzenia w dół, wszystko w JEDNYM
+ * mutate (identyfikatory tymczasowe rozwiązują się tylko w obrębie jednego
+ * żądania, a częściowa przebudowa zostawiłaby grupę bez drzewa).
+ *
+ * @param {Array<object>} tree - drzewo z `getListingFilterTree`
+ * @param {{mode: string, node: object|null, root: object|null}} plan - werdykt `checkLabelExclusion`
+ * @param {{customerId: string, assetGroupId: string, index: number, value: string}} opts
+ * @returns {{mutations: Array<object>, removed: number, created: number}}
+ */
+export function buildLabelExclusionMutations(tree, plan, opts) {
+  const { customerId, assetGroupId, index, value } = opts;
+  const assetGroup = `customers/${customerId}/assetGroups/${assetGroupId}`;
+  const entity = 'AssetGroupListingGroupFilter';
+
+  let seq = 0;
+  const temp = () => `customers/${customerId}/assetGroupListingGroupFilters/${assetGroupId}~${-(++seq)}`;
+  const src = (n) => (n.listingSource === null || n.listingSource === undefined ? {} : { listing_source: n.listingSource });
+  const labelCase = (withValue) => ({
+    product_custom_attribute: {
+      index: index + CUSTOM_LABEL_ENUM_OFFSET,
+      ...(withValue ? { value } : {}),
+    },
+  });
+  const create = (resource) => ({ entity, operation: 'create', resource });
+  const remove = (resourceName) => ({ entity, operation: 'remove', resource: resourceName });
+
+  if (plan.mode === 'flip') {
+    const node = plan.node;
+    return {
+      mutations: [
+        remove(node.resourceName),
+        create({
+          asset_group: assetGroup,
+          type: 4,
+          ...src(node),
+          parent_listing_group_filter: node.parentResourceName,
+          case_value: labelCase(true),
+        }),
+      ],
+      removed: 1,
+      created: 1,
+    };
+  }
+
+  const root = plan.root;
+
+  if (plan.mode === 'add') {
+    return {
+      mutations: [
+        create({
+          asset_group: assetGroup,
+          type: 4,
+          ...src(root),
+          parent_listing_group_filter: root.resourceName,
+          case_value: labelCase(true),
+        }),
+      ],
+      removed: 0,
+      created: 1,
+    };
+  }
+
+  // ── rebuild ───────────────────────────────────────────────────────────────
+  return planujPrzebudowe(tree, root, {
+    assetGroup, entity, temp, src,
+    podzialBezWartosci: labelCase(false),
+    wykluczenia: [labelCase(true)],
+  });
+}
+
+/**
+ * Ensure one PMax asset group excludes `custom_label_<index> = <value>`.
+ *
+ * @param {string} customerId
+ * @param {string|number} assetGroupId
+ * @param {{index: number, value: string}} label
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @param {{snapshotPath?: string}} [opts]
+ * @returns {Promise<object>} plan (dry-run, sprawdzony przez Google) albo wynik mutate
+ */
+export async function addLabelExclusion(customerId, assetGroupId, label, dryRun = false, loginCustomerId, opts = {}) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  const cleanAssetGroupId = String(assetGroupId ?? '').replace(/[^0-9]/g, '');
+  if (!cleanAssetGroupId) throw new Error('add-label-exclusion wymaga --asset-group=<ID grupy plików>.');
+
+  const surowe = await getListingFilterTree(cleanCustomerId, cleanAssetGroupId, { loginCustomerId });
+  const tree = inferCatchAllDimensions(surowe);
+  const plan = checkLabelExclusion(tree, label);
+  if (!plan.ok) throw new Error(`🛑 ${plan.reason}`);
+
+  const assetGroupName = (tree[0] && tree[0].assetGroupName) || '';
+  const etykieta = `custom_label_${label.index} = "${label.value}"`;
+  const base = {
+    assetGroupId: cleanAssetGroupId,
+    assetGroupName,
+    label: etykieta,
+    mode: plan.mode,
+    nodesBefore: tree.length,
+  };
+
+  if (plan.mode === 'noop') {
+    console.log(`[Mutator] ${assetGroupName}: ${etykieta} już jest wykluczone — nic do zrobienia.`);
+    return { success: true, dryRun, changed: 0, noop: true, ...base };
+  }
+
+  const { mutations, removed, created } = buildLabelExclusionMutations(tree, plan, {
+    customerId: cleanCustomerId,
+    assetGroupId: cleanAssetGroupId,
+    index: Number(label.index),
+    value: String(label.value).trim(),
+  });
+
+  const warning = plan.mode === 'rebuild'
+    ? `Przebudowa: ${removed} węzłów zostaje odtworzonych pod gałęzią „wszystko inne". `
+      + 'Zakres kierowania nie zmienia się, ale węzły dostają NOWE id, więc ich statystyki w panelu startują od zera '
+      + '(historia kampanii i produktów zostaje nietknięta).'
+    : 'Węzeł dostanie NOWE id, więc jego historia statystyk w panelu zaczyna się od zera.';
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}${assetGroupName}: ${etykieta} → WYKLUCZONE (${plan.mode}, ${removed} usunięć + ${created} utworzeń)...`);
+
+  const customer = getCustomer(cleanCustomerId, loginCustomerId);
+
+  if (dryRun) {
+    const check = await validateWithApi(customer, [mutations]);
+    return {
+      success: check.ok,
+      dryRun: true,
+      ...base,
+      removed,
+      created,
+      warning,
+      googleValidation: check.ok ? 'OK' : `ODRZUCONE: ${check.error}`,
+    };
+  }
+
+  // Snapshot PRZED mutacją — jedyna droga powrotu do poprzedniego kształtu drzewa.
+  // Zapis musi się udać, zanim cokolwiek pójdzie do API.
+  let snapshot = null;
+  if (opts.snapshotPath) {
+    writeFileSync(opts.snapshotPath, JSON.stringify({
+      customerId: cleanCustomerId, assetGroupId: cleanAssetGroupId, assetGroupName,
+      savedAt: new Date().toISOString(), tree,
+    }, null, 1));
+    snapshot = opts.snapshotPath;
+    console.log(`[Mutator] Snapshot drzewa sprzed zmiany: ${snapshot}`);
+  }
+
+  try {
+    const response = await customer.mutateResources(mutations);
+    return {
+      success: true,
+      dryRun: false,
+      changed: removed + created,
+      ...base,
+      removed,
+      created,
+      snapshot,
+      warning,
+      resourceNames: mutatedResourceNames([response]),
+    };
+  } catch (error) {
+    throw new Error(`Nie udało się wprowadzić wykluczenia etykiety: ${unpackError(error)}`);
+  }
+}
+
+/**
+ * Zbuduj operacje wykluczające konkretne ID PRODUKTÓW z jednej grupy plików PMax.
+ *
+ * Czysta funkcja — żadnego wywołania API, więc plan da się obejrzeć i przetestować offline.
+ *
+ * ID zapisujemy MAŁYMI LITERAMI, bo tak trzyma je API (Google Ads raportuje
+ * `shopify_pl_…` tam, gdzie feed ma `shopify_PL_…`). Wysłanie wersji z feedu utworzyłoby
+ * drugi węzeł obok istniejącego przy każdym ponownym uruchomieniu.
+ *
+ * @param {Array<object>} tree - drzewo z `getListingFilterTree`
+ * @param {object} plan - werdykt `checkItemExclusion`
+ * @param {{customerId: string, assetGroupId: string}} opts
+ * @returns {{mutations: Array<object>, removed: number, created: number}}
+ */
+export function buildItemExclusionMutations(tree, plan, opts) {
+  const { customerId, assetGroupId } = opts;
+  const assetGroup = `customers/${customerId}/assetGroups/${assetGroupId}`;
+  const entity = 'AssetGroupListingGroupFilter';
+
+  let seq = 0;
+  const temp = () => `customers/${customerId}/assetGroupListingGroupFilters/${assetGroupId}~${-(++seq)}`;
+  const src = (n) => (n.listingSource === null || n.listingSource === undefined ? {} : { listing_source: n.listingSource });
+  const itemCase = (value) => ({ product_item_id: value ? { value } : {} });
+  const create = (resource) => ({ entity, operation: 'create', resource });
+  const remove = (resourceName) => ({ entity, operation: 'remove', resource: resourceName });
+
+  if (plan.mode === 'rebuild') {
+    // Wszystkie żądane ID lądują jako wykluczone liście NOWEGO pierwszego podziału.
+    // Stare drzewo jest odtwarzane wiernie pod gałęzią „wszystko inne" — jeżeli miało
+    // własny węzeł na któreś z tych ID, jest on odtąd nieosiągalny (produkt trafia
+    // najpierw w wykluczenie przy korzeniu), ale nie zmienia zakresu kierowania.
+    const wszystkie = [...plan.doPrzelaczenia.map((n) => String(n.dimension.value).toLowerCase()), ...plan.doDodania];
+    return planujPrzebudowe(tree, plan.root, {
+      assetGroup, entity, temp, src,
+      podzialBezWartosci: itemCase(null),
+      wykluczenia: wszystkie.map((id) => itemCase(id)),
+    });
+  }
+
+  // ── apply: korzeń już dzieli po product_item_id ───────────────────────────
+  const mutations = [];
+  for (const node of plan.doPrzelaczenia) {
+    // API nie pozwala zmienić typu węzła, więc przełączenie to usunięcie starego
+    // liścia i utworzenie przeciwnego — tak samo robi to panel.
+    mutations.push(remove(node.resourceName));
+    mutations.push(create({
+      asset_group: assetGroup,
+      type: 4,
+      ...src(node),
+      parent_listing_group_filter: node.parentResourceName,
+      case_value: itemCase(String(node.dimension.value).toLowerCase()),
+    }));
+  }
+  for (const id of plan.doDodania) {
+    mutations.push(create({
+      asset_group: assetGroup,
+      type: 4,
+      ...src(plan.root),
+      parent_listing_group_filter: plan.root.resourceName,
+      case_value: itemCase(id),
+    }));
+  }
+  if (mutations.length > MUTATE_CHUNK) {
+    throw new Error(
+      `🛑 To ${mutations.length} operacji, a jedno żądanie mieści ${MUTATE_CHUNK}. Podziel listę ID na mniejsze partie.`
+    );
+  }
+  return { mutations, removed: plan.doPrzelaczenia.length, created: plan.doPrzelaczenia.length + plan.doDodania.length };
+}
+
+/**
+ * Wyklucz konkretne ID produktów z jednej grupy plików Performance Max.
+ *
+ * Droga bez feedu: wykluczenie siedzi w drzewie filtrów kampanii, więc nie wymaga ani
+ * Merchant Center, ani etykiety. Cena jest taka, że drzewo puchnie o jeden węzeł na
+ * WARIANT i utrzymuje się je w każdej grupie plików osobno — przy katalogu, w którym
+ * te same produkty wyklucza się we wszystkich grupach, tańsza jest droga przez etykietę
+ * (`addLabelExclusion`), która działa na całe konto jednym węzłem na grupę.
+ *
+ * @param {string} customerId
+ * @param {string|number} assetGroupId
+ * @param {string[]} itemIds
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @param {{snapshotPath?: string}} [opts]
+ * @returns {Promise<object>} plan (dry-run, sprawdzony przez Google) albo wynik mutate
+ */
+export async function addItemExclusion(customerId, assetGroupId, itemIds, dryRun = false, loginCustomerId, opts = {}) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  const cleanAssetGroupId = String(assetGroupId ?? '').replace(/[^0-9]/g, '');
+  if (!cleanAssetGroupId) throw new Error('add-item-exclusion wymaga --asset-group=<ID grupy plików>.');
+
+  const surowe = await getListingFilterTree(cleanCustomerId, cleanAssetGroupId, { loginCustomerId });
+  const tree = inferCatchAllDimensions(surowe);
+  const plan = checkItemExclusion(tree, itemIds);
+  if (!plan.ok) throw new Error(`🛑 ${plan.reason}`);
+
+  const assetGroupName = (tree[0] && tree[0].assetGroupName) || '';
+  const base = {
+    assetGroupId: cleanAssetGroupId,
+    assetGroupName,
+    mode: plan.mode,
+    nodesBefore: tree.length,
+    juzWykluczone: plan.juzWykluczone.length,
+    doPrzelaczenia: plan.doPrzelaczenia.length,
+    doDodania: plan.doDodania.length,
+  };
+
+  if (plan.mode === 'noop') {
+    console.log(`[Mutator] ${assetGroupName}: wszystkie ${plan.juzWykluczone.length} ID już wykluczone — nic do zrobienia.`);
+    return { success: true, dryRun, changed: 0, noop: true, ...base };
+  }
+
+  const { mutations, removed, created } = buildItemExclusionMutations(tree, plan, {
+    customerId: cleanCustomerId,
+    assetGroupId: cleanAssetGroupId,
+  });
+
+  const warning = plan.mode === 'rebuild'
+    ? `PRZEBUDOWA: ${removed} węzłów zostaje odtworzonych pod gałęzią „wszystko inne". Zakres kierowania nie zmienia się, `
+      + 'ale węzły dostają NOWE id, więc ich statystyki w panelu startują od zera (historia kampanii i produktów zostaje '
+      + 'nietknięta). Gdy ta grupa dzieli się dziś po etykiecie niestandardowej, TAŃSZE jest wykluczenie przez etykietę '
+      + '(--action=add-label-exclusion): jeden węzeł zamiast przebudowy całego drzewa.'
+    : `Dokładamy ${plan.doDodania.length} wykluczeń i przełączamy ${plan.doPrzelaczenia.length} — przełączone węzły dostają `
+      + 'NOWE id, więc ich historia statystyk w panelu zaczyna się od zera.';
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}${assetGroupName}: ${plan.doPrzelaczenia.length + plan.doDodania.length} ID → WYKLUCZONE (${plan.mode}, ${removed} usunięć + ${created} utworzeń)...`);
+
+  const customer = getCustomer(cleanCustomerId, loginCustomerId);
+
+  if (dryRun) {
+    const check = await validateWithApi(customer, [mutations]);
+    return {
+      success: check.ok,
+      dryRun: true,
+      ...base,
+      removed,
+      created,
+      warning,
+      googleValidation: check.ok ? 'OK' : `ODRZUCONE: ${check.error}`,
+    };
+  }
+
+  // Snapshot PRZED mutacją — jedyna droga powrotu do poprzedniego kształtu drzewa.
+  // Zapis musi się udać, zanim cokolwiek pójdzie do API.
+  let snapshot = null;
+  if (opts.snapshotPath) {
+    writeFileSync(opts.snapshotPath, JSON.stringify({
+      customerId: cleanCustomerId, assetGroupId: cleanAssetGroupId, assetGroupName,
+      savedAt: new Date().toISOString(), tree,
+    }, null, 1));
+    snapshot = opts.snapshotPath;
+    console.log(`[Mutator] Snapshot drzewa sprzed zmiany: ${snapshot}`);
+  }
+
+  const wynik = await customer.mutateResources(mutations);
+  const changed = wynik?.mutate_operation_responses?.length ?? mutations.length;
+  console.log(`[Mutator] ✓ ${assetGroupName}: gotowe (${changed} operacji).`);
+  return { success: true, dryRun: false, changed, removed, created, snapshot, warning, ...base };
 }

@@ -37,6 +37,302 @@ export function assertNotRemoval(status) {
   }
 }
 
+/* ────────────────────────────────────────────────────────────────────────────
+ * The one carve-out from NO_DELETE_POLICY: listing-group filter leaves
+ *
+ * Every other resource the connector touches has a `status`, so "retire it"
+ * means "pause it" and nothing is ever destroyed. A listing-group filter node
+ * has no status field at all — and `type` (UNIT_INCLUDED / UNIT_EXCLUDED) is
+ * IMMUTABLE in the API. So the only way to stop excluding a product type is to
+ * remove that node and create its opposite. Google's own UI does exactly this.
+ *
+ * The carve-out is kept as narrow as it can be:
+ *   - leaves only, never a SUBDIVISION (removing one cascades to its branch);
+ *   - never the ROOT;
+ *   - the replacement keeps the same parent and the same case_value, so the
+ *     parent stays fully partitioned — the tree's shape is unchanged, one leaf
+ *     just changes sign;
+ *   - the asset group must still include something afterwards.
+ *
+ * What is genuinely lost: the node's id changes, so per-node historical stats in
+ * the UI start from zero. The campaign- and product-level history is untouched.
+ * Callers must surface that in the dry-run rather than bury it.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** Filter-node types, mirrored from queries.js so safety stays import-free. */
+const UNIT_INCLUDED = 3;
+const UNIT_EXCLUDED = 4;
+
+/** Target keyword → the node type it means. */
+export const LISTING_FLIP_TARGETS = { INCLUDED: UNIT_INCLUDED, EXCLUDED: UNIT_EXCLUDED };
+
+/**
+ * Decide whether one listing-filter leaf may be flipped, given the whole tree.
+ *
+ * Pure: `node` and `tree` are plain objects from `getListingFilterTree`, so the
+ * whole decision is testable offline. Returns a reason instead of throwing, so a
+ * simulation can report the objection.
+ *
+ * @param {object} node - the node to flip
+ * @param {Array<object>} tree - every node of the same asset group
+ * @param {'INCLUDED'|'EXCLUDED'} to - target state
+ * @returns {{ok: boolean, reason: string|null, targetType: number|null, noop: boolean}}
+ */
+export function checkListingFilterFlip(node, tree, to) {
+  const no = (reason) => ({ ok: false, reason, targetType: null, noop: false });
+  const targetType = LISTING_FLIP_TARGETS[String(to || '').toUpperCase()];
+  if (!targetType) {
+    return no(`Nieprawidłowy cel "${to}". Dozwolone: INCLUDED, EXCLUDED.`);
+  }
+  if (!node) return no('Nie wskazano węzła do przełączenia.');
+
+  if (!node.parentResourceName) {
+    return no(
+      `Węzeł ${node.id} to KORZEŃ drzewa — korzenia nie da się przełączyć. ` +
+      'Korzeń jest podziałem, a nie liściem; zmiana zakresu całej grupy plików to przebudowa drzewa w panelu.'
+    );
+  }
+  if (node.type !== UNIT_INCLUDED && node.type !== UNIT_EXCLUDED) {
+    return no(
+      `Węzeł ${node.id} to ${node.typeName}, a nie liść (UNIT_INCLUDED/UNIT_EXCLUDED). ` +
+      'Connector nie rusza podziałów: usunięcie podziału kasuje całą gałąź pod nim. Zrób to ręcznie w panelu.'
+    );
+  }
+  if ((node.childIds || []).length > 0) {
+    return no(
+      `Węzeł ${node.id} ma ${node.childIds.length} dzieci — to nie jest liść. Nic nie zmieniono.`
+    );
+  }
+  if (node.type === targetType) {
+    return { ok: true, reason: null, targetType, noop: true };
+  }
+  // Excluding the last included leaf would leave the asset group serving nothing.
+  if (targetType === UNIT_EXCLUDED) {
+    const includedLeft = (tree || []).filter(
+      (n) => n.type === UNIT_INCLUDED && String(n.id) !== String(node.id)
+    ).length;
+    if (includedLeft === 0) {
+      return no(
+        `To ostatni włączony węzeł w grupie plików "${node.assetGroupName}" — po wykluczeniu grupa nie pokazywałaby żadnego produktu. ` +
+        'Jeśli chcesz wyłączyć całą grupę plików, użyj update-asset-group-status --status=PAUSED.'
+      );
+    }
+  }
+  return { ok: true, reason: null, targetType, noop: false };
+}
+
+/** Subdivision node type, mirrored from queries.js. */
+const SUBDIVISION = 2;
+
+/** How many custom labels a product feed has (custom_label_0 … custom_label_4). */
+export const CUSTOM_LABEL_COUNT = 5;
+
+/**
+ * Decide HOW a `custom_label_N = <value>` exclusion can be put into a PMax tree.
+ *
+ * Three shapes, in order of how much they disturb the group:
+ *
+ *   noop     — the node is already there and already excluded.
+ *   flip     — the node is there but included; one leaf swaps state.
+ *   add      — the root already splits on this very label, so the exclusion is
+ *              a new sibling leaf and nothing existing is touched.
+ *   rebuild  — the root splits on something else. A subdivision splits on ONE
+ *              dimension, so the label has to become the new first split and the
+ *              whole present tree moves under its "everything else" branch.
+ *
+ * `rebuild` is the reason this function exists. It is the only operation in the
+ * connector that removes criteria, and it is allowed here because in a PMax
+ * listing tree removal is NOT destructive in the way it is elsewhere: the tree is
+ * pure targeting configuration, the caller snapshots it first, and re-running the
+ * same shape restores it. Spend history lives on the campaign and the products,
+ * not on the filter nodes — what the rebuilt nodes lose is their per-node stats,
+ * which the caller is told about.
+ *
+ * Pure: `tree` is what `getListingFilterTree` returns, so the whole decision is
+ * testable offline. Returns a reason instead of throwing.
+ *
+ * @param {Array<object>} tree - every node of one asset group
+ * @param {{index: number, value: string}} label - label slot (0-4) and its value
+ * @returns {{ok: boolean, reason: string|null, mode: string|null, node: object|null, root: object|null}}
+ */
+export function checkLabelExclusion(tree, label) {
+  const no = (reason) => ({ ok: false, reason, mode: null, node: null, root: null });
+  const index = Number(label?.index);
+  const value = String(label?.value ?? '').trim();
+
+  if (!Number.isInteger(index) || index < 0 || index > CUSTOM_LABEL_COUNT - 1) {
+    return no(`Nieprawidłowa etykieta ${label?.index}. Dozwolone: 0-${CUSTOM_LABEL_COUNT - 1} (custom_label_0 … custom_label_${CUSTOM_LABEL_COUNT - 1}).`);
+  }
+  if (!value) return no('Podaj wartość etykiety, np. --label-value="wyklucz".');
+  if (!Array.isArray(tree) || tree.length === 0) {
+    return no('Ta grupa plików nie ma drzewa filtrów (albo nie istnieje / jest usunięta). Nic nie zmieniono.');
+  }
+
+  // The API reports the label slot as a ProductCustomAttributeIndex enum, where
+  // INDEX0 = 2 — the two low values are UNSPECIFIED and UNKNOWN. Reading it as
+  // the label number is the classic off-by-two here, so normalise in one place.
+  const slotOf = (node) => Number(node?.dimension?.index) - 2;
+  const isLabelNode = (node) => node?.dimension?.kind === 'product_custom_attribute';
+
+  const existing = tree.find((n) => isLabelNode(n) && slotOf(n) === index && n.dimension.value === value);
+  if (existing) {
+    if (existing.type === SUBDIVISION) {
+      return no(
+        `Węzeł custom_label_${index} = "${value}" jest PODZIAŁEM, nie liściem — pod nim wisi cała gałąź. ` +
+        'Connector nie wykluczy podziału. Zrób to ręcznie w panelu.'
+      );
+    }
+    if (existing.type === UNIT_EXCLUDED) {
+      return { ok: true, reason: null, mode: 'noop', node: existing, root: null };
+    }
+    return { ok: true, reason: null, mode: 'flip', node: existing, root: null };
+  }
+
+  const root = tree.find((n) => !n.parentResourceName);
+  if (!root) return no('W drzewie nie ma korzenia — odczyt jest niepełny. Nic nie zmieniono.');
+  if (root.type !== SUBDIVISION) {
+    return no(
+      `Korzeń tej grupy plików to ${root.typeName}, a nie podział. ` +
+      'Taki kształt (cały katalog jednym węzłem) nie jest tu obsługiwany — dodaj pierwszy podział w panelu, potem wróć.'
+    );
+  }
+  if (!tree.some((n) => n.type === UNIT_INCLUDED)) {
+    return no('W tej grupie plików nie ma ani jednego włączonego węzła — nie ma czego chronić przed etykietą. Sprawdź grupę w panelu.');
+  }
+
+  const rootKids = tree.filter((n) => n.parentResourceName === root.resourceName);
+  if (rootKids.length === 0) return no('Korzeń nie ma dzieci — odczyt jest niepełny. Nic nie zmieniono.');
+
+  // Every child of one subdivision splits on the same dimension, so the first
+  // child settles what the root splits on today.
+  const rootSplitsOnThisLabel = rootKids.every((n) => isLabelNode(n) && slotOf(n) === index);
+  if (!rootSplitsOnThisLabel) {
+    const kolizja = kolizjaWymiaru(tree, root, 'product_custom_attribute', `custom_label_${index}`,
+      (n) => slotOf(n) === index);
+    if (kolizja) return no(kolizja);
+  }
+  return { ok: true, reason: null, mode: rootSplitsOnThisLabel ? 'add' : 'rebuild', node: null, root };
+}
+
+/**
+ * PMax zabrania, by ten sam WYMIAR powtórzył się na ścieżce od korzenia do liścia
+ * (`SAME_DIMENSION_TYPE_BETWEEN_ANCESTORS`). Przebudowa wstawia nowy wymiar NAD całym
+ * dotychczasowym drzewem, więc jeśli ten wymiar już gdzieś w drzewie występuje, plan jest
+ * z góry nieważny — Google odrzuca go setką nieczytelnych błędów na operację.
+ *
+ * Wyłapujemy to przed wysyłką i mówimy wprost, co z tym zrobić. `pasuje` pozwala zawęzić
+ * kolizję do konkretnego slotu etykiety (dwie różne etykiety to dwa różne wymiary).
+ *
+ * @returns {string|null} powód odmowy albo null, gdy przebudowa jest możliwa
+ */
+function kolizjaWymiaru(tree, root, kind, opisWymiaru, pasuje = () => true) {
+  const wStarym = (tree || []).filter((n) => n !== root && n.parentResourceName
+    && n?.dimension?.kind === kind && pasuje(n));
+  if (!wStarym.length) return null;
+  return `Ta grupa plików dzieli się już gdzieś po ${opisWymiaru} (${wStarym.length} `
+    + `${wStarym.length === 1 ? 'węzeł' : 'węzłów'}), a przebudowa musiałaby wstawić ten sam wymiar NAD nimi. `
+    + 'Performance Max na to nie pozwala: ten sam wymiar nie może wystąpić dwa razy na jednej ścieżce drzewa. '
+    + 'Wyklucz przez etykietę z feedu (--action=add-label-exclusion) albo przebuduj drzewo w panelu.';
+}
+
+/**
+ * Decide how to exclude a set of PRODUCT ITEM IDs from one PMax asset group.
+ *
+ * Sibling of `checkLabelExclusion`, and deliberately the same four verdicts — the
+ * difference is that a label is one value while item ids come in batches, so the
+ * plan carries three buckets instead of one node:
+ *
+ *   noop    - every id is already excluded.
+ *   apply   - the root already splits on product_item_id, so each id is either
+ *             flipped (present and included) or added next to its siblings.
+ *   rebuild - the root splits on some other dimension, so product_item_id has to
+ *             become the new first split and the whole present tree moves under
+ *             its "everything else" branch.
+ *
+ * `rebuild` is expensive and worth avoiding: when the group already splits by a
+ * custom label, excluding through THAT label (`checkLabelExclusion`) touches one
+ * node instead of rebuilding the tree. The caller is told so.
+ *
+ * Item ids are compared and emitted in LOWER CASE. The API stores them lowercased
+ * (Google Ads reports `shopify_pl_…` where the feed holds `shopify_PL_…`), so a
+ * case-sensitive comparison would miss existing nodes and a second run would pile
+ * up duplicates.
+ *
+ * Pure: `tree` is what `getListingFilterTree` returns, so the whole decision is
+ * testable offline. Returns a reason instead of throwing.
+ *
+ * @param {Array<object>} tree - every node of one asset group
+ * @param {string[]} itemIds - product item ids (offer ids) to exclude
+ * @returns {{ok: boolean, reason: string|null, mode: string|null, root: object|null,
+ *            juzWykluczone: string[], doPrzelaczenia: object[], doDodania: string[]}}
+ */
+export function checkItemExclusion(tree, itemIds) {
+  const no = (reason) => ({ ok: false, reason, mode: null, root: null, juzWykluczone: [], doPrzelaczenia: [], doDodania: [] });
+
+  const ids = [...new Set((Array.isArray(itemIds) ? itemIds : [])
+    .map((v) => String(v ?? '').trim().toLowerCase())
+    .filter(Boolean))];
+  if (!ids.length) return no('Podaj ID produktów: --item-ids="id1,id2" albo --input=plik.csv (kolumna item_ids).');
+  if (!Array.isArray(tree) || tree.length === 0) {
+    return no('Ta grupa plików nie ma drzewa filtrów (albo nie istnieje / jest usunięta). Nic nie zmieniono.');
+  }
+
+  const isItemNode = (n) => n?.dimension?.kind === 'product_item_id';
+  const wartosc = (n) => String(n?.dimension?.value ?? '').toLowerCase();
+
+  // Podział o tej samej wartości to nie liść — pod nim wisi gałąź, której connector
+  // nie skasuje w ciemno. Jedna taka kolizja zatrzymuje całą partię, bo wykluczenie
+  // częściowe jest gorsze niż żadne: wygląda na zrobione.
+  const kolizje = tree.filter((n) => isItemNode(n) && n.type === SUBDIVISION && ids.includes(wartosc(n)));
+  if (kolizje.length) {
+    return no(
+      `${kolizje.length} z podanych ID to PODZIAŁY, nie liście (np. "${wartosc(kolizje[0])}") — pod nimi wisi cała gałąź. `
+      + 'Connector nie wyklucza podziałów. Zrób te pozycje w panelu albo usuń je z listy.'
+    );
+  }
+
+  const liscie = new Map(tree.filter((n) => isItemNode(n) && n.type !== SUBDIVISION).map((n) => [wartosc(n), n]));
+  const juzWykluczone = ids.filter((id) => liscie.get(id)?.type === UNIT_EXCLUDED);
+  const doPrzelaczenia = ids.map((id) => liscie.get(id)).filter((n) => n && n.type === UNIT_INCLUDED);
+  const doDodania = ids.filter((id) => !liscie.has(id));
+
+  if (!doPrzelaczenia.length && !doDodania.length) {
+    return { ok: true, reason: null, mode: 'noop', root: null, juzWykluczone, doPrzelaczenia: [], doDodania: [] };
+  }
+
+  const root = tree.find((n) => !n.parentResourceName);
+  if (!root) return no('W drzewie nie ma korzenia — odczyt jest niepełny. Nic nie zmieniono.');
+  if (root.type !== SUBDIVISION) {
+    return no(
+      `Korzeń tej grupy plików to ${root.typeName}, a nie podział. `
+      + 'Taki kształt (cały katalog jednym węzłem) nie jest tu obsługiwany — dodaj pierwszy podział w panelu, potem wróć.'
+    );
+  }
+  if (!tree.some((n) => n.type === UNIT_INCLUDED)) {
+    return no('W tej grupie plików nie ma ani jednego włączonego węzła — nie ma czego chronić. Sprawdź grupę w panelu.');
+  }
+
+  const rootKids = tree.filter((n) => n.parentResourceName === root.resourceName);
+  if (rootKids.length === 0) return no('Korzeń nie ma dzieci — odczyt jest niepełny. Nic nie zmieniono.');
+
+  // Wszystkie dzieci jednego podziału dzielą po tym samym wymiarze, więc pierwsze
+  // dziecko rozstrzyga, po czym dzieli dziś korzeń.
+  const rootSplitsOnItemId = rootKids.every((n) => isItemNode(n));
+  if (!rootSplitsOnItemId) {
+    const kolizja = kolizjaWymiaru(tree, root, 'product_item_id', 'ID produktu');
+    if (kolizja) return no(kolizja);
+  }
+  return {
+    ok: true,
+    reason: null,
+    mode: rootSplitsOnItemId ? 'apply' : 'rebuild',
+    root,
+    juzWykluczone,
+    doPrzelaczenia,
+    doDodania,
+  };
+}
+
 /**
  * Percentage change from `current` to `next`.
  * Returns Infinity when there is no usable baseline (current unknown/<=0) but a

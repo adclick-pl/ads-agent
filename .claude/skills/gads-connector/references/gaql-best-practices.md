@@ -103,3 +103,14 @@ How to add a lesson: append a bullet under the right section in the form
   therefore **strips all pins** — don't use it on ads that rely on pinned slots;
   build the pin-preserving op instead. Use `{ validate_only: true }` as a true
   server-side dry-run.
+
+- **Enum fields come back as raw integers, and the integer is NOT the number in the
+  field's name** → `product_custom_attribute.index = 2` means `INDEX0`
+  (`custom_label_0`), not `custom_label_2`, because the enum starts with
+  `UNSPECIFIED = 0, UNKNOWN = 1`. Same shift applies to every enum
+  (`campaign.status`, `advertising_channel_type`, `asset_group_listing_group_filter.type`,
+  …). Misreading one of these produced a confident, completely wrong diagnosis of
+  which custom label a PMax listing group excluded. **Never infer meaning from the
+  integer — resolve it by putting the enum NAME in `WHERE`** and seeing what matches:
+  `WHERE …product_custom_attribute.index = 'INDEX0'`. Zero rows for the other names
+  is the proof.

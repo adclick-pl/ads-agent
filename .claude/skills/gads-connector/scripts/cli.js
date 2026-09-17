@@ -56,6 +56,11 @@ import {
   addListingGroups,
   createConversionActions,
   updateConversionActions,
+  updateAssetGroupStatus,
+  updateListingFilter,
+  syncListingTypes,
+  addLabelExclusion,
+  addItemExclusion,
 } from './mutator.js';
 import {
   resolveAccount, loadAccounts, registryConflicts, findAccountsFile,
@@ -292,6 +297,78 @@ Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
                           wsadowo: --input=mapa.csv (kolumny: ad_group_id,status).
                           Tym wznawiasz grupę, której create-ad-groups nie ruszy
                           (jest idempotentne i pomija istniejące).
+  update-asset-group-status
+                          Wstrzymanie/wznowienie GRUP PLIKÓW w Performance Max.
+                          Pojedynczo/lista: --asset-group=<ID[,ID]> --status=<ENABLED|PAUSED>;
+                          wsadowo: --input=mapa.csv (kolumny: asset_group_id,status).
+                          Sezonowy włącznik konta PMax. Uwaga: wstrzymanie grupy
+                          nie zatrzymuje produktów — nadal lecą z grupy zbiorczej.
+  update-listing-filter   Przełącza JEDEN liść drzewa filtrów PMax:
+                          włączony <-> wykluczony (INCLUDED <-> EXCLUDED).
+                          --asset-group=<ID> --to=<INCLUDED|EXCLUDED>
+                          + --product-type="typ produktu" albo --filter-id=<ID>.
+                          Jedyny sposób, by zdjąć wykluczenie typu produktu:
+                          API nie pozwala edytować typu węzła, więc to usunięcie
+                          starego liścia i utworzenie przeciwnego (tak robi panel).
+                          Symulacja jest walidowana przez Google (validate_only).
+                          Rusza tylko LIŚCIE, nigdy podziałów ani korzenia.
+  sync-listing-types      Dorównuje węzły product_type grup plików PMax do feedu:
+                          dokłada brakujące nazwy kategorii, przełącza istniejące
+                          i sprząta martwe (takie, których w feedzie już nie ma).
+                          --input=mapa.csv (kolumny: asset_group_id,product_type,action,
+                          gdzie action = INCLUDED | EXCLUDED | REMOVE) — jeden plik
+                          obsługuje wiele grup plików, każda w osobnym żądaniu.
+                          Skrót dla jednej grupy: --asset-group=<ID>
+                          --types="typ1,typ2" --to=<INCLUDED|EXCLUDED|REMOVE>.
+                          PO CO: drzewo filtrów trzyma nazwy kategorii przepisane
+                          z ręki, a feed potrafi je zmienić z dnia na dzień. Węzeł
+                          z nieistniejącą nazwą nie zgłasza błędu — po prostu nic
+                          nie łapie: grupa plików głodnieje, a wykluczenie przestaje
+                          chronić, bo produkty spadają do „wszystko inne".
+                          Akcja update-listing-filter tego nie zrobi — przełącza WYŁĄCZNIE
+                          liść, który już istnieje.
+                          Odmawia, gdy typy wiszą pod różnymi podziałami, gdy usunięcie
+                          zabrałoby podwęzły i gdy po zmianie w gałęzi nie zostałby ani
+                          jeden włączony typ przy wykluczonym „wszystko inne".
+                          Snapshot drzewa przed zmianą (--snapshot=przedrostek).
+                          Symulacja jest walidowana przez Google (validate_only).
+  add-label-exclusion     Dopilnowuje, by grupa plików PMax WYKLUCZAŁA etykietę
+                          niestandardową z feedu (typowo: śmieci oznaczone
+                          etykietą custom_label_0 = wyklucz).
+                          --asset-group=<ID> --label-value="wyklucz"
+                          [--label-index=0..4, domyślnie 0]
+                          Sam dobiera najmniejszą możliwą zmianę: nic (już jest),
+                          przełączenie liścia, dołożenie liścia obok istniejącego
+                          podziału po tej etykiecie — albo PRZEBUDOWĘ, gdy korzeń
+                          dzieli po czym innym: etykieta staje się pierwszym
+                          podziałem, a całe obecne drzewo zjeżdża pod jej gałąź
+                          „wszystko inne". Zakres kierowania zostaje ten sam.
+                          Jedna z trzech akcji, które usuwają kryteria (obok
+                          add-item-exclusion i sync-listing-types) — wolno im,
+                          bo drzewo filtrów to sama konfiguracja kierowania, a przed
+                          zmianą leci snapshot (--snapshot=plik.json, domyślnie
+                          listing-tree-<ID>-<data>.json w katalogu roboczym).
+                          Węzły dostają nowe id, więc ich statystyki startują od zera;
+                          historia kampanii i produktów zostaje nietknięta.
+                          Symulacja jest walidowana przez Google (validate_only).
+  add-item-exclusion      Wyklucza KONKRETNE PRODUKTY (po product_item_id) z grupy
+                          plików PMax — droga bez feedu i bez etykiety.
+                          --asset-group=<ID> + --item-ids="id1,id2"
+                          albo --input=plik.csv (kolumna item_ids; ID rozdziel
+                          spacją, przecinkiem albo | ; wiele wierszy się skleja).
+                          ID trafiają do API MAŁYMI literami — tak je trzyma
+                          Google Ads, choć feed bywa pisany inaczej; bez tego
+                          każde kolejne uruchomienie dokładałoby duplikaty.
+                          Sam dobiera najmniejszą możliwą zmianę: nic (już
+                          wykluczone), przełączenie liścia, dołożenie liścia obok
+                          istniejącego podziału po item_id — albo PRZEBUDOWĘ, gdy
+                          korzeń dzieli po czym innym. Uwaga: drzewo rośnie o jeden
+                          węzeł na WARIANT i utrzymuje się je w każdej grupie plików
+                          osobno, więc przy wykluczeniach obejmujących całe konto
+                          tańszy jest --action=add-label-exclusion.
+                          Usuwa kryteria na tych samych zasadach co
+                          add-label-exclusion (snapshot przed zmianą: --snapshot=).
+                          Symulacja jest walidowana przez Google (validate_only).
   update-budget           Zmiana budżetu dziennego (--budget-id, --amount).
                           SafetyLimits blokuje skok > ${DEFAULT_MAX_BUDGET_CHANGE_PCT}% — użyj --force, by wymusić.
   update-bidding          Zmiana STRATEGII STAWEK istniejącej kampanii.
@@ -431,6 +508,10 @@ Opcje:
   --login-customer-id=<ID>    MCC nadrzędny (nadpisuje accounts.json / config).
   --days=<n>                  Zakres dni (domyślnie 30; liczony w strefie konta).
   --min-cost=<x>              Minimalny koszt dla get-search-terms.
+  --item-ids="a,b"            ID produktów do wykluczenia (add-item-exclusion).
+  --label-value="wyklucz"     Wartość etykiety do wykluczenia (add-label-exclusion).
+  --label-index=<0-4>         Który custom_label (domyślnie 0).
+  --snapshot=<plik.json>      Gdzie zapisać drzewo sprzed przebudowy.
   --query="<GAQL>"            Zapytanie GAQL (dla raw-query).
   --keywords="a,b"            Słowa-zalążki dla keyword-ideas; lub frazy do add-negatives (po przecinku).
   --match-type=<typ>          OBOWIĄZKOWE dla add-negatives: EXACT | PHRASE | BROAD (wybierz świadomie).
@@ -466,6 +547,7 @@ Przykłady:
   node scripts/cli.js --action=keyword-ideas --customer=1234567890 --url="https://example.com/sklep" --geo=2616 --language=1030 --auto
   node scripts/cli.js --action=get-campaigns --customer=1234567890 --days=30 --json
   node scripts/cli.js --action=raw-query --account=client-one --query="SELECT campaign.name, metrics.cost_micros FROM campaign WHERE segments.date DURING LAST_30_DAYS" --json
+  node scripts/cli.js --action=add-item-exclusion --account=zielonyogrod --asset-group=987654321 --item-ids="shopify_pl_1_2,shopify_pl_1_3"
   node scripts/cli.js --action=update-budget --customer=1234567890 --budget-id=111222333 --amount=150.00
   node scripts/cli.js --action=update-budget --customer=1234567890 --budget-id=111222333 --amount=150.00 --commit
   node scripts/cli.js --action=update-bidding --customer=1234567890 --campaign=987654321 --strategy=MAXIMIZE_CONVERSION_VALUE
@@ -853,6 +935,84 @@ async function main() {
       console.log(JSON.stringify(result, null, 2));
     }
 
+    else if (action === 'update-asset-group-status') {
+      let items = [];
+      if (args.input) {
+        const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+        items = rows.map((r) => ({
+          assetGroupId: r.asset_group_id || r.id || '',
+          status: r.status || args.status || '',
+        }));
+      } else if (args['asset-group']) {
+        items = String(args['asset-group']).split(',').map((id) => ({ assetGroupId: id.trim(), status: args.status || '' }));
+      }
+      if (items.length === 0) {
+        throw new Error('update-asset-group-status wymaga --asset-group=<ID[,ID]> --status=<ENABLED|PAUSED> albo --input=mapa.csv (kolumny: asset_group_id,status)');
+      }
+      const result = await updateAssetGroupStatus(customerId, items, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'update-listing-filter') {
+      if (!args['asset-group']) throw new Error('update-listing-filter wymaga --asset-group=<ID grupy plików>.');
+      if (!args.to) throw new Error('update-listing-filter wymaga --to=<INCLUDED|EXCLUDED>.');
+      const selector = { filterId: args['filter-id'], productType: args['product-type'] };
+      if (!selector.filterId && !selector.productType) {
+        throw new Error('update-listing-filter wymaga --product-type="typ produktu" albo --filter-id=<ID węzła>.');
+      }
+      const result = await updateListingFilter(
+        customerId, args['asset-group'], selector, args.to, dryRun, loginCustomerId,
+      );
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'sync-listing-types') {
+      // Jeden plik może obsłużyć kilka grup plików naraz — po to, żeby przebudowa
+      // kategorii w feedzie była JEDNYM przebiegiem, a nie serią ręcznych wywołań.
+      const rows = args.input
+        ? parseCsv(readFileSync(path.resolve(args.input), 'utf8'))
+        : String(args.types || '').split(',').map((t) => t.trim()).filter(Boolean)
+          .map((t) => ({ asset_group_id: args['asset-group'], product_type: t, action: args.to }));
+      if (!rows.length) {
+        throw new Error('sync-listing-types wymaga --input=mapa.csv (kolumny: asset_group_id,product_type,action) '
+          + 'albo --asset-group=<ID> --types="typ1,typ2" --to=<INCLUDED|EXCLUDED|REMOVE>.');
+      }
+      const byGroup = new Map();
+      rows.forEach((r, i) => {
+        const ag = String(r.asset_group_id || args['asset-group'] || '').replace(/[^0-9]/g, '');
+        if (!ag) throw new Error(`Wiersz ${i + 1}: brak asset_group_id (i nie podano --asset-group).`);
+        if (!byGroup.has(ag)) byGroup.set(ag, []);
+        byGroup.get(ag).push({ productType: r.product_type, to: r.action || args.to });
+      });
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const results = [];
+      for (const [ag, items] of byGroup) {
+        // Snapshot per grupa plików: każda ma własne drzewo i własną drogę powrotu.
+        const snapshotPath = dryRun ? null
+          : path.resolve(args.snapshot ? `${args.snapshot}-${ag}.json` : `listing-tree-${ag}-${stamp}.json`);
+        results.push(await syncListingTypes(customerId, ag, items, dryRun, loginCustomerId, { snapshotPath }));
+      }
+      console.log(JSON.stringify(results.length === 1 ? results[0] : results, null, 2));
+    }
+
+    else if (action === 'add-label-exclusion') {
+      if (!args['asset-group']) throw new Error('add-label-exclusion wymaga --asset-group=<ID grupy plików>.');
+      if (!args['label-value']) throw new Error('add-label-exclusion wymaga --label-value="wyklucz".');
+      const label = {
+        index: args['label-index'] === undefined ? 0 : Number(args['label-index']),
+        value: args['label-value'],
+      };
+      // Snapshot ma sens tylko przy realnym zapisie, ale nazwę ustalamy zawsze,
+      // żeby symulacja pokazała, gdzie plik wyląduje.
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const snapshotPath = dryRun ? null
+        : path.resolve(args.snapshot || `listing-tree-${String(args['asset-group']).replace(/[^0-9]/g, '')}-${stamp}.json`);
+      const result = await addLabelExclusion(
+        customerId, args['asset-group'], label, dryRun, loginCustomerId, { snapshotPath },
+      );
+      console.log(JSON.stringify(result, null, 2));
+    }
+
     else if (action === 'update-keyword-status') {
       let items = [];
       if (args.input) {
@@ -872,6 +1032,30 @@ async function main() {
         throw new Error(`🛑 ${bad.length} pozycji bez formatu adGroupId~criterionId (np. 158815334092~300772940111). Samo ID kryterium nie identyfikuje słowa jednoznacznie.`);
       }
       const result = await updateKeywordStatus(customerId, items, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'add-item-exclusion') {
+      if (!args['asset-group']) throw new Error('add-item-exclusion wymaga --asset-group=<ID grupy plików>.');
+      // ID mogą przyjść z flagi albo z CSV audytu produktów, gdzie jedna komórka
+      // trzyma wszystkie warianty produktu. Rozdzielamy po spacji, przecinku i "|".
+      let itemIds = [];
+      if (args.input) {
+        const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+        itemIds = rows.flatMap((r) => String(r.item_ids || r.item_id || '').split(/[\s,|]+/));
+      } else if (args['item-ids']) {
+        itemIds = String(args['item-ids']).split(/[\s,|]+/);
+      }
+      itemIds = itemIds.map((v) => v.trim()).filter(Boolean);
+      if (!itemIds.length) {
+        throw new Error('add-item-exclusion wymaga --item-ids="id1,id2" albo --input=plik.csv (kolumna item_ids).');
+      }
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const snapshotPath = dryRun ? null
+        : path.resolve(args.snapshot || `listing-tree-${String(args['asset-group']).replace(/[^0-9]/g, '')}-${stamp}.json`);
+      const result = await addItemExclusion(
+        customerId, args['asset-group'], itemIds, dryRun, loginCustomerId, { snapshotPath },
+      );
       console.log(JSON.stringify(result, null, 2));
     }
 

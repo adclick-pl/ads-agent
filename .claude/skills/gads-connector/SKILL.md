@@ -191,11 +191,81 @@ node scripts/cli.js --action=update-ad-status --customer=1234567890 --ad=6705026
 # Pause / enable AD GROUPS by id
 node scripts/cli.js --action=update-ad-group-status --customer=1234567890 --ad-group=112447007410 --status=ENABLED
 
+# Pause / enable PMax ASSET GROUPS ("grupy plików") by id — the seasonal switch
+node scripts/cli.js --action=update-asset-group-status --customer=1234567890 --asset-group=4455667788 --status=ENABLED
+
+# Flip ONE leaf of a PMax listing-filter tree: excluded <-> included
+node scripts/cli.js --action=update-listing-filter --customer=1234567890 --asset-group=4455667788 --product-type="donice ogrodowe" --to=INCLUDED
+
+# Make a PMax asset group EXCLUDE a feed label (the usual "junk" switch).
+# Picks the smallest change that works; rebuilds the tree only when it must.
+node scripts/cli.js --action=add-label-exclusion --customer=1234567890 --asset-group=4455667788 --label-value="wyklucz"
+
+# Exclude SPECIFIC products from a PMax asset group, without touching the feed
+node scripts/cli.js --action=add-item-exclusion --customer=1234567890 --asset-group=4455667788 --item-ids="sku-a,sku-b"
+
 # Change a daily budget (standard currency, not micros)
 node scripts/cli.js --action=update-budget --customer=1234567890 --budget-id=111222333 --amount=150.00
 
 # Add campaign negative keywords (comma-separated; default broad match)
 node scripts/cli.js --action=add-negatives --customer=1234567890 --campaign=987654321 --keywords="darmowy,tani,za darmo"
+
+### `add-item-exclusion` — the same machinery, one product at a time
+
+Excludes named `product_item_id`s straight in the listing tree. The route to use
+when a product has to go out of ONE asset group, or when the feed has no label to
+hang the decision on. Modes mirror the label action (`noop` / `apply` / `rebuild`),
+where `apply` both flips ids that are present-and-included and adds ids that are
+missing, in one mutate.
+
+Two things decide whether this is the right tool:
+
+- **The tree grows by one node per VARIANT**, and it is maintained per asset group.
+  Cutting the same products across a whole account is far cheaper through the feed
+  label: one node per group instead of one per variant per group.
+- **Item ids go to the API lower-cased.** Google Ads stores and reports them that
+  way even where the feed spells them differently, so sending the feed's spelling
+  would add a second node next to the existing one on every re-run.
+
+**A rebuild here is often impossible, and the action says so before sending.**
+Performance Max forbids the same dimension appearing twice on one path from root
+to leaf (`SAME_DIMENSION_TYPE_BETWEEN_ANCESTORS`). A rebuild puts
+`product_item_id` above the whole present tree, so it is refused outright when the
+tree already splits on item id somewhere below. The same guard now protects
+`add-label-exclusion`: without it both actions built a plan that Google rejected
+with one unreadable error per operation.
+
+### `add-label-exclusion` — the one action that removes criteria
+
+A product feed marks junk with a label (`custom_label_0 = wyklucz` is the common
+shape) and every asset group is supposed to exclude it. An asset group that is
+missing that node quietly serves everything the rest of the account already cut,
+and it shows up months later in the spend, not in any alert.
+
+The action picks the smallest change that works and says which one it picked:
+
+| mode | what happens |
+|---|---|
+| `noop` | the label is already excluded — nothing is sent |
+| `flip` | the node exists but is included: one leaf is swapped |
+| `add` | the root already splits on this label: one new sibling leaf, nothing existing is touched |
+| `rebuild` | the root splits on something else — see below |
+
+**Why `rebuild` removes criteria, when the connector otherwise never does.**
+A subdivision splits on exactly ONE dimension, so a label that has to become the
+first split forces the present tree down under its "everything else" branch — and
+a criterion cannot be re-parented, only recreated. That is allowed here because a
+PMax listing tree is pure targeting configuration: spend history lives on the
+campaign and the products, the whole tree is snapshotted to JSON before anything
+is sent, and re-running the same shape puts it back. What the rebuilt nodes do
+lose is their own per-node statistics, which the result states explicitly.
+
+Everything is one atomic mutate — temporary ids only resolve inside a single
+request, and a half-rebuilt group would serve nothing. Removals go deepest-first,
+creations root-first, and the simulation is validated by Google (`validate_only`)
+before you ever pass `--commit`. A tree whose read looks incomplete (a node
+hanging off a parent that is not in the result) stops the rebuild instead of
+silently dropping that branch.
 
 # Add account-level placement exclusions (display/PMax spam domains)
 node scripts/cli.js --action=add-negative-placements --customer=1234567890 --domains="spam.example,clickfarm.example"
@@ -293,6 +363,58 @@ Three jobs these exist for:
 - **Reviving a paused ad group.** `create-ad-groups` is idempotent and *skips* a group
   whose name already exists (matching is case-insensitive — `Orange` finds `ORANGE`),
   so it can never bring one back. `update-ad-group-status` is how you do that.
+
+**Performance Max: asset groups and listing filters
+(`update-asset-group-status`, `update-listing-filter`).**
+A PMax account is steered by two things the actions above cannot reach: which asset
+groups ("grupy plików") are running, and which product types each one's filter tree
+lets in. Both are seasonal knobs — a group built around a product type that only
+sells for part of the year gets paused out of season and enabled back into it.
+
+`update-asset-group-status` is the plain one: same shape as `update-ad-group-status`
+(single id, list, or `--input=map.csv` with `asset_group_id,status`), same
+`from → to` dry-run, same no-delete policy. One thing to understand before you use
+it: **pausing an asset group does not stop its products.** They keep serving from any
+other group whose filter still matches them, usually the catch-all "all products"
+group. Pausing narrows which creative and signals a product runs with; it does not
+take the product out of the campaign. To do that you exclude it in the filter tree.
+
+`update-listing-filter` flips ONE leaf between included and excluded:
+
+```bash
+node scripts/cli.js --action=update-listing-filter --customer=1234567890 \
+  --asset-group=4455667788 --product-type="donice ogrodowe" --to=INCLUDED
+```
+
+Pick the node with `--product-type="..."` (matched case-insensitively against
+`product_type` leaves) or, when that is ambiguous, `--filter-id=<id>`. A type that
+appears twice in one tree is **refused**, with both candidate ids named — flipping
+the wrong copy is a silent mistake that only surfaces in next month's spend.
+
+Why this action exists at all, and why it is the one place the connector deletes
+something: `type` (UNIT_INCLUDED / UNIT_EXCLUDED) is **IMMUTABLE** in the Google Ads
+API — only `case_value` can be updated — so there is no edit that turns an exclusion
+into an inclusion. The only route is to remove the leaf and create its opposite,
+which is exactly what the Google Ads UI does under the hood. The carve-out from the
+no-delete policy is fenced as narrowly as it can be:
+
+- **leaves only** — a `SUBDIVISION` is refused, because removing one cascades to
+  every node beneath it;
+- **never the root**;
+- the replacement keeps the **same parent and the same `case_value`**, so the parent
+  stays fully partitioned and the tree's shape is unchanged — one leaf changes sign;
+- the asset group must still **include something** afterwards. Excluding the last
+  included leaf is refused, and points you at `update-asset-group-status --status=PAUSED`,
+  which is the reversible way to say "this group shows nothing".
+
+What the flip genuinely costs: the node gets a **new id**, so its per-node stat
+history in the UI restarts from zero. Campaign- and product-level history is
+untouched. The dry-run says so in a `warning` field — repeat it to the user rather
+than letting them discover it later.
+
+The dry-run here is not a local simulation: it sends the real remove+create to
+Google with `validate_only`, and reports the verdict as `googleValidation`. A tree
+this easy to break deserves Google's opinion before the commit, not after.
 
 **Creating the campaign itself (`create-campaigns`).** The step that used to
 need the UI. Takes `--input=map.csv` (required cols `campaign_name`,
