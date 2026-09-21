@@ -2144,14 +2144,59 @@ export async function pauseCallouts(customerId, linkResourceNames, dryRun = fals
 }
 
 /**
- * Pause ANY asset link by its `*_asset` resource name — callouts, structured
- * snippets, price extensions, images. Retiring an asset is the same operation
- * whatever the asset is: flip the LINK to PAUSED and leave the asset itself
- * alone. The link and its history stay, the extension just stops serving.
+ * Set the status of ANY asset link by its `*_asset` resource name — callouts,
+ * structured snippets, price extensions, promotions, images. Retiring or
+ * bringing back an asset is the same operation whatever the asset is: flip the
+ * LINK and leave the asset itself alone. The link and its history stay.
  *
- * This is also the answer to "delete this extension": the connector never
+ * PAUSED is also the answer to "delete this extension": the connector never
  * removes, and a paused link does not serve, so the visible effect is identical
- * and the change is reversible.
+ * and the change is reversible — which is what ENABLED is for. An immutable
+ * asset (callout, promotion) that swings back to a previous version is swapped
+ * by re-enabling the old link, not by creating a copy of an asset the account
+ * already holds.
+ *
+ * @param {string} customerId
+ * @param {Array<string>} linkResourceNames
+ * @param {'ENABLED'|'PAUSED'} status
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @param {{entity?: string, label?: string}} [opts]
+ */
+export async function setAssetLinkStatus(customerId, linkResourceNames, status, dryRun = false, loginCustomerId, opts = {}) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  const entity = opts.entity || 'asset';
+  const label = opts.label || 'rozszerzeń';
+  const target = String(status ?? '').trim().toUpperCase();
+  if (!['ENABLED', 'PAUSED'].includes(target)) throw new Error(`Nieprawidłowy status "${status}". Dozwolone: ENABLED, PAUSED.`);
+  const verb = target === 'PAUSED' ? 'Wstrzymanie' : 'Włączenie';
+  const verbPast = target === 'PAUSED' ? 'wstrzymać' : 'włączyć';
+  const names = [...new Set((linkResourceNames || []).map((n) => String(n).trim()).filter(Boolean))];
+  if (names.length === 0) throw new Error(`Brak ${label} do zmiany statusu (pusta lista).`);
+  const bad = names.filter((n) => !/\/(campaignAssets|adGroupAssets|customerAssets)\//.test(n));
+  if (bad.length) throw new Error(`🛑 ${bad.length} pozycji nie jest linkiem zasobu (campaignAssets/adGroupAssets/customerAssets):\n${bad.map((b) => `  • ${b}`).join('\n')}`);
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}${verb} ${names.length} ${label}...`);
+  if (dryRun) return { success: true, dryRun: true, entity, status: target, count: names.length, plan: names };
+
+  try {
+    const customer = getCustomer(cleanCustomerId, loginCustomerId);
+    const mutations = names.map((n) => ({
+      entity: SITELINK_LINK_ENTITY[sitelinkLinkLevel(n)],
+      operation: 'update',
+      resource: { resource_name: n, status: target },
+    }));
+    const responses = [];
+    for (const part of chunk(mutations)) responses.push(await customer.mutateResources(part));
+    return { success: true, dryRun: false, entity, status: target, count: names.length, chunks: responses.length, resourceNames: mutatedResourceNames(responses) };
+  } catch (error) {
+    throw new Error(`Nie udało się ${verbPast} ${label}: ${unpackError(error)}`);
+  }
+}
+
+/**
+ * Pause asset links — the common case, kept as its own name so every existing
+ * caller (and every `pause-*` action) reads the same as before.
  *
  * @param {string} customerId
  * @param {Array<string>} linkResourceNames
@@ -2160,30 +2205,7 @@ export async function pauseCallouts(customerId, linkResourceNames, dryRun = fals
  * @param {{entity?: string, label?: string}} [opts]
  */
 export async function pauseAssetLinks(customerId, linkResourceNames, dryRun = false, loginCustomerId, opts = {}) {
-  const cleanCustomerId = String(customerId).replace(/-/g, '');
-  const entity = opts.entity || 'asset';
-  const label = opts.label || 'rozszerzeń';
-  const names = [...new Set((linkResourceNames || []).map((n) => String(n).trim()).filter(Boolean))];
-  if (names.length === 0) throw new Error(`Brak ${label} do wstrzymania (pusta lista).`);
-  const bad = names.filter((n) => !/\/(campaignAssets|adGroupAssets|customerAssets)\//.test(n));
-  if (bad.length) throw new Error(`🛑 ${bad.length} pozycji nie jest linkiem zasobu (campaignAssets/adGroupAssets/customerAssets):\n${bad.map((b) => `  • ${b}`).join('\n')}`);
-
-  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Wstrzymanie ${names.length} ${label}...`);
-  if (dryRun) return { success: true, dryRun: true, entity, count: names.length, plan: names };
-
-  try {
-    const customer = getCustomer(cleanCustomerId, loginCustomerId);
-    const mutations = names.map((n) => ({
-      entity: SITELINK_LINK_ENTITY[sitelinkLinkLevel(n)],
-      operation: 'update',
-      resource: { resource_name: n, status: 'PAUSED' },
-    }));
-    const responses = [];
-    for (const part of chunk(mutations)) responses.push(await customer.mutateResources(part));
-    return { success: true, dryRun: false, entity, count: names.length, chunks: responses.length, resourceNames: mutatedResourceNames(responses) };
-  } catch (error) {
-    throw new Error(`Nie udało się wstrzymać ${label}: ${unpackError(error)}`);
-  }
+  return setAssetLinkStatus(customerId, linkResourceNames, 'PAUSED', dryRun, loginCustomerId, opts);
 }
 
 /**

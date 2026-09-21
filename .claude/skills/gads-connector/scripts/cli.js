@@ -45,7 +45,7 @@ import {
   addCallouts,
   addPromotionAssets,
   pauseCallouts,
-  pauseAssetLinks,
+  setAssetLinkStatus,
   addStructuredSnippets,
   addPriceAssets,
   addYoutubeAssets,
@@ -426,8 +426,12 @@ Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
                           więc "edycja" = add-callouts nowego + pause-callouts starego.
                           --input=mapa.csv (kolumna link_resource_name) lub --links="rn1,rn2".
   pause-assets            To samo dla DOWOLNEGO rozszerzenia (fragment, cennik, obraz,
-                          sitelink, callout) — wstrzymuje link, zasób zostaje.
+                          sitelink, callout, promocja) — wstrzymuje link, zasób zostaje.
                           --input=mapa.csv (kolumna link_resource_name) lub --links="rn1,rn2".
+  enable-assets           Odwrotność pause-assets: włącza z powrotem wstrzymany link.
+                          Tak wraca się do poprzedniej wersji niezmienialnego zasobu
+                          (promocja, objaśnienie) — zamiast tworzyć kopię tego, co konto
+                          już ma. Te same argumenty co pause-assets.
   add-structured-snippets Dodaje fragmenty strukturalne na poziomie konta/kampanii/grupy.
                           Idempotentne po NAGŁÓWKU na danym poziomie. --input=mapa.csv
                           (kolumny: level,campaign_id|ad_group_id|ad_group_name,header,
@@ -1279,7 +1283,7 @@ async function main() {
       console.log(JSON.stringify(result, null, 2));
     }
 
-    else if (action === 'pause-assets') {
+    else if (action === 'pause-assets' || action === 'enable-assets') {
       let names = [];
       if (args.input) {
         const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
@@ -1287,8 +1291,9 @@ async function main() {
       } else if (args.links) {
         names = String(args.links).split(',').map((s) => s.trim()).filter(Boolean);
       }
-      if (names.length === 0) throw new Error('pause-assets wymaga --input=mapa.csv (kolumna link_resource_name) albo --links="rn1,rn2"');
-      const result = await pauseAssetLinks(customerId, names, dryRun, loginCustomerId);
+      if (names.length === 0) throw new Error(`${action} wymaga --input=mapa.csv (kolumna link_resource_name) albo --links="rn1,rn2"`);
+      const status = action === 'pause-assets' ? 'PAUSED' : 'ENABLED';
+      const result = await setAssetLinkStatus(customerId, names, status, dryRun, loginCustomerId);
       console.log(JSON.stringify(result, null, 2));
     }
 
