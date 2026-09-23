@@ -18,6 +18,7 @@ import {
     buildCampExclusionCandidates, withYearSignal, splitCandidatesByYear, progKlikniec,
     yearKey, campStatsFromRows, averagesFromCampStats,
     isSameAsKeyword, keywordsByCampaign,
+    konwersjeRoczne,
 } from './analiza.js';
 import { buildReport } from './raport-html.js';
 import { setCurrency, getDates } from './format.js';
@@ -143,6 +144,38 @@ console.log('\nPoziom hasła i obrona rokiem');
         isDefendedByYear({ cost: 100, conversions: 1, value: 320 }, 4, true));
     ok('sama stara konwersja bez wyniku nie broni',
         !isDefendedByYear({ cost: 1000, conversions: 1, value: 10 }, 4, true));
+}
+
+// ── Hasło, które sprzedało, nie jest do oceny AI ───────────────
+// Realny przypadek z konta klienta (2026-09-16): hasło brandowe konkurencji —
+// 0 konwersji w 30 dniach, 9,5 konwersji i ROAS 2,44 przy celu 3,50 w skali roku.
+// Ocena AI dała pewność 92 („marka konkurencji, nie ma jej w feedzie") i hasło
+// poszło do „pewnych", choć rok pokazywał sprzedaż. Wynik roczny poniżej celu,
+// ale nie zero, to decyzja operatora — nie wykluczenie bez weryfikacji.
+console.log('\nHasło, które sprzedało, nie jest do oceny AI');
+{
+    const ai = { kind: 'ai', pewnosc: 92, text: 'marka konkurencji' };
+    eq('bez danych rocznych ocena AI z wysoką pewnością zostaje pewna',
+        poziomSygnalu(ai, null), 'pewny');
+    eq('rok bez konwersji nie odbiera oceny AI',
+        poziomSygnalu(ai, { cost: 300, conversions: 0, value: 0 }), 'pewny');
+    eq('konwersje w skali roku degradują ocenę AI do sprawdzenia',
+        poziomSygnalu(ai, { cost: 1400, conversions: 9.5, value: 3416 }), 'sprawdz');
+    eq('ułamek konwersji w roku nie wystarcza do degradacji',
+        poziomSygnalu(ai, { cost: 300, conversions: 0.4, value: 200 }), 'pewny');
+    eq('hasło ze sprzedażą nie może być pewne, choćby AI była pewna',
+        poziomHasla([ai], { cost: 1400, conversions: 9.5, value: 3416 }), 'sprawdz');
+
+    const yearMap = new Map([
+        [yearKey('[PLA]', 'marka konkurenta'), { clicks: 30, cost: 900, conversions: 6, value: 2200 }],
+        [yearKey('[Pmax]', 'marka konkurenta'), { clicks: 12, cost: 500, conversions: 3.5, value: 1216 }]
+    ]);
+    const t = { term: 'marka konkurenta', kampanie: ['[PLA]', '[Pmax]'], cost: 45.59 };
+    eq('konwersje sumują się po kampaniach hasła', konwersjeRoczne(t, yearMap), 9.5);
+    eq('hasło nieobecne w mapie rocznej ma zero konwersji',
+        konwersjeRoczne({ term: 'inne', kampanie: ['[PLA]'] }, yearMap), 0);
+    ok('hasło ze sprzedażą w roku wypada z puli do oceny AI',
+        konwersjeRoczne(t, yearMap) >= 1);
 }
 
 // ── Pamięć między rundami ─────────────────────────────────────

@@ -297,6 +297,11 @@ export async function getCampaigns(customerId, days = 30, opts = {}) {
   // opts.range = { start, end } (YYYY-MM-DD) wins over the rolling `days` window —
   // e.g. to end on yesterday (complete days) instead of including today's partial data.
   const { start, end } = opts.range || calculateDateRange(days, opts.timezone);
+  // Decoded alongside the raw codes, never instead of them: `type` and `status` are
+  // consumed downstream as NUMBERS (report code keys its own channel table off them),
+  // so renaming them in place would silently blank those columns.
+  const CS = enums.CampaignStatus;
+  const ACT = enums.AdvertisingChannelType;
   const query = `
     SELECT
       campaign.id,
@@ -331,6 +336,11 @@ export async function getCampaigns(customerId, days = 30, opts = {}) {
       name: row['campaign.name'],
       status: row['campaign.status'],
       type: row['campaign.advertising_channel_type'],
+      // Same values as `status` / `type`, resolved through the library's own enums so
+      // the numbering always matches the API version actually in use.
+      statusName: CS[row['campaign.status']] || String(row['campaign.status'] ?? ''),
+      typeName: ACT[row['campaign.advertising_channel_type']]
+        || String(row['campaign.advertising_channel_type'] ?? ''),
       budget: row['campaign_budget.amount'] || 0,
       clicks,
       impressions,
@@ -1160,18 +1170,24 @@ export async function getCampaignBasics(customerId, campaignId, opts = {}) {
 /**
  * Read a campaign's bidding strategy as it is actually set on the account.
  *
- * Deliberately does NOT translate `bidding_strategy_type` into a name: the enum
- * numbering shifts between API versions, and a wrong label here would be worse
- * than no label. What is unambiguous is which field of the protobuf `oneof` is
- * populated, so that is what we report — plus `portfolio`, because a campaign
- * attached to a shared strategy cannot be switched field-by-field at all.
+ * `typeName` is the answer to "what is this campaign bidding on". It is decoded
+ * through the library's own `enums.BiddingStrategyType`, which ships with the same
+ * version as the API client, so the numbering cannot drift out of step the way a
+ * hand-written map would. Never label a raw code from memory — the numbering is
+ * not stable across API versions.
+ *
+ * `strategyField` answers a narrower question: which field of the protobuf `oneof`
+ * carries a TARGET. It stays null for a strategy set without one (Maximize
+ * Conversions with no tCPA is the common case), so it tells you what to write to,
+ * not what is set. `portfolio` matters because a campaign attached to a shared
+ * strategy cannot be switched field-by-field at all.
  *
  * @param {string} customerId
  * @param {string|number} campaignId
  * @param {{loginCustomerId?: string}} [opts]
- * @returns {Promise<{campaignId: string, name: string, strategyField: string|null,
- *   targetCpa: number|null, targetRoas: number|null, typeCode: number|string|null,
- *   portfolio: string|null}|null>}
+ * @returns {Promise<{campaignId: string, name: string, typeName: string,
+ *   strategyField: string|null, targetCpa: number|null, targetRoas: number|null,
+ *   typeCode: number|string|null, portfolio: string|null}|null>}
  */
 export async function getCampaignBiddingInfo(customerId, campaignId, opts = {}) {
   const clean = String(customerId).replace(/-/g, '');
@@ -1195,13 +1211,15 @@ export async function getCampaignBiddingInfo(customerId, campaignId, opts = {}) 
   if (cpaMicros !== null) strategyField = 'maximize_conversions';
   else if (roas !== null) strategyField = 'maximize_conversion_value';
   else if (ceilMicros !== null) strategyField = 'target_spend';
+  const typeCode = r['campaign.bidding_strategy_type'] ?? null;
   return {
     campaignId: String(r['campaign.id']),
     name: r['campaign.name'] || '',
+    typeName: enums.BiddingStrategyType[typeCode] || String(typeCode ?? ''),
     strategyField,
     targetCpa: cpaMicros === null ? null : Number(cpaMicros) / 1e6,
     targetRoas: roas === null ? null : Number(roas),
-    typeCode: r['campaign.bidding_strategy_type'] ?? null,
+    typeCode,
     portfolio: r['campaign.bidding_strategy'] || null,
   };
 }

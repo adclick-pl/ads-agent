@@ -265,6 +265,12 @@ export function isSameAsKeyword(term, keywords) {
 // Próg pewności oceny AI, powyżej którego sygnał uznajemy za pewny.
 export const AI_PEWNOSC_PROG = 80;
 
+// Ile konwersji w skali roku wystarczy, żeby hasło przestało być materiałem dla oceny AI.
+// Ułamki (0,2 konwersji z atrybucji) to udział w sprzedaży, nie sprzedaż — w oknie rocznym
+// ma je połowa ogona, więc próg jest na całej konwersji. W 30 dniach ułamki są rzadkie
+// i tam wystarcza „jakakolwiek konwersja".
+export const MIN_KONW_ROK = 1;
+
 // Powody wykluczenia dla POJEDYNCZEGO wiersza hasła (warstwy 1, 3 i 3b).
 // `avg` — miernik kampanii: ecom → ROAS (cel z kontekstu albo średnia), leadgen → CPA.
 // `avgCostPerConv` — średni koszt konwersji kampanii; próg kosztowy dla ecom.
@@ -377,10 +383,22 @@ export function yearPerformanceReason(y, avgCPA, avgROAS, isEcom, benchLabel = '
 //                       sama z siebie to 30 dni przy progu 5 kliknięć — za cienko.
 //  - semantyka        → ZAWSZE do sprawdzenia: próg podobieństwa nie zna specyfiki tematu.
 //  - ocena AI         → wg zadeklarowanej pewności; brak deklaracji = niepewna.
+//                       Nigdy pewna dla hasła, które sprzedało w skali roku.
 export function poziomSygnalu(reason, y) {
     if (reason.level) return reason.level;
     if (reason.kind === 'wydajnosc') return (y && y.cost > 0 && y.conversions === 0) ? 'pewny' : 'sprawdz';
-    if (reason.kind === 'ai') return (reason.pewnosc !== null && reason.pewnosc >= AI_PEWNOSC_PROG) ? 'pewny' : 'sprawdz';
+    if (reason.kind === 'ai') {
+        // Hasło, które coś sprzedało, nie jest materiałem dla oceny AI. Ta zasada
+        // obowiązywała od początku dla 30 dni (`collectUncertainTerms` pomija hasło
+        // z konwersją), ale warstwa roczna powstała później i nie była nią objęta.
+        // Tu ta sama zasada na pełnych danych: werdykt zostaje widoczny w „Uwagach"
+        // jako kontekst, lecz hasła sprzedającego w skali roku nie wyklucza bez
+        // decyzji człowieka. Bez tego ocena jakościowa przebijała twardy wynik —
+        // hasło brandowe konkurencji z pewnością 92% i 9,5 konwersji w roku poszłoby
+        // na listę „pewnych", a wykluczenie zabiłoby sprzedaż.
+        if (y && y.conversions >= MIN_KONW_ROK) return 'sprawdz';
+        return (reason.pewnosc !== null && reason.pewnosc >= AI_PEWNOSC_PROG) ? 'pewny' : 'sprawdz';
+    }
     return 'sprawdz';
 }
 
@@ -404,6 +422,12 @@ export const poziomHasla = (reasons, y, jestSlowemKluczowym = false) =>
 // przez kilka kampanii i rok jednej podszywałby się pod drugą.
 export const yearKey = (campaign, term) => `${campaign}|||${String(term || '').toLowerCase()}`;
 export const yearOf = (yearMap, row) => yearMap.get(yearKey(row.campaign, row.term)) || null;
+
+// Konwersje hasła w skali roku, zsumowane po kampaniach, w których się pokazało.
+// Werdykt AI stosuje się do hasła w całym koncie (plik negatywów nie zna kampanii),
+// więc sprzedaż w jednej kampanii wystarczy, żeby decyzję zostawić człowiekowi.
+export const konwersjeRoczne = (t, yearMap) => (t.kampanie || []).reduce(
+    (suma, camp) => suma + (yearMap.get(yearKey(camp, t.term))?.conversions || 0), 0);
 
 // „Rok broni hasła" = wynik na poziomie celu kampanii. Świadomie TYLKO wynik —
 // pojedyncza stara konwersja nie chroni hasła.
@@ -442,7 +466,7 @@ export function buildCampExclusionCandidates(campTerms, adGroupKeywords, avg, ai
 
 // Dokłada sygnał roczny: wzbogaca istniejących kandydatów i tworzy nowych z haseł,
 // które w 30 dniach nie przekroczyły progów, ale rok pokazuje przepalanie.
-// Źródłem jest `skan` (top wg wyświetleń + top wg kosztu) — tylko dla nich mamy rok.
+// Źródłem jest `skan` (hasła kampanii z kosztem w 30 dniach) — tylko dla nich mamy rok.
 export function withYearSignal(candidates, skan, avgCPA, avgROAS, isEcom, yearMap, minKlikniec = 0, benchLabel = '') {
     const byTerm = new Map(candidates.map(c => [c.term, { ...c, reasons: [...c.reasons] }]));
 

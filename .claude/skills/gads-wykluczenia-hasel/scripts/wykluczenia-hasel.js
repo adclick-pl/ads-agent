@@ -30,7 +30,7 @@
  */
 
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'fs';
-import { join, isAbsolute, resolve } from 'path';
+import { join, isAbsolute, resolve, dirname } from 'path';
 import { execSync } from 'child_process';
 
 import { runRawQuery, getSearchTerms, resolveAccount, accountSlug } from './connector.js';
@@ -40,6 +40,7 @@ import {
     keywordsByCampaign,
     buildYearBenchmarks, campStatsFromRows, averagesFromCampStats,
     knownTopicsFromStatus, isKnownTopic, progKlikniec, yearKey, AI_PEWNOSC_PROG,
+    konwersjeRoczne, MIN_KONW_ROK,
 } from './analiza.js';
 import { buildReport } from './raport-html.js';
 
@@ -472,17 +473,29 @@ function parseFrontmatter(md) {
     return out;
 }
 
-// Cele i typ konta z `Klienci/<alias>/config.json`. Brak pliku albo błąd składni daje
-// pusty obiekt — config jest wygodą, nie warunkiem uruchomienia.
-function loadClientConfig(clientDir) {
-    const p = join(clientDir, 'config.json');
-    if (!existsSync(p)) return {};
-    try {
-        return JSON.parse(readFileSync(p, 'utf8'));
-    } catch {
-        console.log(`   ⚠ ${p} nie jest poprawnym JSON-em — pomijam.`);
-        return {};
+// Cele i typ konta z `config.json` klienta. Brak pliku albo błąd składni daje pusty
+// obiekt — config jest wygodą, nie warunkiem uruchomienia.
+//
+// Szukamy w trzech miejscach, bo `config.json` leży w stałej relacji do `kontekst.md`,
+// ale każdy układ katalogów trzyma go gdzie indziej: OBOK pliku kontekstu (folder typu
+// `<Klient>_Kontekst_AI`) albo PIĘTRO WYŻEJ (`Klienci/<alias>/Kontekst/kontekst.md`
+// → `Klienci/<alias>/config.json`). Dzięki temu skill nie musi znać układu katalogów
+// projektu, w którym akurat działa — wystarczy, że dostanie `--kontekst`.
+function loadClientConfig(clientDir, kontekstPath) {
+    const katalogi = [];
+    if (kontekstPath) katalogi.push(dirname(kontekstPath), resolve(dirname(kontekstPath), '..'));
+    if (clientDir) katalogi.push(clientDir);
+    for (const dir of katalogi) {
+        const p = join(dir, 'config.json');
+        if (!existsSync(p)) continue;
+        try {
+            return JSON.parse(readFileSync(p, 'utf8'));
+        } catch {
+            console.log(`   ⚠ ${p} nie jest poprawnym JSON-em — pomijam.`);
+            return {};
+        }
     }
+    return {};
 }
 
 function ensureKontekst(kontekstDir, accountName, sciezkaZFlagi) {
@@ -572,7 +585,12 @@ function ensureStatusFile(outputDir, accountName) {
 // (5 subagentów × 10 haseł). Przy 10 pokrycie było iluzoryczne: na dużym koncie top 10
 // to kilkanaście procent kosztu haseł niepewnych.
 const SERP_CHECK_COUNT = 50;
+// Budżet oceny: ile haseł trafia do pliku wymiany. Pula, z której je wybieramy, jest
+// dwa razy większa, bo część odpadnie na filtrze rocznym (hasło, które coś sprzedało,
+// nie jest do oceny AI) — bez zapasu oddawalibyśmy do oceny mniej haseł, niż budżet
+// pozwala, i najtańsze z nich wcale nie byłyby najpilniejsze.
 const MAX_TERMS_DO_OCENY = 150;
+const PULA_DO_OCENY = MAX_TERMS_DO_OCENY * 2;
 
 function writeUncertainTerms(outputDir, dateStr, uncertainTerms, meta) {
     const known = knownTopicsFromStatus(meta.statusMd);
@@ -678,6 +696,10 @@ function loadAgentNegatives(outputDir, dateStr) {
 // Ilu kandydatów per kampania obejmujemy analizą roczną (są posortowani wg kosztu).
 const YEAR_KANDYDATOW_NA_KAMPANIE = 150;
 
+// Domknięcie najgorszego przypadku dla skanu rocznego (konto z dziesiątkami tysięcy
+// haseł). Tniemy wg kosztu, czyli od strony, gdzie rok i tak niczego by nie orzekł.
+const SKAN_CAP = 1000;
+
 function przygotujKampanie(st30, adGroupKeywords, aiNegatives, isEcom, campTypes, celRoas) {
     const campStats = campStatsFromRows(st30);
     const { cpa: campAvgCPA, roas: campAvgROAS } = averagesFromCampStats(campStats);
@@ -704,13 +726,21 @@ function przygotujKampanie(st30, adGroupKeywords, aiNegatives, isEcom, campTypes
             terms, adGroupKeywords, avgMetric, aiNegatives, isEcom, minKlikniec, avgCPA, benchLabel
         );
 
-        // Skan roczny — źródło sygnału rocznego. Poza topem wg wyświetleń bierze też
-        // top wg KOSZTU: hasło z drogim CPC i małym wolumenem to profil cichego
-        // przepalacza, a właśnie jego top wg wyświetleń potrafi nie pokazać.
-        const zRuchem = terms.filter(t => t.impressions >= 2);
-        const topWysw = [...zRuchem].sort((a, b) => b.impressions - a.impressions).slice(0, 30);
-        const topKoszt = [...zRuchem].sort((a, b) => b.cost - a.cost).slice(0, 30);
-        const rocznySkan = [...new Map([...topWysw, ...topKoszt].map(t => [t.term, t])).values()];
+        // Skan roczny — źródło sygnału rocznego. Obejmuje KAŻDE hasło kampanii, które
+        // w ogóle może zostać kandydatem: z kosztem w 30 dniach i ponad progiem kliknięć
+        // kampanii. Wcześniej był to top 30 wg wyświetleń + top 30 wg kosztu, czyli
+        // ranking zamiast kryterium — a sygnał roczny z definicji celuje w OGON: w hasło,
+        // którego 30 dni nie zgłosi, bo ma za mało kliknięć w miesiącu. Zmierzone
+        // pominięcie: 31% kosztu haseł na koncie Search, 112 ze 147 haseł
+        // kwalifikowalnych w kampanii PMax.
+        // Próg kliknięć jest ten sam, co u kandydatów (`withYearSignal` i tak go stosuje),
+        // więc w PMax nie wciąga to długiego ogona. `cost > 0` wycina hasła z samymi
+        // wyświetleniami — dziś nic nie kosztują, a jest ich dziesiątki tysięcy.
+        const kwalifikowalne = terms.filter(t => t.cost > 0 && t.clicks >= minKlikniec);
+        const rocznySkan = [...kwalifikowalne].sort((a, b) => b.cost - a.cost).slice(0, SKAN_CAP);
+        if (kwalifikowalne.length > SKAN_CAP) {
+            console.log(`   ⚠ ${camp}: skan roczny ucięty do ${SKAN_CAP} najdroższych haseł`);
+        }
 
         return {
             camp, typ: campTypes[camp] || '', avgCPA, avgROAS, avgMetric, minKlikniec,
@@ -798,7 +828,7 @@ async function main() {
     //
     // Ostateczny fallback: leadgen. Koszt konwersji ma sens dla każdego konta
     // z konwersjami, ROAS wymaga realnego przychodu.
-    const cfg = loadClientConfig(clientDir);
+    const cfg = loadClientConfig(clientDir, kontekst.path);
     const fm = parseFrontmatter(kontekst.text || (existsSync(kontekst.path) ? readFileSync(kontekst.path, 'utf8') : ''));
     const typ = String(args.typ || cfg.businessType || fm.typ || '').toLowerCase();
     const isEcom = ['ecom', 'ecommerce'].includes(typ);
@@ -812,22 +842,30 @@ async function main() {
 
     // Warstwa 3b: hasła niepewne → plik do oceny; negatywy z poprzedniego przebiegu → analiza
     const uncertainTerms = collectUncertainTerms(st30, adGroupKeywords);
+    const pulaDoOceny = [...uncertainTerms].sort((a, b) => b.cost - a.cost).slice(0, PULA_DO_OCENY);
     const aiNegatives = loadAgentNegatives(outputDir, dateStr);
-    const uncertain = writeUncertainTerms(outputDir, dateStr, uncertainTerms, {
-        accountName: account.name, isEcom, celRoas, branza,
-        kontekstMd: kontekst.text, kontekstPath: kontekst.path,
-        statusMd: status.text, statusPath: status.path
-    });
-    console.log(`   Warstwa 3b: ${uncertainTerms.length} haseł niepewnych (${uncertain.count} zapisanych do oceny, ${uncertain.serp} z flagą SERP)`);
 
     // Analiza per kampania → rok tylko dla tego, co trafia do raportu → podział na kubełki
     const { camps, maCel, cel, benchROAS, benchLabel } =
         przygotujKampanie(st30, adGroupKeywords, aiNegatives, isEcom, campTypes, celRoas);
 
-    const doRoku = terminyDoRoku(camps);
+    // Rok pobieramy też dla puli haseł do oceny, i dlatego plik wymiany powstaje DOPIERO
+    // PO nim: to rok rozstrzyga, których haseł do oceny nie wysyłamy. Hasło z konwersjami
+    // w skali roku jest decyzją człowieka, a nie materiałem dla oceny AI — wysłane,
+    // zjadałoby budżet SERP-checku i wracało z werdyktem sprzecznym z danymi.
+    const doRoku = [...new Set([...terminyDoRoku(camps), ...pulaDoOceny.map(t => t.term)])];
     console.log(`   Pobieram dane roczne dla ${doRoku.length} haseł...`);
     const yearMap = await fetchYearStats(account, dates.days365, doRoku);
     console.log(`   ✓ Historia roczna: ${yearMap.size} par (kampania + hasło)`);
+
+    const doOceny = pulaDoOceny.filter(t => konwersjeRoczne(t, yearMap) < MIN_KONW_ROK);
+    const sprzedaly = pulaDoOceny.length - doOceny.length;
+    const uncertain = writeUncertainTerms(outputDir, dateStr, doOceny, {
+        accountName: account.name, isEcom, celRoas, branza,
+        kontekstMd: kontekst.text, kontekstPath: kontekst.path,
+        statusMd: status.text, statusPath: status.path
+    });
+    console.log(`   Warstwa 3b: ${uncertainTerms.length} haseł niepewnych (${uncertain.count} zapisanych do oceny, ${uncertain.serp} z flagą SERP${sprzedaly ? `; ${sprzedaly} pominięto — sprzedały w skali roku` : ''})`);
 
     // Podział na kubełki zostaje PER KAMPANIA — tak jak liczone są benchmarki, i tak
     // samo dodaje się wykluczające w koncie (kampania po kampanii, nie hurtem).

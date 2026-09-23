@@ -7,6 +7,69 @@ restarcie sesji. Szczegóły każdego skilla: `.claude/skills/<skill>/SKILL.md`.
 
 ---
 
+## 2026-09-22
+
+### Dodane
+
+- **Odczyt strategii licytacji: `--action=get-bidding`.** `getCampaignBiddingInfo()`
+  istniała w `queries.js` od dawna, ale nie była wystawiona w CLI — widział ją wyłącznie
+  `update-bidding` jako własny pre-check. Skutek: jedyną drogą do pytania „na czym
+  licytuje ta kampania" było `raw-query`, które zwraca `bidding_strategy_type` jako
+  **surową liczbę**. Numeracja enumów nie jest stabilna między wersjami API, więc
+  dopisanie do niej nazwy z pamięci kończy się odwrotnym wnioskiem: kod `10` wygląda
+  na `TARGET_SPEND` z jednej tabeli, a jest `MAXIMIZE_CONVERSIONS`.
+
+  ```bash
+  node ".claude/skills/gads-connector/scripts/cli.js" --action=get-bidding \
+    --account=zielonyogrod --campaign=1234567890
+  ```
+
+  Zwraca nazwę strategii, tCPA/tROAS, flagę strategii portfelowej i surowy kod enuma.
+  Akcja jest w `READ_ONLY_ACTIONS`, więc nie dokleja stopki o symulacji.
+
+### Zmienione
+
+- **`getCampaignBiddingInfo()` nazywa strategię (`typeName`).** Dotąd świadomie tego nie
+  robiła, w obawie przed złą etykietą — ale odpowiadała wtedy tylko przez `strategyField`,
+  wnioskowany z obecności **celu**. Kampania na Maksymalizacji konwersji **bez tCPA** —
+  układ domyślny i najczęstszy — wychodziła więc jako nierozpoznana. Nazwa idzie teraz
+  z `enums.BiddingStrategyType` biblioteki `google-ads-api`, czyli z tego samego pakietu
+  co klient API: numeracja nie ma jak się rozjechać, inaczej niż przy mapie pisanej ręcznie.
+
+  `strategyField` zostaje i odpowiada na węższe pytanie — do którego pola `oneof` **pisać**
+  przy zmianie strategii, a nie co jest ustawione. Rozróżnienie opisane w docblocku.
+
+- **`gads-wykluczenia-hasel`: ocena AI nie wyklucza hasła, które sprzedało.** Hasło
+  z co najmniej 1 konwersją w skali roku nie trafia już do pliku oceny, a werdykt
+  z wcześniejszej rundy nie robi z niego „pewnego" — schodzi do „do sprawdzenia".
+  Bez tego ocena jakościowa przebijała twardy wynik: hasło brandowe konkurencji
+  z pewnością 92% („nie mamy tej marki w feedzie") i 9,5 konwersji w roku szło na listę
+  pewnych, a wykluczenie zabiłoby sprzedaż. Próg jest na **całej** konwersji — ułamek
+  z atrybucji to udział w sprzedaży, nie sprzedaż. Pula haseł do oceny jest teraz dwa
+  razy większa niż budżet pliku wymiany, bo część odpada na filtrze rocznym.
+
+- **`gads-wykluczenia-hasel`: skan roczny bierze kryterium, nie ranking.** Obejmuje
+  **każde** hasło kampanii z kosztem w 30 dniach ponad progiem kliknięć (cap 1000
+  najdroższych na kampanię, ucięcie widać w logu). Wcześniej brał top 30 wg wyświetleń
+  + top 30 wg kosztu — a sygnał roczny z definicji celuje w OGON, czyli w hasło,
+  którego 30 dni nie zgłosi, bo ma za mało kliknięć w miesiącu. Zmierzone pominięcie:
+  31% kosztu haseł na koncie Search i 112 ze 147 haseł kwalifikowalnych w kampanii PMax.
+
+- **`gads-wykluczenia-hasel`: `config.json` szukany niezależnie od układu katalogów.**
+  `loadClientConfig()` sprawdza kolejno katalog pliku z `--kontekst`, katalog wyżej
+  i domyślny `Klienci/<alias>/`. Wcześniej ścieżka była sztywna, więc skill uruchomiony
+  spoza pakietu nie widział `businessType` klienta i szedł fallbackiem na leadgen,
+  mimo że config stał obok pliku kontekstu.
+
+- **`get-campaigns` pokazuje nazwy zamiast kodów.** Kolumny `Status` i `Typ` wypisywały
+  `2` i `14` zamiast `ENABLED` i `DEMAND_GEN`.
+
+  `getCampaigns()` zwraca teraz dodatkowo `statusName` i `typeName`, dekodowane przez
+  `enums.CampaignStatus` i `enums.AdvertisingChannelType`. **Pola `status` i `type`
+  zostały surowe** — kod raportowy konsumuje je jako liczby i kluczuje po nich własne
+  tabele kanałów, więc podmiana w miejscu wyczyściłaby te kolumny po cichu. Nowe pola
+  stoją obok starych, kontrakt bez zmian.
+
 ## 2026-09-10
 
 ### Dodane

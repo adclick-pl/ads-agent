@@ -7,6 +7,7 @@ import {
   listAccounts,
   listAccessibleAccounts,
   getCampaigns,
+  getCampaignBiddingInfo,
   getKeywords,
   getSearchTerms,
   getPmaxSearchTerms,
@@ -268,6 +269,9 @@ Akcje odczytu:
   get-pmax-search-terms   Hasła wyszukiwania dla Performance Max (--campaign opcjonalnie).
   keyword-ideas           Research słów kluczowych w Keyword Planner (--keywords i/lub --url).
   get-budgets             Aktywne budżety.
+  get-bidding             Strategia licytacji kampanii (--campaign=<ID>): nazwa strategii,
+                          tCPA/tROAS i czy kampania siedzi na strategii portfelowej.
+                          Nazwa dekodowana przez enums biblioteki, więc zgodna z wersją API.
   get-change-history      Kto co zmienił na koncie (change_event; maks. 29 dni wstecz,
                           --user=email[,email] opcjonalny filtr; teksty wykluczeń
                           rozwiązywane dla poziomu grupy i kampanii).
@@ -629,7 +633,7 @@ async function main() {
   const READ_ONLY_ACTIONS = new Set([
     'test-connection', 'list-accessible', 'list-accounts', 'get-campaigns', 'get-keywords',
     'get-search-terms', 'get-pmax-search-terms', 'keyword-ideas', 'get-budgets',
-    'get-change-history', 'raw-query', 'list-conversions', 'check-accounts',
+    'get-change-history', 'raw-query', 'list-conversions', 'check-accounts', 'get-bidding',
   ]);
   const isMutation = !READ_ONLY_ACTIONS.has(action);
   const dryRun = isMutation && (!args.commit || !!args['dry-run']);
@@ -776,8 +780,8 @@ async function main() {
         console.table(rows.map((c) => ({
           Nazwa: c.name,
           ID: c.id,
-          Status: c.status,
-          Typ: c.type,
+          Status: c.statusName,
+          Typ: c.typeName,
           Budżet: c.budget.toFixed(2),
           Kliknięcia: c.clicks,
           Wyświetlenia: c.impressions,
@@ -787,6 +791,25 @@ async function main() {
           ROAS: c.roas.toFixed(2),
         })));
       }, 'get-campaigns');
+    }
+
+    else if (action === 'get-bidding') {
+      const campaignId = args.campaign;
+      if (!campaignId) throw new Error('get-bidding requires --campaign=<ID>');
+      const info = await getCampaignBiddingInfo(customerId, campaignId, readOpts);
+      if (!info) throw new Error(`get-bidding: nie znaleziono kampanii ${campaignId} na koncie ${customerId}.`);
+      emitRows([info], (rows) => {
+        const r = rows[0];
+        console.log(`\n💰 Strategia licytacji — ${r.name} (${r.campaignId}):`);
+        console.table([{
+          Strategia: r.typeName,
+          'tCPA': r.targetCpa === null ? 'nie ustawiony' : r.targetCpa.toFixed(2),
+          'tROAS': r.targetRoas === null ? 'nie ustawiony' : r.targetRoas,
+          'Portfel': r.portfolio ? 'TAK' : 'nie',
+          'Kod enuma': r.typeCode ?? '–',
+        }]);
+        if (r.portfolio) console.log(`   ⚠ Kampania na strategii portfelowej: ${r.portfolio}`);
+      }, 'get-bidding');
     }
 
     else if (action === 'get-keywords') {
@@ -901,6 +924,12 @@ async function main() {
       if (!query) throw new Error('Action raw-query requires parameter --query="..."');
       const results = await runRawQuery(customerId, query, { loginCustomerId, timezone: effectiveTimezone, days: args.days ? days : undefined });
       emitRows(results, (rows) => {
+        // Podgląd 10 wierszy jest dla CZŁOWIEKA w terminalu. Na potoku drukujemy
+        // pełny zbiór, bo skrócona tablica JSON jest składniowo poprawna i wygląda
+        // jak kompletna odpowiedź — czytający ją program (albo agent) nie ma jak
+        // zauważyć, że czegoś brakuje. Linia „* 10 z N" ostrzega tylko tego, kto
+        // czyta całe wyjście; potok zwykle przepuszcza samą tablicę do parsera.
+        if (!process.stdout.isTTY) { console.log(JSON.stringify(rows, null, 2)); return; }
         console.log(`\n📊 Wyniki GAQL (${rows.length} wierszy):`);
         console.log(JSON.stringify(rows.slice(0, 10), null, 2));
         if (rows.length > 10) console.log(`\n  * 10 z ${rows.length}. Użyj --auto / --output / --json po całość.`);

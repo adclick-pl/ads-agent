@@ -300,6 +300,19 @@ wynik: pojedyncza stara konwersja nie chroni hasła. Miernikiem jest średnia ka
 systematyczny: po dobrym miesiącu poprzeczka rośnie i produkuje fałszywe „pewne",
 po słabym wszystko ląduje w „bronione".
 
+**Ocena AI nie dotyka haseł, które sprzedają.** Hasło z **co najmniej 1 konwersją w skali
+roku** nie trafia do pliku `-uncertain.json` (nie ma go po co oceniać), a gdyby werdykt
+został z wcześniejszej rundy — nie robi z hasła „pewnego", tylko schodzi do „do sprawdzenia".
+Ta zasada obowiązywała od początku dla 30 dni (`collectUncertainTerms` pomija hasło
+z konwersją); warstwa roczna powstała później i dopiero teraz zasada działa na pełnych
+danych. Bez tego ocena jakościowa przebijała twardy wynik: realny przypadek z konta
+klienta to hasło brandowe konkurencji z pewnością 92% („nie mamy tej marki w feedzie")
+i 9,5 konwersji w roku — wykluczenie zabiłoby sprzedaż. Próg jest na **całej** konwersji:
+ułamek z atrybucji to udział w sprzedaży, nie sprzedaż.
+
+Dlatego pula haseł do oceny jest dwa razy większa niż budżet pliku wymiany: część odpada
+na filtrze rocznym, a bez zapasu oddawalibyśmy do oceny mniej haseł, niż budżet pozwala.
+
 **Ochrona przez słowo kluczowe.** Hasło, które **jest słowem kluczowym tej kampanii**,
 nigdy nie trafia do „pewnych" — schodzi do „do sprawdzenia" z adnotacją wyjaśniającą
 degradację, a same sygnały zostają widoczne. Nie dlatego, że sygnał się myli: rok bez
@@ -376,6 +389,13 @@ frontmatter `kontekst.md` (`typ:`). Bez żadnego z tych źródeł skrypt idzie l
 z WARN — detekcja (akcje konwersji + strona + dopytanie + auto-zapis do configu)
 należy do KROK 1,5, wykonywanego przed uruchomieniem skryptu.
 
+**Skąd brany jest `config.json`.** Skrypt szuka go **obok pliku wskazanego przez
+`--kontekst`**, potem **piętro wyżej**, a na końcu w domyślnym `Klienci/<alias>/`.
+Domyślny układ pakietu trafia w drugie miejsce (`Klienci/<alias>/Kontekst/kontekst.md`
+→ `Klienci/<alias>/config.json`); pierwsze obsługuje układy, w których config leży
+w jednym folderze z kontekstem. Dzięki temu skill działa też poza pakietem, bez
+przepisywania ścieżek.
+
 **Cel ROAS** (z `config.json` albo frontmattera) wygrywa ze średnią własnej kampanii przy ocenie haseł. Powód:
 przy porównaniu do średniej **własnej** kampanii połowa haseł jest poniżej niej
 z definicji, więc w kampanii brandowej sygnał nic nie znaczy — hasło z ROAS 6,3 przy
@@ -417,9 +437,14 @@ skan roczny) — filtr `IN` po stronie GAQL, w paczkach po 1000, z obu widoków.
 rocznej to para **(kampania, hasło)**: to samo zapytanie bywa obsługiwane przez kilka
 kampanii i rok jednej podszywałby się pod drugą.
 
-**Skan roczny** obejmuje top 30 wg wyświetleń **i** top 30 wg kosztu z 30 dni. Sam top wg
-wyświetleń nie wystarczał — hasło z drogim CPC i małym wolumenem, czyli profil cichego
-przepalacza, potrafiło się do niego nie załapać.
+**Skan roczny** obejmuje **każde hasło kampanii z kosztem w ostatnich 30 dniach**, ponad
+progiem kliknięć tej kampanii (produktowe: 5 kliknięć); cap bezpieczeństwa to 1000
+najdroższych haseł na kampanię, a ucięcie widać w logu. Wcześniej brał top 30 wg wyświetleń
++ top 30 wg kosztu, czyli ranking zamiast kryterium — a sygnał roczny z definicji celuje
+w OGON: w hasło, którego 30 dni nie zgłosi, bo ma za mało kliknięć w miesiącu. Zmierzone
+pominięcie: **31% kosztu haseł** na koncie Search i **112 ze 147 haseł kwalifikowalnych**
+w kampanii PMax. Hasła z samymi wyświetleniami (koszt 0) zostają poza skanem — dziś nic
+nie kosztują, a jest ich dziesiątki tysięcy.
 
 ## Powiązane
 
