@@ -87,6 +87,16 @@ const args = process.argv.slice(2).reduce((acc, arg) => {
  * name/alias/slug from .claude/accounts.json, or a raw 10-digit ID. Returns the
  * customer ID plus the account's login_customer_id and timezone when known.
  */
+/**
+ * `--under` wskazuje węzeł drzewa PMax: same cyfry to id węzła, reszta to nazwa typu
+ * produktu (dopasowywana bez względu na wielkość liter, niejednoznaczna jest odrzucana).
+ */
+function parseUnderSelector(value) {
+  const v = String(value ?? '').trim();
+  if (!v) return null;
+  return /^\d+$/.test(v) ? { filterId: v } : { productType: v };
+}
+
 function resolveTarget() {
   const selector = args.account || args.customer;
   const rec = resolveAccount(selector);
@@ -335,6 +345,9 @@ Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
                           zabrałoby podwęzły i gdy po zmianie w gałęzi nie zostałby ani
                           jeden włączony typ przy wykluczonym „wszystko inne".
                           Snapshot drzewa przed zmianą (--snapshot=przedrostek).
+                          Typy na kilku poziomach (kategoria → podkategoria):
+                          --under=<id węzła | typ produktu> (albo kolumna under)
+                          wskazuje podział, pod który trafiają wiersze.
                           Symulacja jest walidowana przez Google (validate_only).
   add-label-exclusion     Dopilnowuje, by grupa plików PMax WYKLUCZAŁA etykietę
                           niestandardową z feedu (typowo: śmieci oznaczone
@@ -370,6 +383,11 @@ Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
                           węzeł na WARIANT i utrzymuje się je w każdej grupie plików
                           osobno, więc przy wykluczeniach obejmujących całe konto
                           tańszy jest --action=add-label-exclusion.
+                          Gdy podział po ID siedzi NIŻEJ w drzewie (przebudowa przy
+                          korzeniu jest wtedy zabroniona), --under=<id | typ produktu>
+                          kieruje wykluczenia pod wskazany węzeł: dokłada je do
+                          istniejącego podziału po ID albo dzieli po ID włączony liść
+                          („wszystko inne" pod nim zostaje włączone).
                           Usuwa kryteria na tych samych zasadach co
                           add-label-exclusion (snapshot przed zmianą: --snapshot=).
                           Symulacja jest walidowana przez Google (validate_only).
@@ -517,6 +535,9 @@ Opcje:
   --days=<n>                  Zakres dni (domyślnie 30; liczony w strefie konta).
   --min-cost=<x>              Minimalny koszt dla get-search-terms.
   --item-ids="a,b"            ID produktów do wykluczenia (add-item-exclusion).
+  --under=<id|typ produktu>   Węzeł drzewa PMax, pod którym działać (add-item-exclusion:
+                              podział po ID do uzupełnienia albo liść do podzielenia
+                              po ID; sync-listing-types: podział po typie produktu).
   --label-value="wyklucz"     Wartość etykiety do wykluczenia (add-label-exclusion).
   --label-index=<0-4>         Który custom_label (domyślnie 0).
   --snapshot=<plik.json>      Gdzie zapisać drzewo sprzed przebudowy.
@@ -1010,20 +1031,26 @@ async function main() {
         throw new Error('sync-listing-types wymaga --input=mapa.csv (kolumny: asset_group_id,product_type,action) '
           + 'albo --asset-group=<ID> --types="typ1,typ2" --to=<INCLUDED|EXCLUDED|REMOVE>.');
       }
+      // Klucz to grupa plików + podział (--under / kolumna under): jedna grupa może mieć
+      // typy na kilku poziomach, a każdy poziom to osobny zestaw rodzeństwa.
       const byGroup = new Map();
       rows.forEach((r, i) => {
         const ag = String(r.asset_group_id || args['asset-group'] || '').replace(/[^0-9]/g, '');
         if (!ag) throw new Error(`Wiersz ${i + 1}: brak asset_group_id (i nie podano --asset-group).`);
-        if (!byGroup.has(ag)) byGroup.set(ag, []);
-        byGroup.get(ag).push({ productType: r.product_type, to: r.action || args.to });
+        const under = String(r.under || args.under || '').trim();
+        const key = `${ag}|${under}`;
+        if (!byGroup.has(key)) byGroup.set(key, { ag, under, items: [] });
+        byGroup.get(key).items.push({ productType: r.product_type, to: r.action || args.to });
       });
       const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
       const results = [];
-      for (const [ag, items] of byGroup) {
+      for (const { ag, under, items } of byGroup.values()) {
         // Snapshot per grupa plików: każda ma własne drzewo i własną drogę powrotu.
         const snapshotPath = dryRun ? null
           : path.resolve(args.snapshot ? `${args.snapshot}-${ag}.json` : `listing-tree-${ag}-${stamp}.json`);
-        results.push(await syncListingTypes(customerId, ag, items, dryRun, loginCustomerId, { snapshotPath }));
+        results.push(await syncListingTypes(customerId, ag, items, dryRun, loginCustomerId, {
+          snapshotPath, under: parseUnderSelector(under),
+        }));
       }
       console.log(JSON.stringify(results.length === 1 ? results[0] : results, null, 2));
     }
@@ -1087,7 +1114,8 @@ async function main() {
       const snapshotPath = dryRun ? null
         : path.resolve(args.snapshot || `listing-tree-${String(args['asset-group']).replace(/[^0-9]/g, '')}-${stamp}.json`);
       const result = await addItemExclusion(
-        customerId, args['asset-group'], itemIds, dryRun, loginCustomerId, { snapshotPath },
+        customerId, args['asset-group'], itemIds, dryRun, loginCustomerId,
+        { snapshotPath, under: parseUnderSelector(args.under) },
       );
       console.log(JSON.stringify(result, null, 2));
     }

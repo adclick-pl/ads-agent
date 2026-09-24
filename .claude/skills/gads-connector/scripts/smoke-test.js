@@ -1528,5 +1528,90 @@ await checkAsync('add-label-exclusion: refuses without an asset group, before an
   assert(threw, 'a missing asset group must be rejected locally');
 });
 
+/* ── --under: praca pod wskazanym węzłem zamiast przy korzeniu ────────────── */
+
+// Drzewo dwupoziomowe: kategoria → podkategorie, a jedna podkategoria dzieli już po ID.
+// Przebudowa przy korzeniu jest tu zabroniona, więc jedyna droga to --under.
+function nestedTree() {
+  const root = pmaxTree()[0];
+  const rn = (id) => `customers/1234567890/assetGroupListingGroupFilters/55~${id}`;
+  const typ = (id, type, value, level, parentRn) => ({
+    id, resourceName: rn(id), type, typeName: { 2: 'SUBDIVISION', 3: 'UNIT_INCLUDED', 4: 'UNIT_EXCLUDED' }[type],
+    listingSource: 2, parentResourceName: parentRn, assetGroupName: 'Ogród', assetGroupStatus: 'ENABLED',
+    dimension: { kind: 'product_type', value, level, index: null, label: value ?? '(POZOSTAŁE)' }, childIds: [],
+  });
+  return [
+    root,
+    typ('201', 2, 'meble ogrodowe', 2, root.resourceName),
+    typ('202', 4, null, 2, root.resourceName),
+    typ('301', 3, 'donice', 3, rn('201')),
+    typ('302', 2, 'ławki', 3, rn('201')),
+    typ('303', 3, null, 3, rn('201')),
+    itemNode('401', 4, 'sku-a', rn('302')),
+    itemNode('402', 3, null, rn('302')),
+  ];
+}
+const byId = (tree, id) => tree.find((n) => n.id === id);
+
+check('checkItemExclusion: the refusal points at the deeper item-id split to use with --under', () => {
+  const r = safety.checkItemExclusion(nestedTree(), ['sku-b']);
+  assert(!r.ok && /--under/.test(r.reason) && /id=302/.test(r.reason), r.reason);
+});
+check('checkItemExclusion --under: an item-id split gets the ids next to its siblings', () => {
+  const tree = nestedTree();
+  const r = safety.checkItemExclusion(tree, ['sku-a', 'sku-b'], { under: byId(tree, '302') });
+  assert(r.ok && r.mode === 'apply' && r.root.id === '302', JSON.stringify(r.mode));
+  assert(r.juzWykluczone.length === 1 && r.doDodania.length === 1 && r.doDodania[0] === 'sku-b', JSON.stringify(r));
+  const { mutations } = mutator.buildItemExclusionMutations(tree, r, ITEM_OPTS);
+  assert(mutations.length === 1 && mutations[0].resource.parent_listing_group_filter === byId(tree, '302').resourceName,
+    JSON.stringify(mutations));
+});
+check('checkItemExclusion --under: an included leaf is split by item id, the rest of it stays on', () => {
+  const tree = nestedTree();
+  const r = safety.checkItemExclusion(tree, ['SKU-C', 'sku-d'], { under: byId(tree, '301') });
+  assert(r.ok && r.mode === 'subdivide', JSON.stringify(r.mode));
+  const { mutations, removed, created } = mutator.buildItemExclusionMutations(tree, r, ITEM_OPTS);
+  assert(removed === 1 && created === 4, `${removed}/${created}`);
+  assert(mutations[0].operation === 'remove' && mutations[0].resource === byId(tree, '301').resourceName, 'leaf goes first');
+  const podzial = mutations[1].resource;
+  assert(podzial.type === 2 && podzial.case_value.product_type.value === 'donice' && podzial.case_value.product_type.level === 3,
+    'the subdivision must keep the leaf condition');
+  assert(podzial.parent_listing_group_filter === byId(tree, '201').resourceName, 'same parent as the leaf');
+  const dzieci = mutations.slice(2).map((m) => m.resource);
+  assert(dzieci.every((d) => d.parent_listing_group_filter === podzial.resource_name), 'children hang off the new split');
+  assert(dzieci.filter((d) => d.type === 3 && !d.case_value.product_item_id.value).length === 1, 'catch-all stays included');
+  assert(dzieci.filter((d) => d.type === 4).map((d) => d.case_value.product_item_id.value).join() === 'sku-c,sku-d', 'ids lower-cased');
+});
+check('checkItemExclusion --under: an excluded leaf is a no-op', () => {
+  const tree = nestedTree();
+  const r = safety.checkItemExclusion(tree, ['sku-x'], { under: byId(tree, '202') });
+  assert(r.ok && r.mode === 'noop', JSON.stringify(r.mode));
+});
+check('checkItemExclusion --under: refuses to split by item id twice on one path', () => {
+  const tree = nestedTree();
+  const r = safety.checkItemExclusion(tree, ['sku-x'], { under: byId(tree, '402') });
+  assert(!r.ok && /drugi raz/.test(r.reason), JSON.stringify(r));
+});
+check('checkItemExclusion --under: refuses a split on another dimension', () => {
+  const tree = nestedTree();
+  const r = safety.checkItemExclusion(tree, ['sku-x'], { under: byId(tree, '201') });
+  assert(!r.ok && /nie po ID/.test(r.reason), JSON.stringify(r));
+});
+check('buildListingTypeMutations: types on two levels without --under name the candidates', () => {
+  let msg = '';
+  try { mutator.buildListingTypeMutations(nestedTree(), [{ productType: 'pergole', to: 'EXCLUDED' }], OPTS_LT); }
+  catch (e) { msg = e.message; }
+  assert(/Kandydaci/.test(msg) && /id=201/.test(msg), msg);
+});
+check('buildListingTypeMutations --under: a new type lands under the chosen split, at its level', () => {
+  const tree = nestedTree();
+  const r = mutator.buildListingTypeMutations(tree, [{ productType: 'pergole', to: 'EXCLUDED' }],
+    { ...OPTS_LT, under: byId(tree, '201') });
+  assert(r.added === 1 && r.mutations.length === 1, JSON.stringify(r.plan));
+  const res = r.mutations[0].resource;
+  assert(res.parent_listing_group_filter === byId(tree, '201').resourceName && res.type === 4, JSON.stringify(res));
+  assert(res.case_value.product_type.level === 3, 'level taken from the siblings');
+});
+
 console.log(`\nResult: ${passed} passed, ${failed} failed.\n`);
 process.exit(failed === 0 ? 0 : 1);

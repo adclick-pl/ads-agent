@@ -235,6 +235,28 @@ tree already splits on item id somewhere below. The same guard now protects
 `add-label-exclusion`: without it both actions built a plan that Google rejected
 with one unreadable error per operation.
 
+**`--under` is the way around that refusal.** It points the action at one node
+(a numeric filter id, or a product type name) and works below it instead of at
+the root; the refusal message lists the item-id splits the group already has, with
+their ids. Two shapes are accepted:
+
+- a subdivision whose children split on item id → `apply` there: the ids are
+  flipped or added next to the existing siblings, nothing else is touched;
+- an included leaf (a product type, or a "everything else" catch-all) → `subdivide`:
+  the leaf becomes a split by item id with the ids excluded and its own "everything
+  else" still included — one removal, the rest of the tree untouched.
+
+```bash
+# the item-id split sits under product type "beds" — add to it, no rebuild
+node scripts/cli.js --action=add-item-exclusion --customer=1234567890 --asset-group=4455667788 \
+  --under="beds" --item-ids="sku-a,sku-b"
+```
+
+`sync-listing-types` takes the same `--under` (or an `under` CSV column) when the
+tree holds product types on more than one level: without it the action refuses and
+names the candidate subdivisions, because the same type means something different
+in each branch. With it, a missing type is added as a new leaf of that subdivision.
+
 ### `add-label-exclusion` — the one action that removes criteria
 
 A product feed marks junk with a label (`custom_label_0 = wyklucz` is the common

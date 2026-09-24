@@ -258,15 +258,26 @@ function kolizjaWymiaru(tree, root, kind, opisWymiaru, pasuje = () => true) {
  * case-sensitive comparison would miss existing nodes and a second run would pile
  * up duplicates.
  *
+ * With `under` (a node picked by the caller) the exclusions go BELOW that node
+ * instead of at the root — the way to reach a tree whose item-id split already
+ * sits deeper, where a root rebuild is forbidden:
+ *
+ *   apply     - `under` is a subdivision whose children split on product_item_id:
+ *               ids are flipped or added next to those siblings.
+ *   subdivide - `under` is an included leaf: it becomes a subdivision by item id,
+ *               with the ids excluded and "everything else" still included.
+ *   noop      - `under` is an excluded leaf: nothing below it can serve anyway.
+ *
  * Pure: `tree` is what `getListingFilterTree` returns, so the whole decision is
  * testable offline. Returns a reason instead of throwing.
  *
  * @param {Array<object>} tree - every node of one asset group
  * @param {string[]} itemIds - product item ids (offer ids) to exclude
+ * @param {{under?: object|null}} [opts] - node to place the exclusions below
  * @returns {{ok: boolean, reason: string|null, mode: string|null, root: object|null,
  *            juzWykluczone: string[], doPrzelaczenia: object[], doDodania: string[]}}
  */
-export function checkItemExclusion(tree, itemIds) {
+export function checkItemExclusion(tree, itemIds, opts = {}) {
   const no = (reason) => ({ ok: false, reason, mode: null, root: null, juzWykluczone: [], doPrzelaczenia: [], doDodania: [] });
 
   const ids = [...new Set((Array.isArray(itemIds) ? itemIds : [])
@@ -279,6 +290,8 @@ export function checkItemExclusion(tree, itemIds) {
 
   const isItemNode = (n) => n?.dimension?.kind === 'product_item_id';
   const wartosc = (n) => String(n?.dimension?.value ?? '').toLowerCase();
+
+  if (opts.under) return checkItemExclusionUnder(tree, ids, opts.under, no);
 
   // Podział o tej samej wartości to nie liść — pod nim wisi gałąź, której connector
   // nie skasuje w ciemno. Jedna taka kolizja zatrzymuje całą partię, bo wykluczenie
@@ -320,7 +333,17 @@ export function checkItemExclusion(tree, itemIds) {
   const rootSplitsOnItemId = rootKids.every((n) => isItemNode(n));
   if (!rootSplitsOnItemId) {
     const kolizja = kolizjaWymiaru(tree, root, 'product_item_id', 'ID produktu');
-    if (kolizja) return no(kolizja);
+    if (kolizja) {
+      // Podział po ID niżej w drzewie to zwykle właściwe miejsce na wykluczenia —
+      // podpowiadamy go z id, żeby dało się go wskazać bez zaglądania do panelu.
+      const podzialy = [...new Set(tree.filter((n) => isItemNode(n)).map((n) => n.parentResourceName))]
+        .map((rn) => tree.find((n) => n.resourceName === rn))
+        .filter((n) => n && n.parentResourceName)
+        .map((n) => `id=${n.id} (${n.dimension?.label ?? '?'})`);
+      return no(kolizja + (podzialy.length
+        ? ` Albo dołóż ID do istniejącego podziału: --under=<id>. Podziały po ID w tej grupie: ${podzialy.join('; ')}.`
+        : ''));
+    }
   }
   return {
     ok: true,
@@ -331,6 +354,60 @@ export function checkItemExclusion(tree, itemIds) {
     doPrzelaczenia,
     doDodania,
   };
+}
+
+/**
+ * `checkItemExclusion` z wykluczeniami pod wskazanym węzłem zamiast przy korzeniu.
+ *
+ * Nigdy nie przebudowuje: pracuje tylko w obrębie `under` i jego bezpośrednich dzieci,
+ * więc reszta drzewa zostaje nietknięta. Węzły ID o tej samej wartości w innych
+ * gałęziach są ignorowane — każda gałąź decyduje o swoich produktach sama.
+ */
+function checkItemExclusionUnder(tree, ids, under, no) {
+  const isItemNode = (n) => n?.dimension?.kind === 'product_item_id';
+  const wartosc = (n) => String(n?.dimension?.value ?? '').toLowerCase();
+  const opis = `węzeł ${under.id} (${under.dimension?.label ?? '?'})`;
+
+  if (under.type === UNIT_EXCLUDED) {
+    return { ok: true, reason: null, mode: 'noop', root: under, juzWykluczone: ids, doPrzelaczenia: [], doDodania: [] };
+  }
+
+  if (under.type === SUBDIVISION) {
+    const kids = tree.filter((n) => n.parentResourceName === under.resourceName);
+    if (!kids.length) return no(`${opis} nie ma dzieci — odczyt jest niepełny. Nic nie zmieniono.`);
+    if (!kids.every((n) => isItemNode(n))) {
+      return no(
+        `${opis} dzieli po ${kids[0].dimension?.kind || 'innym wymiarze'}, nie po ID produktu. `
+        + 'Wskaż podział po ID albo LIŚĆ — liść connector sam podzieli po ID.'
+      );
+    }
+    const kolizje = kids.filter((n) => n.type === SUBDIVISION && ids.includes(wartosc(n)));
+    if (kolizje.length) {
+      return no(`${kolizje.length} z podanych ID to PODZIAŁY pod ${opis} (np. "${wartosc(kolizje[0])}"). Zrób je w panelu.`);
+    }
+    const liscie = new Map(kids.filter((n) => n.type !== SUBDIVISION).map((n) => [wartosc(n), n]));
+    const juzWykluczone = ids.filter((id) => liscie.get(id)?.type === UNIT_EXCLUDED);
+    const doPrzelaczenia = ids.map((id) => liscie.get(id)).filter((n) => n && n.type === UNIT_INCLUDED);
+    const doDodania = ids.filter((id) => !liscie.has(id));
+    const mode = doPrzelaczenia.length || doDodania.length ? 'apply' : 'noop';
+    return { ok: true, reason: null, mode, root: under, juzWykluczone, doPrzelaczenia, doDodania };
+  }
+
+  // Włączony liść: zostanie podziałem po ID, więc ID nie może już dzielić nad nim
+  // (SAME_DIMENSION_TYPE_BETWEEN_ANCESTORS). Idziemy w górę aż do korzenia.
+  const byRn = new Map(tree.map((n) => [n.resourceName, n]));
+  for (let n = under; n; n = byRn.get(n.parentResourceName)) {
+    if (isItemNode(n)) {
+      return no(`Nad ${opis} ścieżka dzieli już po ID produktu — Performance Max nie pozwala podzielić po nim drugi raz. Wskaż ten podział.`);
+    }
+    if (n.parentResourceName && !byRn.has(n.parentResourceName)) {
+      return no(`${opis} nie wisi pod korzeniem — odczyt drzewa jest niepełny. Nic nie zmieniono.`);
+    }
+  }
+  if (!under.parentResourceName) {
+    return no('Korzeń nie może być liściem do podziału — pomiń --under, żeby wykluczyć przy korzeniu.');
+  }
+  return { ok: true, reason: null, mode: 'subdivide', root: under, juzWykluczone: [], doPrzelaczenia: [], doDodania: ids };
 }
 
 /**

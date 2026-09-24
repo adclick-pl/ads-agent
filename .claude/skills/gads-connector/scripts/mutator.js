@@ -4035,31 +4035,40 @@ const LISTING_TYPE_ACTIONS = new Set(['INCLUDED', 'EXCLUDED', 'REMOVE']);
  * ten sam typ w dwóch gałęziach znaczy co innego w każdej z nich, a zgadywanie
  * której dotyczy wiersz to cicha pomyłka widoczna dopiero w wydatkach.
  *
+ * Drzewo z typami na kilku poziomach (kategoria → podkategoria) ma kilka takich
+ * podziałów — wtedy `opts.under` wskazuje ten, którego dotyczy lista.
+ *
  * @param {Array<object>} tree - drzewo z `getListingFilterTree`
  * @param {Array<{productType: string, to: 'INCLUDED'|'EXCLUDED'|'REMOVE'}>} items
- * @param {{customerId: string, assetGroupId: string}} opts
+ * @param {{customerId: string, assetGroupId: string, under?: object|null}} opts
  * @returns {{mutations: Array<object>, plan: Array<object>, added: number, flipped: number, removed: number, noop: number}}
  */
 export function buildListingTypeMutations(tree, items, opts) {
-  const { customerId, assetGroupId } = opts;
+  const { customerId, assetGroupId, under = null } = opts;
   const assetGroup = `customers/${customerId}/assetGroups/${assetGroupId}`;
   const entity = 'AssetGroupListingGroupFilter';
   const norm = (v) => String(v ?? '').trim().toLowerCase();
 
   const typeNodes = (tree || []).filter(
-    (n) => n.dimension.kind === 'product_type' && n.dimension.value !== null,
+    (n) => n.dimension.kind === 'product_type' && n.dimension.value !== null
+      && (!under || n.parentResourceName === under.resourceName),
   );
   if (typeNodes.length === 0) {
-    throw new Error(
-      '🛑 Ta grupa plików nie dzieli się po typie produktu, więc nie ma gdzie dołożyć węzła. '
-      + 'Podział trzeba najpierw założyć w panelu — dokładanie go tutaj oznaczałoby przebudowę całego drzewa.',
+    throw new Error(under
+      ? `🛑 Pod węzłem ${under.id} (${under.dimension.label}) nie ma podziału po typie produktu — nie ma gdzie dołożyć węzła. `
+        + 'Wskaż podział, którego dzieci to typy produktów.'
+      : '🛑 Ta grupa plików nie dzieli się po typie produktu, więc nie ma gdzie dołożyć węzła. '
+        + 'Podział trzeba najpierw założyć w panelu — dokładanie go tutaj oznaczałoby przebudowę całego drzewa.',
     );
   }
   const parents = new Set(typeNodes.map((n) => n.parentResourceName));
   if (parents.size > 1) {
+    const kandydaci = [...parents]
+      .map((rn) => (tree || []).find((n) => n.resourceName === rn))
+      .map((n) => (n ? `id=${n.id} (${n.dimension.label})` : '?'));
     throw new Error(
       `🛑 Typy produktów wiszą pod ${parents.size} różnymi podziałami — ten sam typ znaczy co innego w każdej gałęzi. `
-      + 'Nie zgaduję której dotyczy wiersz. Zrób to w panelu. Nic nie zmieniono.',
+      + `Wskaż podział przez --under=<id>. Kandydaci: ${kandydaci.join('; ')}. Nic nie zmieniono.`,
     );
   }
   const parent = [...parents][0];
@@ -4162,7 +4171,7 @@ export function buildListingTypeMutations(tree, items, opts) {
  * @param {Array<{productType: string, to: string}>} items
  * @param {boolean} [dryRun=false]
  * @param {string} [loginCustomerId]
- * @param {{snapshotPath?: string|null}} [opts]
+ * @param {{snapshotPath?: string|null, under?: {filterId?: string, productType?: string}}} [opts]
  * @returns {Promise<object>} plan (symulacja walidowana przez Google) albo wynik zapisu
  */
 export async function syncListingTypes(customerId, assetGroupId, items, dryRun = false, loginCustomerId, opts = {}) {
@@ -4177,15 +4186,23 @@ export async function syncListingTypes(customerId, assetGroupId, items, dryRun =
   }
   const tree = inferCatchAllDimensions(surowe);
   const assetGroupName = (tree[0] && tree[0].assetGroupName) || '';
+  let under = null;
+  if (opts.under) {
+    const wybor = selectListingFilterNode(tree, opts.under);
+    if (wybor.error) throw new Error(`🛑 --under: ${wybor.error}`);
+    under = wybor.node;
+  }
 
   const { mutations, plan, added, flipped, removed, noop } = buildListingTypeMutations(tree, items, {
     customerId: cleanCustomerId,
     assetGroupId: cleanAssetGroupId,
+    under,
   });
 
   const base = {
     assetGroupId: cleanAssetGroupId,
     assetGroupName,
+    ...(under ? { under: `${under.id} (${under.dimension.label})` } : {}),
     assetGroupStatus: (tree[0] && tree[0].assetGroupStatus) || null,
     nodesBefore: tree.length,
     added,
@@ -4608,7 +4625,41 @@ export function buildItemExclusionMutations(tree, plan, opts) {
     });
   }
 
-  // ── apply: korzeń już dzieli po product_item_id ───────────────────────────
+  if (plan.mode === 'subdivide') {
+    // Włączony liść staje się podziałem po ID: kasujemy go i odtwarzamy jako podział
+    // z tym samym warunkiem, a pod nim „wszystko inne" (włączone) i wykluczone ID.
+    // Wszystko w jednym mutate — bez tego gałąź na chwilę znikałaby z kierowania.
+    const leaf = plan.root;
+    const caseValue = rebuildListingCaseValue(leaf.dimension);
+    if (!caseValue) {
+      throw new Error(
+        `🛑 Nie umiem odtworzyć warunku węzła ${leaf.id} (wymiar: ${leaf.dimension.kind || 'nieznany'}). `
+        + 'Bez wiernej kopii podział zmieniłby zakres grupy plików. Nic nie zmieniono.'
+      );
+    }
+    const podzialRn = temp();
+    const mutations = [
+      remove(leaf.resourceName),
+      create({
+        asset_group: assetGroup, resource_name: podzialRn, type: 2, ...src(leaf),
+        parent_listing_group_filter: leaf.parentResourceName, case_value: caseValue,
+      }),
+      create({
+        asset_group: assetGroup, type: 3, ...src(leaf),
+        parent_listing_group_filter: podzialRn, case_value: itemCase(null),
+      }),
+      ...plan.doDodania.map((id) => create({
+        asset_group: assetGroup, type: 4, ...src(leaf),
+        parent_listing_group_filter: podzialRn, case_value: itemCase(id),
+      })),
+    ];
+    if (mutations.length > MUTATE_CHUNK) {
+      throw new Error(`🛑 To ${mutations.length} operacji, a jedno żądanie mieści ${MUTATE_CHUNK}. Podziel listę ID na mniejsze partie.`);
+    }
+    return { mutations, removed: 1, created: mutations.length - 1 };
+  }
+
+  // ── apply: podział (korzeń albo --under) już dzieli po product_item_id ─────
   const mutations = [];
   for (const node of plan.doPrzelaczenia) {
     // API nie pozwala zmienić typu węzła, więc przełączenie to usunięcie starego
@@ -4648,12 +4699,17 @@ export function buildItemExclusionMutations(tree, plan, opts) {
  * te same produkty wyklucza się we wszystkich grupach, tańsza jest droga przez etykietę
  * (`addLabelExclusion`), która działa na całe konto jednym węzłem na grupę.
  *
+ * `opts.under` ({filterId} albo {productType}) kieruje wykluczenia pod wskazany węzeł:
+ * dokłada je do istniejącego podziału po ID albo dzieli po ID włączony liść. To droga
+ * dla drzew, w których podział po ID siedzi niżej i przebudowa przy korzeniu jest
+ * zabroniona.
+ *
  * @param {string} customerId
  * @param {string|number} assetGroupId
  * @param {string[]} itemIds
  * @param {boolean} [dryRun=false]
  * @param {string} [loginCustomerId]
- * @param {{snapshotPath?: string}} [opts]
+ * @param {{snapshotPath?: string, under?: {filterId?: string, productType?: string}}} [opts]
  * @returns {Promise<object>} plan (dry-run, sprawdzony przez Google) albo wynik mutate
  */
 export async function addItemExclusion(customerId, assetGroupId, itemIds, dryRun = false, loginCustomerId, opts = {}) {
@@ -4663,13 +4719,20 @@ export async function addItemExclusion(customerId, assetGroupId, itemIds, dryRun
 
   const surowe = await getListingFilterTree(cleanCustomerId, cleanAssetGroupId, { loginCustomerId });
   const tree = inferCatchAllDimensions(surowe);
-  const plan = checkItemExclusion(tree, itemIds);
+  let under = null;
+  if (opts.under) {
+    const wybor = selectListingFilterNode(tree, opts.under);
+    if (wybor.error) throw new Error(`🛑 --under: ${wybor.error}`);
+    under = wybor.node;
+  }
+  const plan = checkItemExclusion(tree, itemIds, { under });
   if (!plan.ok) throw new Error(`🛑 ${plan.reason}`);
 
   const assetGroupName = (tree[0] && tree[0].assetGroupName) || '';
   const base = {
     assetGroupId: cleanAssetGroupId,
     assetGroupName,
+    ...(under ? { under: `${under.id} (${under.dimension.label})` } : {}),
     mode: plan.mode,
     nodesBefore: tree.length,
     juzWykluczone: plan.juzWykluczone.length,
@@ -4692,6 +4755,9 @@ export async function addItemExclusion(customerId, assetGroupId, itemIds, dryRun
       + 'ale węzły dostają NOWE id, więc ich statystyki w panelu startują od zera (historia kampanii i produktów zostaje '
       + 'nietknięta). Gdy ta grupa dzieli się dziś po etykiecie niestandardowej, TAŃSZE jest wykluczenie przez etykietę '
       + '(--action=add-label-exclusion): jeden węzeł zamiast przebudowy całego drzewa.'
+    : plan.mode === 'subdivide'
+    ? `PODZIAŁ LIŚCIA: węzeł ${under.id} staje się podziałem po ID — „wszystko inne" pod nim zostaje włączone, `
+      + `${plan.doDodania.length} ID wykluczonych. Węzeł dostaje NOWE id, więc jego statystyki w panelu startują od zera.`
     : `Dokładamy ${plan.doDodania.length} wykluczeń i przełączamy ${plan.doPrzelaczenia.length} — przełączone węzły dostają `
       + 'NOWE id, więc ich historia statystyk w panelu zaczyna się od zera.';
 
