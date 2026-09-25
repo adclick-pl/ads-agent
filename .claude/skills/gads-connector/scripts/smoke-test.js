@@ -1613,5 +1613,47 @@ check('buildListingTypeMutations --under: a new type lands under the chosen spli
   assert(res.case_value.product_type.level === 3, 'level taken from the siblings');
 });
 
+const CA_MEMBERS = [
+  { member_type: 2, keyword: 'drzwi zewnętrzne' },
+  { member_type: 3, url: 'www.konkurent.example/drzwi' },
+  { member_type: 3, url: 'tani-sklep.example' },
+];
+check('planCustomAudienceUrls: keyword members pass through, types become names', () => {
+  const r = safety.planCustomAudienceUrls(CA_MEMBERS, ['nowy.example/drzwi'], []);
+  assert(r.members[0].member_type === 'KEYWORD' && r.members[0].keyword === 'drzwi zewnętrzne', JSON.stringify(r.members[0]));
+  assert(r.members.length === 4 && r.members[3].url === 'nowy.example/drzwi', JSON.stringify(r.members));
+});
+check('planCustomAudienceUrls: present URL is skipped despite https/www/trailing slash', () => {
+  const r = safety.planCustomAudienceUrls(CA_MEMBERS, ['https://konkurent.example/drzwi/'], []);
+  assert(r.added.length === 0 && r.skipped.length === 1 && r.members.length === 3, JSON.stringify(r));
+});
+check('planCustomAudienceUrls: removal drops the member, absent removal is reported', () => {
+  const r = safety.planCustomAudienceUrls(CA_MEMBERS, [], ['tani-sklep.example', 'nie-ma.example']);
+  assert(r.removed[0] === 'tani-sklep.example' && r.members.length === 2, JSON.stringify(r));
+  assert(r.notFound.length === 1 && r.notFound[0] === 'nie-ma.example', JSON.stringify(r.notFound));
+});
+check('planCustomAudienceUrls: duplicates in the add list collapse to one', () => {
+  const r = safety.planCustomAudienceUrls([], ['a.example/x', 'https://www.a.example/x/'], []);
+  assert(r.added.length === 1 && r.members.length === 1, JSON.stringify(r));
+});
+
+const CA_RN = 'customers/1/customAudiences/9';
+check('planAudienceSegmentAdd: appends to the existing segment list, user lists stay', () => {
+  const dims = [{ audience_segments: { segments: [{ user_list: { user_list: 'customers/1/userLists/7' } }] } }];
+  const r = safety.planAudienceSegmentAdd(dims, CA_RN);
+  const segs = r.dimensions[0].audience_segments.segments;
+  assert(!r.alreadyPresent && segs.length === 2 && segs[1].custom_audience.custom_audience === CA_RN, JSON.stringify(r));
+  assert(dims[0].audience_segments.segments.length === 1, 'input must not be mutated');
+});
+check('planAudienceSegmentAdd: already present is a no-op', () => {
+  const dims = [{ audience_segments: { segments: [{ custom_audience: { custom_audience: CA_RN } }] } }];
+  const r = safety.planAudienceSegmentAdd(dims, CA_RN);
+  assert(r.alreadyPresent && r.dimensions[0].audience_segments.segments.length === 1, JSON.stringify(r));
+});
+check('planAudienceSegmentAdd: no segment dimension yet → one is created, other dimensions stay', () => {
+  const r = safety.planAudienceSegmentAdd([{ age: { age_ranges: [] } }], CA_RN);
+  assert(r.dimensions.length === 2 && r.dimensions[1].audience_segments.segments.length === 1, JSON.stringify(r));
+});
+
 console.log(`\nResult: ${passed} passed, ${failed} failed.\n`);
 process.exit(failed === 0 ? 0 : 1);

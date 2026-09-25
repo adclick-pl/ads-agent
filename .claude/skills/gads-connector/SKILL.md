@@ -298,6 +298,16 @@ node scripts/cli.js --action=add-negative-placements --customer=1234567890 --dom
 # "protected" while the spending ones stay uncovered.
 node scripts/cli.js --action=add-negative-youtube-channels --customer=1234567890 --channels="UCaaaaaaaaaaaaaaaaaaaaaa,UCbbbbbbbbbbbbbbbbbbbbbb"
 
+# Add / remove URLs in a custom audience (custom segment), e.g. a competitor list
+# used as a PMax audience signal. Rewrites the full member list; keywords stay.
+node scripts/cli.js --action=update-custom-audience --customer=1234567890 --audience=555666777 --add-urls="konkurent.example/drzwi-zewnetrzne" --remove-urls="tani-sklep.example"
+
+# Create a custom segment, then add it to a PMax asset group's audience signal
+# (the asset group must already have an audience signal; the rest of it stays).
+node scripts/cli.js --action=create-custom-audience --customer=1234567890 --name="Konkurencja - okucia" --urls="konkurent.example/klamki,inny.example/pochwyty"
+# URLs with a comma in the path (e.g. "/pochwyty,c18.html") → --urls-file / --add-urls-file, one URL per line
+node scripts/cli.js --action=add-asset-group-audience --customer=1234567890 --asset-group=4455667788 --custom-audience=555666777
+
 # Change an ad's Final URL — single ad (works for RSA; legacy text ads are immutable)
 node scripts/cli.js --action=update-ad-url --customer=1234567890 --ad=670502653180 --url="https://example.pl/kategoria/" --domain=example.pl
 

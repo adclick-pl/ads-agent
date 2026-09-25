@@ -1242,3 +1242,61 @@ export function checkConversionAction(c, opts = {}) {
 
   return { valid: reasons.length === 0, reasons, warnings };
 }
+
+/**
+ * Plan a URL change on a custom audience (custom segment). `members` is one
+ * repeated field — the API replaces it whole — so the plan returns the FULL list
+ * to write back. Non-URL members (keywords, apps, place categories) pass through.
+ * URLs compare without protocol, "www." and trailing slash; re-adding a present
+ * URL is skipped, removing an absent one is reported instead of failing.
+ *
+ * @param {Array<object>} currentMembers - `custom_audience.members` as read from the API
+ * @param {string[]} [add]
+ * @param {string[]} [remove]
+ * @returns {{members: object[], added: string[], skipped: string[], removed: string[], notFound: string[]}}
+ */
+export function planCustomAudienceUrls(currentMembers, add = [], remove = []) {
+  const norm = (u) => String(u).trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+  const key = (u) => norm(u).toLowerCase().replace(/^www\./, '');
+  const TYPE = { 2: 'KEYWORD', 3: 'URL', 4: 'PLACE_CATEGORY', 5: 'APP' };
+  const current = (currentMembers || []).map((m) => {
+    const out = { member_type: TYPE[m.member_type] || m.member_type };
+    for (const f of ['keyword', 'url', 'place_category', 'app']) if (m[f] != null && m[f] !== '') out[f] = m[f];
+    return out;
+  });
+  const drop = new Set(remove.map(key).filter(Boolean));
+  const present = new Set(current.filter((m) => m.url != null).map((m) => key(m.url)));
+  const wanted = [...new Map(add.map(norm).filter(Boolean).map((u) => [key(u), u])).values()];
+  const added = wanted.filter((u) => !present.has(key(u)) && !drop.has(key(u)));
+  const kept = current.filter((m) => !(m.url != null && drop.has(key(m.url))));
+  return {
+    members: [...kept, ...added.map((url) => ({ member_type: 'URL', url }))],
+    added,
+    skipped: wanted.filter((u) => present.has(key(u))),
+    removed: current.filter((m) => m.url != null && drop.has(key(m.url))).map((m) => m.url),
+    notFound: [...drop].filter((k) => !present.has(k)),
+  };
+}
+
+/**
+ * Plan adding a custom audience to a PMax asset group's audience signal. The signal
+ * points at an Audience whose `dimensions` hold one `audience_segments` list (user
+ * lists, custom audiences, interests…); adding = appending one segment to it, the
+ * rest stays. Returns the FULL `dimensions` to write back.
+ *
+ * @param {Array<object>} dimensions - `audience.dimensions` as read from the API
+ * @param {string} customAudienceResourceName
+ * @returns {{dimensions: object[], alreadyPresent: boolean}}
+ */
+export function planAudienceSegmentAdd(dimensions, customAudienceResourceName) {
+  const dims = JSON.parse(JSON.stringify(dimensions || []));
+  const segDim = dims.find((d) => d.audience_segments);
+  const segments = segDim?.audience_segments?.segments || [];
+  if (segments.some((s) => s.custom_audience?.custom_audience === customAudienceResourceName)) {
+    return { dimensions: dims, alreadyPresent: true };
+  }
+  const seg = { custom_audience: { custom_audience: customAudienceResourceName } };
+  if (segDim) segDim.audience_segments.segments = [...segments, seg];
+  else dims.push({ audience_segments: { segments: [seg] } });
+  return { dimensions: dims, alreadyPresent: false };
+}

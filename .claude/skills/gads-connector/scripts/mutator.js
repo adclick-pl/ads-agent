@@ -1,7 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { getCustomer, unpackError } from './client.js';
 import { getKeywordsByCriteria, getCampaignBasics, getCampaignBiddingInfo, getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts, getExistingStructuredSnippets, getExistingPriceAssets, getExistingPromotions, promotionIdentity, getAdGroupAdsByAdIds, getAdGroupsByIds, getExistingYoutubeAssets, getExistingDemandGenAds, getExistingDemandGenProductAds, getExistingListingGroups, getAssetGroupsByIds, getListingFilterTree, LISTING_FILTER_TYPE_NAME, getAdGroupTargetingCriteria, getCampaignChannelTypes, getCallToActionAssets, getConversionActions, getExistingCampaigns, getBudgetsByName, COPYABLE_CRITERION_TYPES } from './queries.js';
-import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkPriceOfferings, checkPromotion, checkDemandGenAdTexts, checkDemandGenChannels, DEMAND_GEN_LIMITS, adTextLength, checkConversionAction, checkCampaignSpec, checkListingFilterFlip, checkLabelExclusion, checkItemExclusion } from './safety.js';
+import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkPriceOfferings, checkPromotion, checkDemandGenAdTexts, checkDemandGenChannels, DEMAND_GEN_LIMITS, adTextLength, checkConversionAction, checkCampaignSpec, checkListingFilterFlip, checkLabelExclusion, checkItemExclusion, planCustomAudienceUrls, planAudienceSegmentAdd } from './safety.js';
 
 /**
  * Entity metadata for Final URL updates. Maps our short entity key to the
@@ -886,6 +886,176 @@ export async function addCampaignNegativeKeywords(customerId, campaignId, keywor
     };
   } catch (error) {
     throw new Error(`Failed to add campaign negative keywords: ${unpackError(error)}`);
+  }
+}
+
+/**
+ * Add / remove URL members of an existing custom audience (custom segment) —
+ * e.g. the competitor list feeding a PMax audience signal.
+ *
+ * The API cannot append to `members`; an update replaces the whole list. So this
+ * reads the current members, applies the plan from `planCustomAudienceUrls` and
+ * writes the full list back. Keywords and other member types are preserved.
+ * Idempotent: URLs already present are skipped; nothing to change → no write.
+ *
+ * @param {string} customerId
+ * @param {string|number} audienceId - custom_audience.id
+ * @param {{add?: string[], remove?: string[]}} change
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>} Plan summary (+ API response when written)
+ */
+export async function updateCustomAudienceUrls(customerId, audienceId, { add = [], remove = [] } = {}, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  const cleanId = String(audienceId).replace(/[^0-9]/g, '');
+  if (!cleanId) throw new Error('update-custom-audience: brak poprawnego --audience=<ID>.');
+  if (!add.length && !remove.length) throw new Error('update-custom-audience: podaj --add-urls i/lub --remove-urls.');
+
+  const customer = getCustomer(cleanCustomerId, loginCustomerId);
+  const rows = await customer.query(`
+    SELECT custom_audience.resource_name, custom_audience.name, custom_audience.members
+    FROM custom_audience
+    WHERE custom_audience.id = ${cleanId}
+  `);
+  const ca = rows?.[0]?.custom_audience;
+  if (!ca) throw new Error(`update-custom-audience: nie znaleziono segmentu ${cleanId} na koncie ${cleanCustomerId}.`);
+
+  const plan = planCustomAudienceUrls(ca.members, add, remove);
+  if (!plan.members.length) {
+    throw new Error('update-custom-audience: zmiana usunęłaby wszystkie elementy segmentu — Google tego nie przyjmie.');
+  }
+  const summary = {
+    audienceId: cleanId,
+    name: ca.name,
+    before: (ca.members || []).length,
+    after: plan.members.length,
+    added: plan.added,
+    removed: plan.removed,
+    skipped: plan.skipped,
+    notFound: plan.notFound,
+  };
+  const unchanged = !plan.added.length && !plan.removed.length;
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Custom audience ${cleanId} "${ca.name}": +${plan.added.length} / -${plan.removed.length} URL...`);
+  if (dryRun || unchanged) return { success: true, dryRun, unchanged, ...summary };
+
+  try {
+    const response = await customer.customAudiences.update([{ resource_name: ca.resource_name, members: plan.members }]);
+    return { success: true, dryRun: false, unchanged: false, ...summary, response };
+  } catch (error) {
+    throw new Error(`Failed to update custom audience: ${unpackError(error)}`);
+  }
+}
+
+/**
+ * Create a custom audience (custom segment) from URLs and optional keywords.
+ * Type AUTO — the only type Google still offers for new segments. Idempotent by
+ * name: an ENABLED segment with the same name is returned instead of a duplicate.
+ *
+ * @param {string} customerId
+ * @param {{name: string, urls?: string[], keywords?: string[]}} spec
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>} Summary with the new (or existing) custom audience id
+ */
+export async function createCustomAudience(customerId, { name, urls = [], keywords = [] } = {}, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  const cleanName = String(name ?? '').trim();
+  if (!cleanName) throw new Error('create-custom-audience: --name nie może być puste.');
+  const plan = planCustomAudienceUrls([], urls, []);
+  const members = [
+    ...keywords.map((k) => String(k).trim()).filter(Boolean).map((keyword) => ({ member_type: 'KEYWORD', keyword })),
+    ...plan.members,
+  ];
+  if (!members.length) throw new Error('create-custom-audience: podaj --urls i/lub --keywords.');
+
+  const customer = getCustomer(cleanCustomerId, loginCustomerId);
+  const existing = await customer.query(`
+    SELECT custom_audience.id, custom_audience.name
+    FROM custom_audience
+    WHERE custom_audience.status = 'ENABLED'
+  `);
+  const clash = (existing || []).find((r) => String(r.custom_audience?.name).toLowerCase() === cleanName.toLowerCase());
+  const summary = { name: cleanName, urls: plan.added, keywords: members.filter((m) => m.keyword).map((m) => m.keyword) };
+  if (clash) return { success: true, dryRun, exists: true, audienceId: String(clash.custom_audience.id), ...summary };
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Creating custom audience "${cleanName}" (${members.length} members)...`);
+  if (dryRun) return { success: true, dryRun: true, exists: false, ...summary };
+
+  try {
+    const response = await customer.customAudiences.create([{ name: cleanName, type: 'AUTO', status: 'ENABLED', members }]);
+    const rn = response?.results?.[0]?.resource_name || '';
+    return { success: true, dryRun: false, exists: false, audienceId: rn.split('/').pop(), resourceName: rn, ...summary, response };
+  } catch (error) {
+    throw new Error(`Failed to create custom audience: ${unpackError(error)}`);
+  }
+}
+
+/**
+ * Add a custom audience to the audience signal of a Performance Max asset group.
+ *
+ * A PMax asset group has at most one audience signal, pointing at an Audience
+ * whose segment list mixes user lists, custom audiences and interests. We append
+ * the custom audience to that list (`planAudienceSegmentAdd`) and keep the rest.
+ * An asset group WITHOUT an audience signal is refused — creating the signal from
+ * scratch is a separate job; add it once in the UI, then use this action.
+ *
+ * @param {string} customerId
+ * @param {string|number} assetGroupId
+ * @param {string|number} customAudienceId
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>} Summary (+ API response when written)
+ */
+export async function addCustomAudienceToAssetGroup(customerId, assetGroupId, customAudienceId, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  const agId = String(assetGroupId).replace(/[^0-9]/g, '');
+  const caId = String(customAudienceId).replace(/[^0-9]/g, '');
+  if (!agId || !caId) throw new Error('add-asset-group-audience: wymaga --asset-group=<ID> i --custom-audience=<ID>.');
+
+  const customer = getCustomer(cleanCustomerId, loginCustomerId);
+  const caRows = await customer.query(`
+    SELECT custom_audience.resource_name, custom_audience.name
+    FROM custom_audience
+    WHERE custom_audience.id = ${caId}
+  `);
+  const ca = caRows?.[0]?.custom_audience;
+  if (!ca) throw new Error(`add-asset-group-audience: nie znaleziono segmentu ${caId} na koncie ${cleanCustomerId}.`);
+
+  const sigRows = await customer.query(`
+    SELECT asset_group.name, asset_group_signal.audience.audience
+    FROM asset_group_signal
+    WHERE asset_group.id = ${agId}
+      AND asset_group_signal.audience.audience IS NOT NULL
+  `);
+  const audienceRn = sigRows?.[0]?.asset_group_signal?.audience?.audience;
+  if (!audienceRn) {
+    throw new Error(`add-asset-group-audience: grupa plików ${agId} nie ma sygnału odbiorców — dodaj go raz w panelu, potem użyj tej akcji.`);
+  }
+  const audRows = await customer.query(`
+    SELECT audience.resource_name, audience.name, audience.dimensions
+    FROM audience
+    WHERE audience.resource_name = '${audienceRn}'
+  `);
+  const audience = audRows?.[0]?.audience;
+  if (!audience) throw new Error(`add-asset-group-audience: nie udało się odczytać odbiorców ${audienceRn}.`);
+
+  const plan = planAudienceSegmentAdd(audience.dimensions, ca.resource_name);
+  const summary = {
+    assetGroupId: agId,
+    assetGroup: sigRows[0]?.asset_group?.name,
+    audience: audienceRn,
+    customAudienceId: caId,
+    customAudience: ca.name,
+    alreadyPresent: plan.alreadyPresent,
+  };
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Asset group ${agId}: ${plan.alreadyPresent ? 'custom audience already in signal' : `adding custom audience "${ca.name}" to signal`}...`);
+  if (dryRun || plan.alreadyPresent) return { success: true, dryRun, ...summary };
+
+  try {
+    const response = await customer.audiences.update([{ resource_name: audienceRn, dimensions: plan.dimensions }]);
+    return { success: true, dryRun: false, ...summary, response };
+  } catch (error) {
+    throw new Error(`Failed to add custom audience to asset group signal: ${unpackError(error)}`);
   }
 }
 

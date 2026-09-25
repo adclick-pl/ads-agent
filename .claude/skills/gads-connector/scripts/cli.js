@@ -62,6 +62,9 @@ import {
   syncListingTypes,
   addLabelExclusion,
   addItemExclusion,
+  updateCustomAudienceUrls,
+  createCustomAudience,
+  addCustomAudienceToAssetGroup,
 } from './mutator.js';
 import {
   resolveAccount, loadAccounts, registryConflicts, findAccountsFile,
@@ -70,6 +73,16 @@ import {
 import { rowsToCsv, parseCsv } from './csv.js';
 import { chooseOutputMode, defaultCsvPath, DEFAULT_INLINE_THRESHOLD } from './output.js';
 import { DEFAULT_MAX_BUDGET_CHANGE_PCT } from './safety.js';
+
+/**
+ * A list from a flag ("a,b,c") or from a file (one entry per line). The file form
+ * exists for URLs: shop category paths often contain commas ("/pochwyty,c18.html"),
+ * which a comma-split would silently cut into pieces.
+ */
+function urlList(flagValue, filePath) {
+  if (filePath) return readFileSync(path.resolve(filePath), 'utf8').split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  return String(flagValue || '').split(',').map((s) => s.trim()).filter(Boolean);
+}
 
 const PREVIEW_ROWS = 10;
 
@@ -408,6 +421,16 @@ Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
   add-negatives           Negatywne słowa kluczowe (--campaign, --keywords, --match-type).
   add-negative-placements Wykluczenia miejsc docelowych — domeny (--domains).
   add-negative-youtube-channels  Wykluczenia kanałów YouTube na poziomie konta (--channels).
+  update-custom-audience  Dopisuje/usuwa URL-e w niestandardowym segmencie odbiorców
+                          (--audience=<custom_audience.id> --add-urls="a,b" --remove-urls="c").
+                          URL-e z przecinkiem w ścieżce → --add-urls-file=plik (1 URL na linię).
+                          Pozostałe elementy (słowa kluczowe) zostają; duplikaty są pomijane.
+  create-custom-audience  Nowy niestandardowy segment z URL-i i/lub słów (--name="…" --urls="a,b"
+                          --keywords="x,y"; albo --urls-file=plik, 1 URL na linię — dla URL-i
+                          z przecinkiem). Segment o tej samej nazwie → zwraca istniejący.
+  add-asset-group-audience  Dopina segment do sygnału odbiorców grupy plików PMax
+                          (--asset-group=<ID> --custom-audience=<ID>). Reszta sygnału zostaje;
+                          grupa bez sygnału odbiorców → odmowa (dodaj go raz w panelu).
   update-ad-url           Zmiana Final URL reklamy (RSA). Pojedynczo: --ad=<adId> --url=<...>;
                           wsadowo: --input=mapa.csv (kolumny: id,final_url).
   update-keyword-url      Zmiana Final URL słowa kluczowego (override). Pojedynczo:
@@ -1167,6 +1190,28 @@ async function main() {
       }
       const keywords = keywordsString.split(',').map((k) => ({ text: k.trim(), matchType })).filter((k) => k.text);
       const result = await addCampaignNegativeKeywords(customerId, campaignId, keywords, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'update-custom-audience') {
+      if (!args.audience) throw new Error('update-custom-audience requires --audience=<customAudienceId> and --add-urls="a,b" (or --add-urls-file) and/or --remove-urls="c,d"');
+      const result = await updateCustomAudienceUrls(customerId, args.audience,
+        { add: urlList(args['add-urls'], args['add-urls-file']), remove: urlList(args['remove-urls']) }, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'create-custom-audience') {
+      if (!args.name) throw new Error('create-custom-audience requires --name="…" and --urls="a,b" (or --urls-file) and/or --keywords="x,y"');
+      const result = await createCustomAudience(customerId,
+        { name: args.name, urls: urlList(args.urls, args['urls-file']), keywords: urlList(args.keywords) }, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'add-asset-group-audience') {
+      if (!args['asset-group'] || !args['custom-audience']) {
+        throw new Error('add-asset-group-audience requires --asset-group=<ID> and --custom-audience=<ID>');
+      }
+      const result = await addCustomAudienceToAssetGroup(customerId, args['asset-group'], args['custom-audience'], dryRun, loginCustomerId);
       console.log(JSON.stringify(result, null, 2));
     }
 
