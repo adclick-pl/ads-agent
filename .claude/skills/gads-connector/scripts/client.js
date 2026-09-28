@@ -20,7 +20,6 @@ export function getApiClient() {
   apiInstance = new GoogleAdsApi({
     client_id: config.client_id,
     client_secret: config.client_secret,
-    developer_token: config.developer_token,
   });
 
   return { api: apiInstance, config: apiConfig };

@@ -7,6 +7,25 @@ restarcie sesji. Szczegóły każdego skilla: `.claude/skills/<skill>/SKILL.md`.
 
 ---
 
+## 2026-09-25
+
+### Zmienione
+
+- **Konektor nie używa już developer tokena.** Google przeniósł poziomy dostępu do
+  Google Ads API z developer tokenów na **projekty Google Cloud** — dostęp ma projekt,
+  w którym jest klient OAuth, a nagłówek `developer-token` jest ignorowany (wersje API
+  z 1. połowy 2027 w ogóle go nie przyjmą). `developer_token` / `GADS_DEVELOPER_TOKEN`
+  nie jest już wymagany ani wysyłany; jeśli masz go w `~/google-ads.yaml` lub `.env`,
+  możesz go zostawić albo usunąć — nic się nie zmieni.
+- **Onboarding (krok 3.5–3.6):** dostęp do API zdobywa się na stronie **Google Ads API
+  Overview** w Google Cloud Console, a nie w „Centrum interfejsu API" na koncie Google
+  Ads (wnioski składane tam nie są już rozpatrywane). Konto menedżera (MCC) nie jest
+  już wymagane — przy jednym koncie wystarczy `default_customer_id`.
+- Nowy błąd w tabeli problemów: `CLOUD_PROJECT_NOT_APPROVED_FOR_PRODUCTION` — projekt
+  Cloud ma tylko dostęp „Test".
+
+---
+
 ## 2026-09-22
 
 ### Dodane

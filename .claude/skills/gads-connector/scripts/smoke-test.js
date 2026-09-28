@@ -101,7 +101,6 @@ check('validateConfig throws when credentials are missing', () => {
 });
 check('validateConfig passes with full credentials', () => {
   config.validateConfig({
-    developer_token: 'x',
     client_id: 'x',
     client_secret: 'x',
     refresh_token: 'x',

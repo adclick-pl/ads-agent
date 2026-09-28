@@ -70,10 +70,11 @@ Credentials are read in this order:
 2. The current working directory's `.env` (dotenv default).
 3. `~/google-ads.yaml` in your home directory (copy from `references/google-ads.yaml.example`).
 
-Required values: `GADS_DEVELOPER_TOKEN`, `GADS_CLIENT_ID`, `GADS_CLIENT_SECRET`,
-`GADS_REFRESH_TOKEN`. For agency/MCC use also set `GADS_LOGIN_CUSTOMER_ID` (the
-manager account). `GADS_DEFAULT_CUSTOMER_ID` is the account used when no
-`--customer` is passed.
+Required values: `GADS_CLIENT_ID`, `GADS_CLIENT_SECRET`, `GADS_REFRESH_TOKEN`.
+No developer token — API access is granted to the Google Cloud project that owns
+the OAuth client (a legacy `GADS_DEVELOPER_TOKEN` / `developer_token` is ignored).
+For agency/MCC use also set `GADS_LOGIN_CUSTOMER_ID` (the manager account).
+`GADS_DEFAULT_CUSTOMER_ID` is the account used when no `--customer` is passed.
 
 > **Never commit `.env` or `google-ads.yaml`** — both are in `.gitignore`.
 
@@ -126,9 +127,9 @@ node scripts/cli.js --action=get-search-terms --customer=1234567890 --days=90 --
 
 ## Setup Google Ads API (getting the credentials)
 
-1. **Google Cloud project** — create one at [console.cloud.google.com](https://console.cloud.google.com), then enable the **Google Ads API**.
+1. **Google Cloud project** — create one at [console.cloud.google.com](https://console.cloud.google.com), then enable the **Google Ads API**. The project starts with **Test** access (test accounts only).
 2. **OAuth client** — *APIs & Services → Credentials → Create credentials → OAuth client ID → Desktop app*. Copy the `client_id` and `client_secret`.
-3. **Developer token** — in your Google Ads **MCC** account: *Tools → API Center*. Apply for a token (test tokens work immediately on test accounts; production access needs Google approval, usually 1–2 days).
+3. **API access level** — in the **same** project open the **Google Ads API Overview** page → *Upgrade access level* → *Apply for access*. **Explorer** (often granted automatically) works on production accounts with a daily operation limit; **Basic** requires brand verification first. Developer tokens and the API Center in Google Ads are no longer used for this.
 4. **Refresh token** — put `client_id` + `client_secret` in `.env`, then run `node scripts/auth.js`. It opens a browser, you authorize the Google account that has access to the ads accounts, and it prints (and offers to save) the `refresh_token`.
 5. **Customer IDs** — your 10-digit account numbers (dashes optional, stripped automatically).
 
@@ -144,7 +145,6 @@ under `mcpServers` (use the absolute path on your machine):
       "command": "node",
       "args": ["/ABSOLUTE/PATH/TO/.claude/skills/gads-connector/scripts/mcp-server.js"],
       "env": {
-        "GADS_DEVELOPER_TOKEN": "...",
         "GADS_CLIENT_ID": "...",
         "GADS_CLIENT_SECRET": "...",
         "GADS_REFRESH_TOKEN": "...",
@@ -202,7 +202,7 @@ The connector is built so an AI agent can touch a live Google Ads account
 |---|---|
 | `invalid_grant` | Refresh token expired or revoked → re-run `node scripts/auth.js`. |
 | `PERMISSION_DENIED` | Missing/incorrect `GADS_LOGIN_CUSTOMER_ID` for an MCC child account, or the OAuth user lacks access. |
-| `DEVELOPER_TOKEN_NOT_APPROVED` | Token still pending Google approval, or used against a non-test account before approval. |
+| `CLOUD_PROJECT_NOT_APPROVED_FOR_PRODUCTION` (older API versions: `DEVELOPER_TOKEN_NOT_APPROVED`) | The Cloud project that owns the OAuth client only has Test access → apply for Explorer on its Google Ads API Overview page, or use an OAuth client from the project that already has access. |
 | `Missing required ... configuration` | `.env` not filled in / not found — check it's in this folder. |
 | Module import errors | Run `npm install` at the package root (`Ads-Agent/`). |
 

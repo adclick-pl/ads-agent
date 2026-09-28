@@ -27,9 +27,11 @@ dotenv.config({ quiet: true });
  * @returns {object} The configuration object
  */
 export function loadConfig() {
-  // 1. Try env vars first
+  // 1. Try env vars first. No developer token: since 2026-09 Google Ads API
+  // access levels belong to the Google Cloud project that owns the OAuth client,
+  // and the developer-token header is ignored (rejected by API versions from
+  // H1 2027). A legacy developer_token in .env / yaml is simply not read.
   const envConfig = {
-    developer_token: process.env.GADS_DEVELOPER_TOKEN,
     client_id: process.env.GADS_CLIENT_ID,
     client_secret: process.env.GADS_CLIENT_SECRET,
     refresh_token: process.env.GADS_REFRESH_TOKEN,
@@ -38,7 +40,7 @@ export function loadConfig() {
   };
 
   // Check if env has the core authentication parameters
-  const hasEnvCredentials = envConfig.developer_token && envConfig.client_id && envConfig.client_secret && envConfig.refresh_token;
+  const hasEnvCredentials = envConfig.client_id && envConfig.client_secret && envConfig.refresh_token;
 
   if (hasEnvCredentials) {
     // If GADS_DEFAULT_CUSTOMER_ID is not provided, fallback to GADS_LOGIN_CUSTOMER_ID
@@ -56,7 +58,6 @@ export function loadConfig() {
       const yamlConfig = yaml.load(fileContents);
       
       const parsedConfig = {
-        developer_token: yamlConfig.developer_token,
         client_id: yamlConfig.client_id,
         client_secret: yamlConfig.client_secret,
         refresh_token: yamlConfig.refresh_token,
@@ -85,7 +86,6 @@ export function loadConfig() {
  */
 export function validateConfig(config) {
   const missing = [];
-  if (!config.developer_token) missing.push('GADS_DEVELOPER_TOKEN / developer_token');
   if (!config.client_id) missing.push('GADS_CLIENT_ID / client_id');
   if (!config.client_secret) missing.push('GADS_CLIENT_SECRET / client_secret');
   if (!config.refresh_token) missing.push('GADS_REFRESH_TOKEN / refresh_token');

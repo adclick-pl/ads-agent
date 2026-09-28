@@ -25,7 +25,7 @@ All commands below are run **from inside that folder** unless noted.
 - Agency / MCC setups (parent → child accounts) and single in-house accounts both work.
 
 Do **not** use this for writing ad copy (→ `gads-reklamy`), client-facing reports
-(→ `raport-klienta` / `gads-raport`), or portfolio reviews (→ `przeglad-tygodniowy`).
+(→ `raport-klienta`), or portfolio reviews (→ `przeglad-tygodniowy`).
 This skill is the low-level *connection layer* those workflows can build on.
 
 ## First-time setup (once per machine)

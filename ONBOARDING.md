@@ -41,14 +41,14 @@ połączenia z kontem Google Ads.
   terminal) i nie masz jego treści — **poproś o wklejenie błędu lub screenshota**,
   zanim zgadniesz. Na końcu pliku masz tabelę najczęstszych problemów.
 - **Wznawianie po przerwie:** instalacja może się zatrzymać na oczekiwaniu na
-  zatwierdzenie developer tokena przez Google (krok 3.6). Jeśli użytkownik wraca
-  i pisze np. *„Mam klucz API, kontynuujmy onboarding"*, przeczytaj ten plik
+  wyższy poziom dostępu do API (krok 3.6). Jeśli użytkownik wraca
+  i pisze np. *„Mam dostęp do API, kontynuujmy onboarding"*, przeczytaj ten plik
   ponownie i **wznów od pierwszego brakującego elementu** — nie zaczynaj od zera.
   Sprawdź (bez wyświetlania zawartości), co jest już w `~/google-ads.yaml`:
   jeśli brakuje `refresh_token` → zrób **krok 4**, a potem **krok 5** (test); jeśli
-  plik jest kompletny → od razu **krok 5**. Dane konfiguracyjne (`developer_token`,
-  `client_id`, `client_secret`, `login_customer_id`) były zapisywane na bieżąco,
-  więc powinny już tam być.
+  plik jest kompletny → od razu **krok 5**. Dane konfiguracyjne (`client_id`,
+  `client_secret` oraz `login_customer_id` lub `default_customer_id`) były
+  zapisywane na bieżąco, więc powinny już tam być.
 
 ---
 
@@ -90,41 +90,39 @@ połączenia z kontem Google Ads.
 
 To najdłuższy etap — same kliknięcia w panelach Google. Przeprowadź użytkownika
 przez poniższe punkty **pojedynczo**, otwierając mu linki i czekając, aż poda
-każdą wartość. Nie spiesz się. Na końcu macie cztery dane: developer token,
-Client ID, Client Secret oraz refresh token (ten ostatni powstanie w kroku 4).
+każdą wartość. Nie spiesz się. Na końcu macie trzy dane: Client ID, Client Secret
+oraz refresh token (ten ostatni powstanie w kroku 4). Dostęp do Google Ads API
+nadaje się **projektowi Google Cloud** — nie ma osobnego klucza (developer tokena).
 
-**Najpierw ustal: konto menedżera (MCC).** Developer token (krok 3.5) można
-uzyskać **wyłącznie z konta menedżera Google Ads (MCC)** — zwykłe konto reklamowe
-nie ma sekcji API Center. **Zapytaj użytkownika, czy ma konto menedżera:**
+**Najpierw ustal: jedno konto czy wiele (MCC).** Konto menedżera **nie jest
+potrzebne**, żeby dostać dostęp do API — przydaje się tylko, gdy użytkownik
+zarządza kilkoma kontami (np. agencja). **Zapytaj użytkownika:**
 
-- **Ma MCC** → poproś o jego **10-cyfrowy numer** (to będzie `login_customer_id`
-  w kroku 3.7) i przejdź dalej.
-- **Nie ma MCC** → poprowadź **założenie** (darmowe): otwórz
-  [ads.google.com/home/tools/manager-accounts](https://ads.google.com/home/tools/manager-accounts)
-  → „Utwórz konto menedżera" → podaj nazwę, kraj i walutę. Następnie **połącz** z
-  tym MCC konto(a) Google Ads, którymi użytkownik chce zarządzać: w panelu MCC
-  → Konta → Połącz istniejące konto → podaj numer konta (właściciel konta musi
-  zaakceptować zaproszenie). Numer nowego MCC to przyszły `login_customer_id`.
+- **Ma konto menedżera (MCC)** → poproś o jego **10-cyfrowy numer** — to będzie
+  `login_customer_id`.
+- **Zarządza jednym kontem, bez MCC** → poproś o **10-cyfrowy numer tego konta
+  Google Ads** — to będzie `default_customer_id`. `login_customer_id` pomiń.
 
 **Które konto Google? (WAŻNE — zapamiętaj na kroki 3.1–4).** Ustal **adres konta
-Google, które ma dostęp do tego MCC**. Tym samym kontem wykonacie **całą**
-konfigurację w Google Cloud (3.1–3.4), dodacie je jako **Test user** (3.3) i **nim**
-użytkownik autoryzuje aplikację (krok 4). To **niekoniecznie** adres, na którym
-użytkownik ma konto Claude — **nie podstawiaj go automatycznie**. Jeśli nie masz
-pewności, **zapytaj użytkownika, na którym koncie Google jest jego MCC**, i używaj
-tego adresu wszędzie w krokach 3–4. Gdy konto autoryzujące (krok 4) różni się od
-Test usera (3.3) albo nie ma dostępu do MCC — połączenie się nie powiedzie.
+Google, które ma dostęp do kont Google Ads** (lub do MCC). Tym samym kontem
+wykonacie **całą** konfigurację w Google Cloud (3.1–3.6), dodacie je jako **Test
+user** (3.3) i **nim** użytkownik autoryzuje aplikację (krok 4). To
+**niekoniecznie** adres, na którym użytkownik ma konto Claude — **nie podstawiaj
+go automatycznie**. Jeśli nie masz pewności, **zapytaj**. Gdy konto autoryzujące
+(krok 4) różni się od Test usera (3.3) albo nie ma dostępu do kont Ads —
+połączenie się nie powiedzie.
 
 **Zasada zapisu — zapisuj OD RAZU (krytyczne przy przerwaniu).** Każdą zdobytą
 wartość zapisuj do `~/google-ads.yaml` **natychmiast**, nie odkładaj na koniec.
-Instalacja często się zatrzymuje na 3.6 (oczekiwanie na Basic access — od kilku
-dni do ~2 tygodni; użytkownik wtedy **zamyka czat**). **To, co w pliku — przetrwa; to, co tylko
+Instalacja potrafi się zatrzymać na 3.5–3.6 (oczekiwanie na wyższy poziom
+dostępu; użytkownik wtedy **zamyka czat**). **To, co w pliku — przetrwa; to, co tylko
 w rozmowie — przepada wraz z niedokończonym czatem.** Dlatego:
 
 - **Teraz, zanim ruszysz dalej:** utwórz `~/google-ads.yaml` na bazie szablonu
   `.claude/skills/gads-connector/references/google-ads.yaml.example` i od razu wpisz
-  `login_customer_id` (numer MCC, 10 cyfr bez myślników).
-- Po krokach **3.4 i 3.5 dopisuj kolejne wartości do pliku od razu** po ich zdobyciu.
+  `login_customer_id` (numer MCC) albo — bez MCC — `default_customer_id` (numer
+  konta); 10 cyfr bez myślników.
+- Po kroku **3.4 dopisz `client_id` i `client_secret` do pliku od razu** po ich zdobyciu.
 - **Nigdy nie wyświetlaj zawartości pliku** w czacie — możesz tylko potwierdzić, że
   wartość została zapisana.
 
@@ -133,7 +131,8 @@ w rozmowie — przepada wraz z niedokończonym czatem.** Dlatego:
 (dowolna nazwa, np. „Ads-Agent") i upewnij się, że jest wybrany u góry ekranu.
 
 **3.2 Włącz Google Ads API.** APIs & Services → Library → wyszukaj
-**Google Ads API** → **Enable**.
+**Google Ads API** → **Enable**. Po włączeniu projekt dostaje automatycznie
+dostęp **„Test"** (tylko konta testowe) — wyższy poziom ustawimy w 3.5.
 
 **3.3 Ekran zgody OAuth.** APIs & Services → OAuth consent screen.
 **Jeśli to pierwsze wejście — najpierw kliknij „Rozpocznij konfigurację" /
@@ -141,12 +140,12 @@ w rozmowie — przepada wraz z niedokończonym czatem.** Dlatego:
 
 - **App name** (nazwa aplikacji): dowolna, np. „Ads-Agent".
 - **User support email** oraz **Developer contact email**: wpisz **adres konta
-  Google z dostępem do MCC** (ten ustalony wyżej). **Nie podstawiaj automatycznie
-  adresu, na którym użytkownik ma konto Claude** — jeśli MCC jest na innym koncie
-  Google, użyj tamtego.
+  Google z dostępem do kont Google Ads** (ten ustalony wyżej). **Nie podstawiaj
+  automatycznie adresu, na którym użytkownik ma konto Claude** — jeśli konta Ads
+  (lub MCC) są na innym koncie Google, użyj tamtego.
 - **Audience / User type:** **External** (Zewnętrzny).
 - **Test users → Add users:** dodaj **ten sam adres** — konto Google z dostępem do
-  MCC. W trybie „Testing" **tylko** konta z tej listy mogą autoryzować aplikację;
+  kont Google Ads (lub MCC). W trybie „Testing" **tylko** konta z tej listy mogą autoryzować aplikację;
   jeśli będzie tu inny adres niż konto, którym logujesz się w kroku 4, autoryzacja
   zwróci błąd.
 
@@ -164,99 +163,82 @@ loopbacku `http://localhost:3000/oauth2callback`, którego używa narzędzie).
 → Create. Skopiuj **Client ID** i **Client Secret** i **od razu zapisz je** do
 `~/google-ads.yaml` (`client_id`, `client_secret`) — nie czekaj z zapisem.
 
-**3.5 Zdobądź developer token (klucz API).** Token jest w **API Center** na koncie
-menedżera (MCC): w lewym menu **Administrator** (koło zębate na dole; ang. *Admin*)
-→ **Centrum interfejsu API** (ang. *API Center*).
-*(Nie widzisz „Centrum interfejsu API"? Upewnij się, że jesteś na **koncie
-menedżera (MCC)**, nie na zwykłym koncie reklamowym. Starszy układ: Tools &
-Settings → Setup → API Center.)*
+**3.5 Dostęp do Google Ads API (w projekcie Google Cloud).** Poziom dostępu
+jest przypisany do **projektu Google Cloud** — nie ma już developer tokena ani
+wniosków w „Centrum interfejsu API" na koncie Google Ads. **Nie kieruj tam
+użytkownika** — wnioski złożone w API Center nie są już rozpatrywane.
 
-**Najpierw zapytaj użytkownika, czy już korzysta z Google Ads API / ma developer
-token** — to skraca drogę osobom z gotowym dostępem:
+1. W Google Cloud Console, w **tym samym projekcie** co w 3.1–3.4 (sprawdź nazwę
+   u góry ekranu), otwórz stronę **Google Ads API Overview** (APIs & Services →
+   Enabled APIs & services → **Google Ads API**).
+2. Poproś użytkownika, żeby odczytał **aktualny poziom dostępu** (Access level):
+   - **Basic** lub **Standard** → gotowe, **pomiń 3.6**, przejdź do 3.7.
+   - **Explorer** → realne konta już działają (z dziennym limitem operacji).
+     3.6 tylko, jeśli użytkownik chce wyższego limitu.
+   - **Test** → realne konta nie zadziałają. Rozwiń sekcję **„Upgrade access
+     level"** → kliknij **„Apply for access"** (następny poziom: **Explorer**).
+     Pomóż wypełnić pola — przy opisie zastosowania napisz gotowy tekst po
+     angielsku (wewnętrzne narzędzie łączące się z kontami Google Ads przez API
+     w Claude Code — odczyt danych i rutynowe optymalizacje) i daj do akceptacji
+     **zanim wklei**. **Formularz wysyła użytkownik.**
+3. **Potwierdź wprost:** *„Czy wniosek został wysłany? Jaki poziom widzisz
+   teraz?"* Explorer bywa przyznawany **automatycznie** zaraz po wysłaniu. Jeśli
+   nadal „Test" → poproś o zrzut ekranu, potem „dalszy przebieg" niżej.
 
-- **Ma już token** → niech wejdzie do API Center i **skopiuje istniejący token**.
-  Sprawdźcie też **poziom dostępu** (Access level) — patrz 3.6. Jeśli to już
-  **Basic** lub **Standard**, **pomińcie 3.6** (wniosek niepotrzebny).
-- **Pierwszy raz** → przy pierwszym wejściu Google **najpierw wyświetli formularz
-  dostępu do API** (API contact email, nazwa i typ firmy, „intended use", kraj) —
-  **token pojawia się dopiero po jego wysłaniu**. Przeprowadź użytkownika **pole po
-  polu**: napisz gotowy „intended use" po angielsku (krótko: wewnętrzne narzędzie
-  łączące się z kontami Google Ads przez API w Claude Code — odczyt danych
-  i rutynowe optymalizacje), resztę pomóż uzupełnić. **Formularz wypełnia i wysyła
-  użytkownik** (nie masz dostępu do tych ekranów). Po wysłaniu Google pokaże
-  **developer token** — niech go skopiuje.
+*Użytkownik ma stary developer token z API Center?* Nie jest już potrzebny —
+Google przeniósł jego poziom dostępu na projekt(y) Cloud, z których szły
+wywołania. Sprawdź poziom na stronie Google Ads API Overview **tego** projektu,
+w którym jest klient OAuth z 3.4. Jeśli dostęp ma inny projekt — najprościej
+użyć klienta OAuth z tamtego projektu.
 
-**Od razu dopisz** `developer_token` do `~/google-ads.yaml`.
-
-**3.6 Sprawdź poziom dostępu i — jeśli trzeba — złóż wniosek o Basic access.**
-
-Świeży token ma zwykle poziom **„Test account"** (tylko konta testowe) albo
-**„Explorer"** (realne konta, ale z ograniczeniami). Pełne użycie realnych kont =
-**Basic access**. *Sam ciąg tokena się nie zmienia — rośnie tylko zakres dostępu.*
-
-**Najpierw ustal aktualny poziom** (widoczny przy „Access level" w API Center) i na
-tej podstawie zdecyduj:
-
-- **Basic** lub **Standard** → gotowe, **pomiń resztę 3.6**, przejdź do kroku 4.
-- **Explorer** → połączenie z realnym kontem zwykle zadziała (z limitami) — możesz
-  iść dalej, a wniosek o Basic złożyć dla pełnego dostępu.
-- **Test account** → realne konta nie zadziałają; trzeba złożyć wniosek o Basic
-  i poczekać na zatwierdzenie.
-
-**Jeśli składacie wniosek o Basic access — KOLEJNOŚĆ jest ważna. Przeprowadź
-użytkownika przez wypełnienie i wysyłkę, a DOPIERO PO potwierdzeniu wysłania
-przejdź do pytania o dalszy przebieg. NIE zadawaj pytania „jak dokończyć", póki
-wniosek nie jest wysłany — inaczej instrukcja wypełnienia ginie za pytaniem.**
+**3.6 (opcjonalnie) Basic access — wyższy limit.** Explorer wystarcza do startu;
+Basic podnosi dzienny limit operacji na realnych kontach. **Zaproponuj, nie
+wymuszaj.**
 
 > ⚠️ **Nie masz dostępu do paneli Google — nie wypełnisz ani nie wyślesz formularza
 > za użytkownika.** Twoja rola: podać dokładnie, co kliknąć i co wpisać, a potem
 > **potwierdzić z użytkownikiem, że wysłał**.
 
-1. W API Center kliknij **strzałkę przy „Access level"** → **Apply for Basic
-   Access** (Złóż wniosek o dostęp podstawowy).
-2. **Zapytaj użytkownika**, czy zarządza **własnym kontem**, czy **kontami klientów
-   (agencja)** — od tego zależy opis. Potem **napisz gotowy opis po angielsku**
-   (3–5 zdań: wewnętrzne narzędzie łączące się z kontami Google Ads przez API
-   w celu odczytu danych i rutynowych optymalizacji — budżety, słowa wykluczające,
-   status kampanii — przez asystenta AI w Claude Code) i daj do akceptacji/edycji
-   **zanim wklei**.
-3. Pomóż uzupełnić pozostałe pola (e-mail kontaktowy, kraj, akceptacja warunków).
-   **Użytkownik klika „Wyślij".**
-4. **Potwierdź wprost:** zapytaj *„Czy wniosek został wysłany?"* i **dopiero po
-   „tak"** idź dalej. Nie zakładaj, że wysłany.
-5. **Wyjaśnij prosto, co teraz:** wniosek idzie do **ręcznej weryfikacji Google**
-   (zwykle **od kilku dni do ~2 tygodni** — bywa backlog i opóźnienia
-   w zatwierdzeniach; Google może też poprosić o weryfikację reklamodawcy). Do
-   zatwierdzenia realne konta nie zadziałają.
+1. Google wymaga najpierw **weryfikacji marki** (brand verification) projektu —
+   ekran w sekcji „Upgrade access level" pokaże, czego brakuje. **Poproś
+   o zrzut ekranu** i prowadź na jego podstawie, nie zgaduj.
+2. Gdy weryfikacja zaliczona i poziom to **Explorer** → **„Apply for access"**
+   (następny poziom: **Basic**). **Zapytaj**, czy użytkownik zarządza **własnym
+   kontem**, czy **kontami klientów (agencja)**, i napisz gotowy opis po
+   angielsku (3–5 zdań: wewnętrzne narzędzie łączące się z kontami Google Ads
+   przez API w celu odczytu danych i rutynowych optymalizacji — budżety, słowa
+   wykluczające, status kampanii — przez asystenta AI w Claude Code); daj do
+   akceptacji **zanim wklei**. **Użytkownik klika „Wyślij".**
+3. **Potwierdź wprost**, że wniosek poszedł. Basic bywa przyznawany
+   automatycznie; jeśli nie — trafia do weryfikacji Google.
 
-**Dopiero teraz** (po potwierdzonej wysyłce) zaproponuj dalszy przebieg —
-**wytłumacz po ludzku, co każda opcja oznacza**, bo osoba robi to pierwszy raz:
+**Dalszy przebieg, gdy dostęp nie został przyznany od ręki** (zaproponuj
+**dopiero po potwierdzonej wysyłce**, wytłumacz po ludzku):
 
 - **A — dokończmy teraz, co się da.** Wygenerujemy **refresh token** (jednorazowe
   logowanie w przeglądarce, krok 4). Wtedy wszystko jest gotowe poza ostatnim
-  testem, który wymaga zgody Google. Gdy Google zatwierdzi — wracasz, robimy tylko
-  test.
+  testem. Gdy Google przyzna dostęp — wracasz, robimy tylko test.
 - **B — przerwijmy teraz.** Wszystko, co zebraliśmy, jest już zapisane w pliku.
-  Gdy dostaniesz zatwierdzenie, wróć i napisz **„Mam klucz API, kontynuujmy
-  onboarding"** — dokończę refresh token (jeśli trzeba) i test.
+  Gdy dostaniesz dostęp, wróć i napisz **„Mam dostęp do API, kontynuujmy
+  onboarding"**.
 
 **3.7 Sprawdź plik.** Dane były zapisywane na bieżąco, więc `~/google-ads.yaml`
-powinien już zawierać `developer_token`, `client_id`, `client_secret` oraz
-`login_customer_id` (numer MCC, 10 cyfr bez myślników). Upewnij się **bez
-wyświetlania zawartości**, że żadne z tych pól nie jest puste — jeśli któreś
-umknęło, dopisz je teraz. Pole `refresh_token` zostaw puste — uzupełni się
-automatycznie w kroku 4.
+powinien już zawierać `client_id`, `client_secret` oraz `login_customer_id`
+(numer MCC) albo — bez MCC — `default_customer_id` (numer konta); 10 cyfr bez
+myślników. Upewnij się **bez wyświetlania zawartości**, że pola nie są puste —
+jeśli któreś umknęło, dopisz je teraz. Pole `refresh_token` zostaw puste —
+uzupełni się automatycznie w kroku 4.
 
 ## Krok 4 — Wygeneruj refresh token
 
 1. Uruchom `npm run connector:auth`.
 2. W konsoli pojawi się **link** — przekaż go użytkownikowi. Niech otworzy go w
    przeglądarce i **zaloguje się dokładnie tym kontem Google, które ma dostęp do
-   MCC** (to samo, które dodaliście jako Test user w 3.3), a następnie zatwierdzi
+   kont Google Ads (lub MCC)** (to samo, które dodaliście jako Test user w 3.3), a następnie zatwierdzi
    uprawnienia. Zalogowanie **innym** kontem = token bez dostępu do właściwych
    kont Ads (typowy błąd).
    - Link **wymusza wybór konta**. Jeśli pojawi się złe konto, kliknij **„Użyj
-     innego konta"** i wybierz to z dostępem do MCC. Gdy nie ma go na liście —
+     innego konta"** i wybierz to z dostępem do kont Ads. Gdy nie ma go na liście —
      najpierw zaloguj się na nie w przeglądarce (lub użyj trybu incognito / innego
      profilu), potem otwórz link ponownie.
 3. Po zatwierdzeniu token zapisze się automatycznie do `~/google-ads.yaml`.
@@ -266,11 +248,11 @@ automatycznie w kroku 4.
 Uruchom `npm run connector:test`. Jeśli zobaczysz dane konta — **instalacja
 zakończona**. 🎉
 
-Jeśli pojawi się błąd `DEVELOPER_TOKEN_NOT_APPROVED`, to znaczy, że wniosek o
-Basic access (krok 3.6) **jeszcze nie został zatwierdzony**. To nie błąd
-instalacji — wszystko inne jest gotowe. Powiedz użytkownikowi, żeby wrócił i
-napisał *„Mam klucz API, kontynuujmy onboarding"*, gdy Google zatwierdzi dostęp,
-a wtedy ponów ten krok.
+Jeśli pojawi się błąd `CLOUD_PROJECT_NOT_APPROVED_FOR_PRODUCTION` (w starszych
+wersjach API: `AUTHORIZATION_ERROR` lub `DEVELOPER_TOKEN_NOT_APPROVED`), projekt
+Google Cloud ma jeszcze tylko dostęp **„Test"**. To nie błąd instalacji —
+wszystko inne jest gotowe. Wróć do 3.5, a jeśli wniosek już wysłany — niech
+użytkownik wróci z *„Mam dostęp do API, kontynuujmy onboarding"*.
 
 ## Krok 6 (opcjonalny) — Google Analytics 4
 
@@ -382,9 +364,9 @@ i tylko za potwierdzeniem użytkownika, bo alias to decyzja nazewnicza.
 |---|---|
 | `invalid_grant` | Refresh token wygasł → ponów `npm run connector:auth`. Jeśli się powtarza, w ekranie zgody OAuth **opublikuj aplikację** (status „In production"). |
 | `redirect_uri_mismatch` (Błąd 400 przy logowaniu) | **Problem klienta OAuth, NIE konta — zmiana zalogowanego konta tego nie naprawi.** Klient został utworzony jako „Web application" zamiast **Desktop app**. Utwórz nowy klient **Desktop app** (3.4), wstaw jego `client_id`/`client_secret` do `~/google-ads.yaml` i ponów `npm run connector:auth`. (Alternatywnie: w istniejącym kliencie Web dodaj `http://localhost:3000/oauth2callback` do *Authorized redirect URIs*.) |
-| `PERMISSION_DENIED` | Sprawdź `login_customer_id` (numer MCC) i czy konto Google ma dostęp do tego konta Ads. |
-| Autoryzacja OAuth blokowana („Access blocked" / „nie zweryfikowano aplikacji" dla danego konta) | Logujesz się kontem, którego **nie ma** na liście **Test users** (3.3), albo aplikacja nie jest opublikowana. Dodaj to konto jako Test user **lub** kliknij **Publish app**. Konto musi mieć dostęp do MCC. |
-| `DEVELOPER_TOKEN_NOT_APPROVED` | Token czeka na zatwierdzenie przez Google albo jest używany na realnym koncie przed uzyskaniem Basic access. |
+| `PERMISSION_DENIED` | Sprawdź `login_customer_id` (numer MCC, jeśli używasz) i czy konto Google ma dostęp do tego konta Ads. |
+| Autoryzacja OAuth blokowana („Access blocked" / „nie zweryfikowano aplikacji" dla danego konta) | Logujesz się kontem, którego **nie ma** na liście **Test users** (3.3), albo aplikacja nie jest opublikowana. Dodaj to konto jako Test user **lub** kliknij **Publish app**. Konto musi mieć dostęp do konta Google Ads (lub MCC). |
+| `CLOUD_PROJECT_NOT_APPROVED_FOR_PRODUCTION` (lub starsze `DEVELOPER_TOKEN_NOT_APPROVED`) | Projekt Cloud ma poziom „Test" → na stronie **Google Ads API Overview** złóż wniosek o Explorer (3.5). Sprawdź też, czy klient OAuth jest w **tym samym** projekcie, który ma dostęp. |
 | GA4: `has not been used` / `is disabled` | Nie włączono Analytics Data albo Analytics Admin API (krok 6.1). Konektor podaje gotowy link — kliknij „Włącz" i odczekaj minutę. |
 | GA4: 403 przy konkretnej usłudze | Zalogowane konto nie ma do niej dostępu. `--action=properties` pokaże, co widzi. Usługa na innym koncie Google → autoryzuj ją jako osobny profil (`--profile=`). |
 | `Missing required ... configuration` | Plik `~/google-ads.yaml` nie został wypełniony lub nie został znaleziony. |
