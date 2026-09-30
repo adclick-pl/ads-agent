@@ -603,7 +603,7 @@ export const PHONE_MIN_DIGITS = 9;
 /**
  * A run of digits long enough to be a phone number, optionally with a country
  * code and an area code in brackets. Only space, dot and hyphen may separate the
- * digits — a comma keeps "52,27 zł" and "1 249,90" out of the match.
+ * digits — a comma keeps "12,49 zł" and "1 249,90" out of the match.
  */
 const PHONE_RE = new RegExp(
   `(?<!\\d)(?:\\+\\d{1,3}[\\s.-]?)?(?:\\(\\d{1,4}\\)[\\s.-]?)?\\d(?:[\\s.-]?\\d){${PHONE_MIN_DIGITS - 1},}(?!\\d)`,
@@ -618,7 +618,7 @@ const PHONE_RE = new RegExp(
  * it, count the clicks and swap it per country. Written into a headline, a
  * sitelink description or a callout, it is a hard disapproval.
  *
- * The threshold is what keeps quantities and prices out: "1200 szt.", "52,27 zł",
+ * The threshold is what keeps quantities and prices out: "120 szt.", "12,49 zł",
  * "od 1 do 50 kg" and "2026-09-07" all stay well under nine digits in one run.
  *
  * @param {string} text
@@ -722,6 +722,98 @@ export function checkCalloutText(text) {
   if (n > CALLOUT_LIMIT) reasons.push(`Objaśnienie ma ${n} znaków (limit ${CALLOUT_LIMIT}).`);
   reasons.push(...adTextPolicyReasons([['Objaśnienie', [raw]]]));
   return { valid: reasons.length === 0, reasons };
+}
+
+/** How a call asset reports calls as conversions (the API enum minus UNSPECIFIED/UNKNOWN). */
+export const CALL_REPORTING_STATES = ['DISABLED', 'USE_ACCOUNT_LEVEL_CALL_CONVERSION_ACTION', 'USE_RESOURCE_LEVEL_CALL_CONVERSION_ACTION'];
+
+/** Short CSV spellings of the reporting states — the full enum names are unwieldy by hand. */
+const CALL_REPORTING_ALIASES = { ACCOUNT: 'USE_ACCOUNT_LEVEL_CALL_CONVERSION_ACTION', RESOURCE: 'USE_RESOURCE_LEVEL_CALL_CONVERSION_ACTION', OFF: 'DISABLED' };
+
+/** Normalize a reporting state from CSV ("account", "resource", "off" or the enum name). */
+export function normalizeCallReportingState(v) {
+  const s = String(v ?? '').trim().toUpperCase();
+  return CALL_REPORTING_ALIASES[s] || s;
+}
+
+/**
+ * Validate a CALL asset ("rozszerzenie połączeń") before it is written.
+ *
+ * Checked here: the country is an ISO-3166 alpha-2 code, the number is made of
+ * digits and the usual separators with a plausible digit count, and a
+ * resource-level reporting state names the conversion action it reports to.
+ * Whether the number is dialable FOR THAT COUNTRY is Google's call — the
+ * simulation runs `validate_only`, which surfaces it before anything is written.
+ *
+ * @param {{countryCode: string, phoneNumber: string, reportingState?: string, conversionAction?: string}} a
+ * @returns {{valid: boolean, reasons: string[]}}
+ */
+export function checkCallAsset({ countryCode, phoneNumber, reportingState, conversionAction }) {
+  const reasons = [];
+  const cc = String(countryCode ?? '').trim();
+  const phone = String(phoneNumber ?? '').trim();
+  if (!/^[A-Za-z]{2}$/.test(cc)) reasons.push(`country_code = "${cc}" — oczekiwano dwuliterowego kodu kraju (np. PL).`);
+  if (!phone) reasons.push('Pusty numer telefonu.');
+  else if (!/^\+?[\d\s().-]+$/.test(phone)) reasons.push(`Numer "${phone}" zawiera niedozwolone znaki — tylko cyfry, spacje, + - ( ) .`);
+  else {
+    const digits = phone.replace(/\D/g, '').length;
+    if (digits < 6 || digits > 15) reasons.push(`Numer "${phone}" ma ${digits} cyfr — oczekiwano 6-15.`);
+  }
+  const state = normalizeCallReportingState(reportingState);
+  if (state && !CALL_REPORTING_STATES.includes(state)) {
+    reasons.push(`call_conversion_reporting_state = "${reportingState}" — dozwolone: ${CALL_REPORTING_STATES.join(', ')} (skróty: account, resource, off).`);
+  }
+  const hasAction = String(conversionAction ?? '').trim() !== '';
+  if (state === 'USE_RESOURCE_LEVEL_CALL_CONVERSION_ACTION' && !hasAction) reasons.push('Raportowanie na poziomie zasobu wymaga call_conversion_action (ID konwersji).');
+  if (hasAction && state !== 'USE_RESOURCE_LEVEL_CALL_CONVERSION_ACTION') reasons.push('call_conversion_action działa tylko z call_conversion_reporting_state = USE_RESOURCE_LEVEL_CALL_CONVERSION_ACTION (skrót: resource).');
+  return { valid: reasons.length === 0, reasons };
+}
+
+const DAY_CODES = ['MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY', 'SUNDAY'];
+const DAY_INDEX = {
+  MON: 0, TUE: 1, WED: 2, THU: 3, FRI: 4, SAT: 5, SUN: 6,
+  PN: 0, WT: 1, SR: 2, 'ŚR': 2, CZ: 3, PT: 4, SB: 5, ND: 6,
+};
+const MINUTE_ENUM = { 0: 'ZERO', 15: 'FIFTEEN', 30: 'THIRTY', 45: 'FORTY_FIVE' };
+
+/**
+ * Parse a human schedule into the AdScheduleInfo targets of a call asset.
+ *
+ * Format: entries separated by ";", each "DAYS HH:MM-HH:MM", DAYS being one day
+ * or a range in English or Polish codes — "MON-FRI 09:00-17:00; SAT 10:00-14:00"
+ * or "pn-pt 9:00-17:00". Minutes are 00/15/30/45 only (the API has no others)
+ * and "24:00" closes a day. An empty spec means "always".
+ *
+ * @param {string} spec
+ * @returns {{targets: Array<object>, reasons: string[]}}
+ */
+export function parseCallSchedule(spec) {
+  const targets = [];
+  const reasons = [];
+  const time = (t) => {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(t);
+    if (!m) return null;
+    const h = Number(m[1]);
+    const min = Number(m[2]);
+    if (!(min in MINUTE_ENUM) || h > 24 || (h === 24 && min !== 0)) return null;
+    return { h, min };
+  };
+  for (const e of String(spec ?? '').split(';').map((s) => s.trim()).filter(Boolean)) {
+    const m = /^(\S+)\s+(\S+)-(\S+)$/.exec(e);
+    if (!m) { reasons.push(`Harmonogram "${e}" — oczekiwano "DNI GG:MM-GG:MM", np. "MON-FRI 09:00-17:00".`); continue; }
+    const [a, b] = m[1].toUpperCase().split('-');
+    const from = DAY_INDEX[a];
+    const to = b === undefined ? from : DAY_INDEX[b];
+    if (from === undefined || to === undefined || to < from) { reasons.push(`Harmonogram "${e}" — nieznany dzień albo odwrócony zakres (MON..SUN lub pn..nd).`); continue; }
+    const start = time(m[2]);
+    const end = time(m[3]);
+    if (!start || !end) { reasons.push(`Harmonogram "${e}" — godzina w formacie GG:MM, minuty tylko 00/15/30/45.`); continue; }
+    if (start.h * 60 + start.min >= end.h * 60 + end.min) { reasons.push(`Harmonogram "${e}" — koniec musi być po początku.`); continue; }
+    for (let d = from; d <= to; d++) {
+      targets.push({ day_of_week: DAY_CODES[d], start_hour: start.h, start_minute: MINUTE_ENUM[start.min], end_hour: end.h, end_minute: MINUTE_ENUM[end.min] });
+    }
+  }
+  return { targets, reasons };
 }
 
 /** Google Ads limits for a structured snippet ("fragment strukturalny"). */
@@ -1100,14 +1192,18 @@ export function checkPromotion(p) {
 /**
  * Conversion action types this connector creates. Deliberately narrow: these are
  * the ones you deploy by hand — a website tag (`WEBPAGE`), a call from the site
- * (`WEBSITE_CALL`), or offline imports (`UPLOAD_CLICKS` / `UPLOAD_CALLS`).
+ * (`WEBSITE_CALL`), a call straight from the ad's call asset (`AD_CALL`), or
+ * offline imports (`UPLOAD_CLICKS` / `UPLOAD_CALLS`).
  *
  * Everything else in the API enum (GOOGLE_ANALYTICS_4_*, FIREBASE_*, STORE_*,
  * app-analytics types) is NOT created this way — those appear in the account by
  * linking GA4 / Firebase / a store feed, and asking the API to create one either
  * fails or produces a dead action that never fires.
  */
-export const CONVERSION_TYPES = ['WEBPAGE', 'WEBSITE_CALL', 'UPLOAD_CLICKS', 'UPLOAD_CALLS'];
+export const CONVERSION_TYPES = ['WEBPAGE', 'WEBSITE_CALL', 'AD_CALL', 'UPLOAD_CLICKS', 'UPLOAD_CALLS'];
+
+/** Types that count a phone call — the only ones where a minimum call length applies. */
+const CALL_CONVERSION_TYPES = new Set(['WEBSITE_CALL', 'AD_CALL']);
 
 /** Conversion categories Google accepts (the enum minus UNSPECIFIED/UNKNOWN). */
 export const CONVERSION_CATEGORIES = [
@@ -1158,7 +1254,8 @@ export const CONVERSION_LOOKBACK = { clickMin: 1, clickMax: 90, viewMin: 1, view
  * @param {{name?: string, type?: string, category?: string, status?: string,
  *          countingType?: string, attributionModel?: string, primaryForGoal?: boolean,
  *          defaultValue?: number|string, currency?: string, alwaysUseDefaultValue?: boolean,
- *          clickLookbackDays?: number|string, viewLookbackDays?: number|string}} c
+ *          clickLookbackDays?: number|string, viewLookbackDays?: number|string,
+ *          callDurationSeconds?: number|string}} c
  * @param {{isUpdate?: boolean}} [opts]
  * @returns {{valid: boolean, reasons: string[], warnings: string[]}}
  */
@@ -1218,6 +1315,12 @@ export function checkConversionAction(c, opts = {}) {
   };
   win(c.clickLookbackDays, CONVERSION_LOOKBACK.clickMin, CONVERSION_LOOKBACK.clickMax, 'click_through_lookback_days');
   win(c.viewLookbackDays, CONVERSION_LOOKBACK.viewMin, CONVERSION_LOOKBACK.viewMax, 'view_through_lookback_days');
+
+  if (given(c.callDurationSeconds)) {
+    const n = Number(c.callDurationSeconds);
+    if (!Number.isInteger(n) || n < 0 || n > 10000) reasons.push(`call_duration_seconds = "${c.callDurationSeconds}" — musi być całkowitą liczbą sekund 0-10000.`);
+    if (given(c.type) && !CALL_CONVERSION_TYPES.has(type)) reasons.push(`call_duration_seconds dotyczy tylko konwersji telefonicznych (${[...CALL_CONVERSION_TYPES].join(', ')}), nie ${type}.`);
+  }
 
   // Configurations the API accepts and the account regrets.
   if (category === 'PURCHASE') {

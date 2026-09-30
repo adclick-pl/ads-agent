@@ -196,11 +196,3 @@ Listę adresów do próbki najprościej zbudować z ruchu:
 | 429 | limit URL Inspection — zmniejsz `--concurrency` albo rozbij listę na kilka dni |
 | Zero wierszy w `query` | opóźnienie 2–3 dni, za wąski zakres albo nie ta property |
 
-## Test offline
-
-```bash
-node scripts/smoke-test.js     # albo: npm run gsc:smoke
-```
-
-50 testów logiki czystej (normalizacja property, rozwiązywanie aliasów, filtry, daty,
-inspekcja, zapis do rejestru) — bez sieci i bez credentiali.

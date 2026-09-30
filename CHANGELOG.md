@@ -7,6 +7,26 @@ restarcie sesji. Szczegóły każdego skilla: `.claude/skills/<skill>/SKILL.md`.
 
 ---
 
+## 2026-09-30
+
+### Nowe
+
+- **Rozszerzenia połączeń (`add-call-assets`).** Konektor dodaje numer telefonu przy
+  reklamie — na poziomie konta, kampanii lub grupy reklam. Opcjonalnie z harmonogramem
+  (np. `MON-FRI 09:00-17:00` albo `pn-pt 9:00-17:00`), żeby numer nie zapraszał do
+  dzwonienia poza godzinami pracy, i z raportowaniem połączeń jako konwersji. Symulacja
+  sprawdzana przez Google przed zapisem. Jeśli na tym samym poziomie jest już aktywny
+  inny numer, konektor go wskaże — do wstrzymania przez `pause-assets`.
+- **Konwersja „Połączenia z reklam” (`create-conversions`, typ `AD_CALL`)** z nową kolumną
+  `call_duration_seconds` — minimalna długość rozmowy, która się liczy.
+
+### Zmienione
+
+- Symulacja `create-conversions` jest teraz sprawdzana przez Google (`validate_only`).
+- **Z paczki usunięto testy offline** (`npm run connector:smoke`, `ga4:smoke`, `gsc:smoke`).
+  To narzędzie do pracy nad kodem paczki, nie do jej używania. Czy instalacja działa,
+  potwierdza test połączenia: `npm run connector:test`.
+
 ## 2026-09-25
 
 ### Zmienione

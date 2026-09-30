@@ -260,10 +260,3 @@ Wykluczenie spamu z raportu: `--filter="sessionSource!~semalt;sessionSource!~but
 | 429 | limit usługi wyczerpany — mniej wymiarów, krótszy okres, później |
 | Port 3000 zajęty | inny nasłuch autoryzacji nadal żyje — zamknąć go |
 
-## Test offline
-
-```bash
-node .claude/skills/ga4-connector/scripts/smoke-test.js
-```
-
-Sprawdza parser filtrów, arytmetykę dat i rozwiązywanie ID usługi. Bez sieci i bez credentiali.

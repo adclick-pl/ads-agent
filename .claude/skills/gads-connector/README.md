@@ -22,10 +22,9 @@ and exposes its capabilities through three interfaces:
 #       cd <package root> && npm install
 
 # the remaining commands run from THIS skill folder:
-node scripts/smoke-test.js                     # 2. offline self-test (no credentials)
-cp references/.env.example .env                # 3. add credentials (see below), then edit .env
-node scripts/auth.js                           # 4. (if needed) generate a refresh_token
-node scripts/cli.js --action=test-connection   # 5. verify the live connection
+cp references/.env.example .env                # 2. add credentials (see below), then edit .env
+node scripts/auth.js                           # 3. (if needed) generate a refresh_token
+node scripts/cli.js --action=test-connection   # 4. verify the live connection
 ```
 
 ## Where things live
@@ -190,8 +189,6 @@ The connector is built so an AI agent can touch a live Google Ads account
    custom query an agent writes is inherently safe.
 8. **Your data stays local.** Credentials live in `.env` / `~/google-ads.yaml` on
    your machine (both gitignored) — not in the cloud, not on anyone else's server.
-9. **Offline self-test.** `smoke-test.js` validates the connector's logic (incl. the
-   safety checks) without credentials or any API call.
 
 > Marketing note: this list is the source of truth for "why it's safe" messaging
 > (landing pages, PDF, posts). Keep it in sync when safeguards change.

@@ -81,10 +81,8 @@ połączenia z kontem Google Ads.
 
 ## Krok 2 — Zainstaluj zależności
 
-1. W folderze paczki uruchom: `npm install`.
-2. Następnie uruchom self-test, który **nie wymaga żadnych danych dostępowych**:
-   `npm run connector:smoke`. Powinien przejść bez błędów — to potwierdza, że
-   paczka jest poprawnie zainstalowana.
+W folderze paczki uruchom: `npm install`. Czy wszystko działa, potwierdzi test
+połączenia na końcu kroku 3.
 
 ## Krok 3 — Skonfiguruj dostęp do Google Ads API
 

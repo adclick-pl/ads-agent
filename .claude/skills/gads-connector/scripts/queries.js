@@ -1293,6 +1293,25 @@ export async function getExistingStructuredSnippets(customerId, opts = {}) {
 }
 
 /**
+ * Call assets already on the account, keyed by COUNTRY + DIGITS of the number
+ * per parent — "+48 000 000 000" and "000-000-000" are the same line, so spacing
+ * must not make a re-run add it twice.
+ *
+ * @param {string} customerId
+ * @param {{loginCustomerId?: string}} [opts]
+ */
+export async function getExistingCallAssets(customerId, opts = {}) {
+  return getExistingAssetLinks(customerId, 'CALL',
+    'asset.call_asset.country_code, asset.call_asset.phone_number',
+    (r) => callAssetIdentity(r['asset.call_asset.country_code'], r['asset.call_asset.phone_number']), opts);
+}
+
+/** Idempotency key of a call asset: country + the number's digits only. */
+export function callAssetIdentity(countryCode, phoneNumber) {
+  return `${String(countryCode ?? '').trim().toUpperCase()}|${String(phoneNumber ?? '').replace(/\D/g, '')}`;
+}
+
+/**
  * Price extensions already on the account, keyed by price TYPE per parent
  * (PRODUCT_TIERS, SERVICES, …). Google serves one price extension per level, so
  * adding a second of the same type is almost always a mistake.

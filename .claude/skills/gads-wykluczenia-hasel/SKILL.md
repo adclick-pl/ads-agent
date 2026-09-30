@@ -401,15 +401,6 @@ przy porównaniu do średniej **własnej** kampanii połowa haseł jest poniżej
 z definicji, więc w kampanii brandowej sygnał nic nie znaczy — hasło z ROAS 6,3 przy
 celu 3,5 lądowało wśród kandydatów tylko dlatego, że Brand ma średnią 9.
 
-## Test bez API
-
-```bash
-node ".claude/skills/gads-wykluczenia-hasel/scripts/smoke-test.js"
-```
-
-Offline, bez sieci i sekretów — sprawdza progi sygnałów, poziomy pewności, obronę rokiem,
-rozpoznawanie zbadanych tematów i render raportu. Uruchom po każdej zmianie w `analiza.js`.
-
 ## Architektura
 
 | Plik | Odpowiada za |
@@ -419,7 +410,6 @@ rozpoznawanie zbadanych tematów i render raportu. Uruchom po każdej zmianie w 
 | `scripts/raport-html.js` | raport HTML (motyw dark/light, tabele, lista do skopiowania) |
 | `scripts/format.js` | formatery pl-PL, waluta konta, okna czasowe |
 | `scripts/connector.js` | **jedyne** miejsce ze ścieżką do konektora `gads-connector` |
-| `scripts/smoke-test.js` | test offline |
 
 **Pokrycie typów kampanii** — hasła składane z TRZECH źródeł, bo żadne nie pokrywa wszystkiego:
 

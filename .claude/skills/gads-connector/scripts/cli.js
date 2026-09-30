@@ -48,6 +48,7 @@ import {
   pauseCallouts,
   setAssetLinkStatus,
   addStructuredSnippets,
+  addCallAssets,
   addPriceAssets,
   addYoutubeAssets,
   createDemandGenAdGroups,
@@ -492,6 +493,16 @@ Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
                           (kolumny: level,campaign_id|ad_group_id|ad_group_name,header,
                           value1..value10 albo values="a|b|c"). Nagłówek musi być z listy
                           Google dla języka konta (PL: Typy, Usługi, Marki, Style, Modele...).
+  add-call-assets         Dodaje rozszerzenia połączeń (numer telefonu) na poziomie
+                          konta/kampanii/grupy. Idempotentne po kraju + cyfrach numeru.
+                          Inny AKTYWNY numer na tym samym poziomie jest wypisywany
+                          (otherEnabledNumbers) do wstrzymania pause-assets. Symulacja
+                          walidowana przez Google. --input=mapa.csv (kolumny: level,
+                          campaign_id,country_code,phone_number[,call_conversion_reporting_state,
+                          call_conversion_action,schedule]). reporting_state: account |
+                          resource (wymaga call_conversion_action = ID konwersji) | off.
+                          schedule: "MON-FRI 09:00-17:00; SAT 10:00-14:00" (albo pn-pt),
+                          minuty 00/15/30/45; puste = zawsze.
   add-price-assets        Dodaje rozszerzenia cenowe. Jeden wiersz CSV = jedna pozycja
                           cennika; wiersze z tym samym "group" tworzą jedno rozszerzenie
                           (3-8 pozycji). Ceny w walucie standardowej, NIE w mikro.
@@ -503,7 +514,7 @@ Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
                           --input=mapa.csv (kolumny: [ad_group_id|campaign_id+ad_group_name],
                           final_url,headline1..15,description1..4[,path1,path2]).
                           Przypięcie nagłówka: dopisz "|H1", "|H2" albo "|H3" na końcu
-                          komórki (np. "Krówki z logo|H1"). Marker nie liczy się do
+                          komórki (np. "Donice ceramiczne|H1"). Marker nie liczy się do
                           limitu 30 znaków. Bez markera nagłówek rotuje swobodnie.
   --- Demand Gen (kampanie DemGen; kolejność jak niżej) ---
   add-youtube-assets      1/5. Dodaje film YouTube jako ZASÓB konta. Idempotentne po ID filmu
@@ -1452,6 +1463,26 @@ async function main() {
       console.log(JSON.stringify(result, null, 2));
     }
 
+    else if (action === 'add-call-assets') {
+      if (!args.input) throw new Error('add-call-assets wymaga --input=mapa.csv (kolumny: level,campaign_id,country_code,phone_number[,call_conversion_reporting_state,call_conversion_action,schedule])');
+      const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+      if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
+      const items = rows.map((r, i) => ({
+        level: r.level,
+        campaignId: r.campaign_id || r.campaign || '',
+        adGroupId: r.ad_group_id || '',
+        adGroupName: r.ad_group_name || r.ad_group || '',
+        countryCode: r.country_code || r.country,
+        phoneNumber: r.phone_number || r.phone,
+        reportingState: r.call_conversion_reporting_state || r.reporting,
+        conversionAction: r.call_conversion_action || r.conversion_action_id,
+        schedule: r.schedule,
+        label: `${r.phone_number || r.phone} (wiersz ${i + 2})`,
+      }));
+      const result = await addCallAssets(customerId, items, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
     else if (action === 'add-price-assets') {
       if (!args.input) throw new Error('add-price-assets wymaga --input=mapa.csv (kolumny: group,level,campaign_id,price_type,price_qualifier,language,unit,currency,header,description,price,final_url)');
       const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
@@ -1708,7 +1739,7 @@ async function main() {
     else if (action === 'create-conversions') {
       // Batch-only on purpose: a conversion action created by a typo cannot be
       // deleted by this connector (no-delete policy), only hidden.
-      if (!args.input) throw new Error('create-conversions wymaga --input=konwersje.csv (kolumny: name,type,category[,primary_for_goal,counting_type,default_value,currency,always_use_default_value,click_lookback_days,view_lookback_days,attribution_model,status])');
+      if (!args.input) throw new Error('create-conversions wymaga --input=konwersje.csv (kolumny: name,type,category[,primary_for_goal,counting_type,default_value,currency,always_use_default_value,click_lookback_days,view_lookback_days,attribution_model,status,call_duration_seconds])');
       const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
       if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
       const items = rows.map((r, i) => ({
@@ -1724,6 +1755,7 @@ async function main() {
         clickLookbackDays: r.click_lookback_days ?? r.click_lookback,
         viewLookbackDays: r.view_lookback_days ?? r.view_lookback,
         attributionModel: r.attribution_model || r.attribution,
+        callDurationSeconds: r.call_duration_seconds,
         label: `${r.name || r.nazwa} (wiersz ${i + 2})`,
       }));
       const result = await createConversionActions(customerId, items, dryRun, loginCustomerId);

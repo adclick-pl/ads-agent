@@ -1,7 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { getCustomer, unpackError } from './client.js';
-import { getKeywordsByCriteria, getCampaignBasics, getCampaignBiddingInfo, getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts, getExistingStructuredSnippets, getExistingPriceAssets, getExistingPromotions, promotionIdentity, getAdGroupAdsByAdIds, getAdGroupsByIds, getExistingYoutubeAssets, getExistingDemandGenAds, getExistingDemandGenProductAds, getExistingListingGroups, getAssetGroupsByIds, getListingFilterTree, LISTING_FILTER_TYPE_NAME, getAdGroupTargetingCriteria, getCampaignChannelTypes, getCallToActionAssets, getConversionActions, getExistingCampaigns, getBudgetsByName, COPYABLE_CRITERION_TYPES } from './queries.js';
-import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkPriceOfferings, checkPromotion, checkDemandGenAdTexts, checkDemandGenChannels, DEMAND_GEN_LIMITS, adTextLength, checkConversionAction, checkCampaignSpec, checkListingFilterFlip, checkLabelExclusion, checkItemExclusion, planCustomAudienceUrls, planAudienceSegmentAdd, checkCampaignTextAsset, CAMPAIGN_TEXT_ASSET_LIMITS, isIsoDate } from './safety.js';
+import { getKeywordsByCriteria, getCampaignBasics, getCampaignBiddingInfo, getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts, getExistingStructuredSnippets, getExistingCallAssets, callAssetIdentity, getExistingPriceAssets, getExistingPromotions, promotionIdentity, getAdGroupAdsByAdIds, getAdGroupsByIds, getExistingYoutubeAssets, getExistingDemandGenAds, getExistingDemandGenProductAds, getExistingListingGroups, getAssetGroupsByIds, getListingFilterTree, LISTING_FILTER_TYPE_NAME, getAdGroupTargetingCriteria, getCampaignChannelTypes, getCallToActionAssets, getConversionActions, getExistingCampaigns, getBudgetsByName, COPYABLE_CRITERION_TYPES } from './queries.js';
+import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkCallAsset, parseCallSchedule, normalizeCallReportingState, checkPriceOfferings, checkPromotion, checkDemandGenAdTexts, checkDemandGenChannels, DEMAND_GEN_LIMITS, adTextLength, checkConversionAction, checkCampaignSpec, checkListingFilterFlip, checkLabelExclusion, checkItemExclusion, planCustomAudienceUrls, planAudienceSegmentAdd, checkCampaignTextAsset, CAMPAIGN_TEXT_ASSET_LIMITS, isIsoDate } from './safety.js';
 
 /**
  * Entity metadata for Final URL updates. Maps our short entity key to the
@@ -1952,7 +1952,7 @@ export async function addKeywords(customerId, items, dryRun = false, loginCustom
 }
 
 /**
- * Split an optional pin marker off a headline: `"Krówki z logo|H1"` → pinned to
+ * Split an optional pin marker off a headline: `"Donice ceramiczne|H1"` → pinned to
  * position 1. Without a marker the headline rotates freely, which is the default
  * Google prefers. The marker is stripped before validation, so it never counts
  * toward the 30-character limit.
@@ -2689,6 +2689,131 @@ export async function addStructuredSnippets(customerId, items, dryRun = false, l
     throw new Error(`Nie udało się dodać fragmentów strukturalnych: ${unpackError(error)}`);
   }
 }
+
+/**
+ * Add CALL assets ("rozszerzenia połączeń") at account, campaign or ad-group level.
+ *
+ * The phone number belongs here, not in ad text — written into a headline or a
+ * callout it is a PHONE_NUMBER_IN_AD_TEXT disapproval. Call assets are immutable
+ * like callouts: a new number means adding it and pausing the old link
+ * (`pause-assets`). An optional schedule ("MON-FRI 09:00-17:00") limits the
+ * number to office hours, and the reporting state decides whether calls count
+ * as conversions (and to which action).
+ *
+ * Idempotent by country + digits of the number per parent (ENABLED or PAUSED).
+ * A DIFFERENT number already enabled at the same parent is not touched, but it
+ * is listed in `plan.otherEnabledNumbers` with its link — Google rotates between
+ * enabled numbers, so the old one usually has to be paused. The simulation is
+ * validated by Google (`validate_only`), which is where a number that is not
+ * dialable in the given country surfaces.
+ *
+ * @param {string} customerId
+ * @param {Array<{level: 'customer'|'campaign'|'ad_group', campaignId?: string|number,
+ *                adGroupId?: string|number, adGroupName?: string, countryCode: string,
+ *                phoneNumber: string, reportingState?: string, conversionAction?: string,
+ *                schedule?: string, label?: string}>} items
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>}
+ */
+export async function addCallAssets(customerId, items, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  if (!Array.isArray(items) || items.length === 0) throw new Error('Brak numerów do dodania (pusta lista).');
+
+  const problems = [];
+  const rows = items.map((it, i) => {
+    const countryCode = String(it.countryCode ?? '').trim().toUpperCase();
+    const phoneNumber = String(it.phoneNumber ?? '').trim();
+    const reportingState = normalizeCallReportingState(it.reportingState);
+    const action = String(it.conversionAction ?? '').trim();
+    const ref = it.label || phoneNumber || `wiersz ${i + 1}`;
+    const check = checkCallAsset({ countryCode, phoneNumber, reportingState, conversionAction: action });
+    if (!check.valid) check.reasons.forEach((r) => problems.push(`${ref}: ${r}`));
+    const schedule = parseCallSchedule(it.schedule);
+    schedule.reasons.forEach((r) => problems.push(`${ref}: ${r}`));
+    return {
+      level: String(it.level ?? '').trim().toLowerCase(),
+      campaignId: String(it.campaignId ?? '').replace(/[^0-9]/g, ''),
+      adGroupId: String(it.adGroupId ?? '').replace(/[^0-9]/g, ''),
+      adGroupName: String(it.adGroupName ?? '').trim(),
+      countryCode, phoneNumber, reportingState,
+      conversionAction: !action ? '' : action.includes('/') ? action : `customers/${cleanCustomerId}/conversionActions/${action.replace(/\D/g, '')}`,
+      scheduleTargets: schedule.targets,
+      label: ref,
+    };
+  });
+  await resolveAssetLinkTargets(cleanCustomerId, rows, problems, loginCustomerId);
+  if (problems.length) {
+    throw new Error(`🛑 Zablokowano — ${problems.length} problem(ów) walidacji, nic nie zapisano:\n${problems.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  const parentOf = (r) => r.level === 'campaign' ? r.campaignId : r.level === 'ad_group' ? r.adGroupId : 'acct';
+  const parentKey = (level, parent) => `${level}:${parent}`;
+  const current = await getExistingCallAssets(cleanCustomerId, { loginCustomerId });
+  const currentParent = (c) => parentKey(c.level, c.level === 'campaign' ? c.campaignId : c.level === 'ad_group' ? c.adGroupId : 'acct');
+  const existing = new Set(current.map((c) => `${currentParent(c)}|${c.identity}`));
+
+  const toCreate = [];
+  const skipped = [];
+  const seenInFile = new Set();
+  for (const r of rows) {
+    const k = `${parentKey(r.level, parentOf(r))}|${callAssetIdentity(r.countryCode, r.phoneNumber)}`;
+    if (existing.has(k)) { skipped.push({ ...r, reason: 'ten numer już jest na tym poziomie' }); continue; }
+    if (seenInFile.has(k)) { skipped.push({ ...r, reason: 'duplikat w pliku wejściowym' }); continue; }
+    seenInFile.add(k);
+    toCreate.push(r);
+  }
+
+  const targetParents = new Set(toCreate.map((r) => parentKey(r.level, parentOf(r))));
+  const newKeys = new Set(toCreate.map((r) => `${parentKey(r.level, parentOf(r))}|${callAssetIdentity(r.countryCode, r.phoneNumber)}`));
+  const otherEnabledNumbers = current
+    .filter((c) => c.status === 'ENABLED' && targetParents.has(currentParent(c)) && !newKeys.has(`${currentParent(c)}|${c.identity}`))
+    .map((c) => ({ level: c.level, parent: currentParent(c).split(':')[1], number: c.identity.replace('|', ' '), linkResourceName: c.resourceName }));
+
+  const plan = {
+    toCreate: toCreate.map((r) => ({
+      level: r.level, parent: parentOf(r), countryCode: r.countryCode, phoneNumber: r.phoneNumber,
+      reportingState: r.reportingState || '(domyślnie Google: konwersja z poziomu konta)',
+      ...(r.conversionAction && { conversionAction: r.conversionAction }),
+      schedule: r.scheduleTargets.length ? r.scheduleTargets.map((t) => `${t.day_of_week} ${t.start_hour}:${MINUTES_OF[t.start_minute]}-${t.end_hour}:${MINUTES_OF[t.end_minute]}`) : 'zawsze',
+    })),
+    skipped: skipped.map((r) => ({ level: r.level, parent: parentOf(r), phoneNumber: r.phoneNumber, reason: r.reason })),
+    ...(otherEnabledNumbers.length && {
+      otherEnabledNumbers,
+      note: 'Na tym poziomie jest już aktywny INNY numer — Google wybiera między aktywnymi. Jeśli ma zniknąć: pause-assets --links=<linkResourceName> (po dodaniu nowego).',
+    }),
+  };
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Rozszerzenia połączeń: do utworzenia ${toCreate.length}, pominięte ${skipped.length}...`);
+  const customer = getCustomer(cleanCustomerId, loginCustomerId);
+  const mutations = [];
+  toCreate.forEach((r, i) => {
+    const assetRef = `customers/${cleanCustomerId}/assets/${-(i + 1)}`;
+    const call = { country_code: r.countryCode, phone_number: r.phoneNumber };
+    if (r.reportingState) call.call_conversion_reporting_state = r.reportingState;
+    if (r.conversionAction) call.call_conversion_action = r.conversionAction;
+    if (r.scheduleTargets.length) call.ad_schedule_targets = r.scheduleTargets;
+    mutations.push({ entity: 'Asset', operation: 'create', resource: { resource_name: assetRef, call_asset: call } });
+    mutations.push(assetLinkMutation(cleanCustomerId, r, assetRef, 'CALL'));
+  });
+
+  if (dryRun) {
+    const validation = toCreate.length ? await validateWithApi(customer, chunk(mutations)) : { ok: true };
+    return { success: validation.ok, dryRun: true, entity: 'call_asset', toCreate: toCreate.length, skipped: skipped.length, plan, validation };
+  }
+  if (toCreate.length === 0) return { success: true, dryRun: false, entity: 'call_asset', created: 0, skipped: skipped.length, plan, resourceNames: [] };
+
+  try {
+    const responses = [];
+    for (const part of chunk(mutations)) responses.push(await customer.mutateResources(part));
+    return { success: true, dryRun: false, entity: 'call_asset', created: toCreate.length, skipped: skipped.length, chunks: responses.length, plan, resourceNames: mutatedResourceNames(responses) };
+  } catch (error) {
+    throw new Error(`Nie udało się dodać rozszerzeń połączeń: ${unpackError(error)}`);
+  }
+}
+
+/** MinuteOfHour enum name → "00".."45", for the human-readable plan. */
+const MINUTES_OF = { ZERO: '00', FIFTEEN: '15', THIRTY: '30', FORTY_FIVE: '45' };
 
 /**
  * Add PRICE assets ("rozszerzenia cenowe") at account, campaign or ad-group level.
@@ -3884,6 +4009,7 @@ function buildConversionResource(row, base = {}) {
   if (row.countingType !== undefined) res.counting_type = row.countingType;
   if (row.clickLookbackDays !== undefined) res.click_through_lookback_window_days = row.clickLookbackDays;
   if (row.viewLookbackDays !== undefined) res.view_through_lookback_window_days = row.viewLookbackDays;
+  if (row.callDurationSeconds !== undefined) res.phone_call_duration_seconds = row.callDurationSeconds;
 
   const touchesValue = row.defaultValue !== undefined || row.currency !== undefined || row.alwaysUseDefaultValue !== undefined;
   if (touchesValue) {
@@ -3933,6 +4059,7 @@ function normalizeConversionRow(it) {
     alwaysUseDefaultValue: bool(it.alwaysUseDefaultValue),
     clickLookbackDays: num(it.clickLookbackDays),
     viewLookbackDays: num(it.viewLookbackDays),
+    callDurationSeconds: num(it.callDurationSeconds),
     label: str(it.label) || str(it.name) || 'wiersz',
   };
 }
@@ -3950,7 +4077,7 @@ function normalizeConversionRow(it) {
  * connector cannot take the duplicate back. For the same reason a failed read of
  * the current actions BLOCKS the write instead of assuming the account is empty.
  *
- * Only tag-based and offline-import types are creatable (see CONVERSION_TYPES) —
+ * Only tag-based, call and offline-import types are creatable (see CONVERSION_TYPES) —
  * GA4 and Firebase conversions appear by linking the property, not through here.
  *
  * @param {string} customerId
@@ -4009,13 +4136,16 @@ export async function createConversionActions(customerId, items, dryRun = false,
       clickLookbackDays: r.clickLookbackDays ?? '(domyślnie Google)',
       viewLookbackDays: r.viewLookbackDays ?? '(domyślnie Google)',
       attributionModel: r.attributionModel ?? '(domyślnie Google)',
+      ...(r.callDurationSeconds !== undefined && { callDurationSeconds: r.callDurationSeconds }),
     })),
     skipped: skipped.map((r) => ({ name: r.name, existingId: r.existingId, status: r.existingStatus, reason: 'konwersja o tej nazwie już istnieje w koncie' })),
   };
 
   console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Konwersje: do utworzenia ${toCreate.length}, pominięte (już istnieją) ${skipped.length}...`);
   if (dryRun) {
-    return { success: true, dryRun: true, entity: 'conversion_action', toCreate: toCreate.length, skipped: skipped.length, plan, warnings };
+    const mutations = toCreate.map((r) => ({ entity: 'ConversionAction', operation: 'create', resource: buildConversionResource(r) }));
+    const validation = mutations.length ? await validateWithApi(getCustomer(cleanCustomerId, loginCustomerId), chunk(mutations)) : { ok: true };
+    return { success: validation.ok, dryRun: true, entity: 'conversion_action', toCreate: toCreate.length, skipped: skipped.length, plan, warnings, validation };
   }
   if (toCreate.length === 0) {
     return { success: true, dryRun: false, entity: 'conversion_action', created: 0, skipped: skipped.length, plan, warnings, createdActions: [] };
@@ -4048,7 +4178,8 @@ export async function createConversionActions(customerId, items, dryRun = false,
       success: true, dryRun: false, entity: 'conversion_action',
       created: toCreate.length, skipped: skipped.length, chunks: responses.length,
       plan, warnings, createdActions, resourceNames: mutatedResourceNames(responses),
-      next: 'Konwersje istnieją w Google Ads. Wartości do tagu w GTM: conversionId (AW-…) + label. Etykieta pojawia się dopiero po chwili — jeśli jest pusta, powtórz list-conversions --with-snippets.',
+      // Only tag-based types need GTM; an AD_CALL or an import has no tag to deploy.
+      ...(toCreate.some((r) => ['WEBPAGE', 'WEBSITE_CALL'].includes(r.type)) && { next: 'Konwersje istnieją w Google Ads. Wartości do tagu w GTM: conversionId (AW-…) + label. Etykieta pojawia się dopiero po chwili — jeśli jest pusta, powtórz list-conversions --with-snippets.' }),
     };
   } catch (error) {
     throw new Error(`Nie udało się utworzyć konwersji: ${unpackError(error)}`);

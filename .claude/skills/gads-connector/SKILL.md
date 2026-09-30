@@ -34,12 +34,7 @@ This skill is the low-level *connection layer* those workflows can build on.
    Run `npm install` once at the **package root** (the `Ads-Agent/` folder that
    holds `package.json`). `node_modules` lives there and serves every skill —
    Node resolves packages up the directory tree, so this skill folder stays clean.
-2. **Verify the wiring offline** — no credentials needed, proves the code runs.
-   From this skill folder:
-   ```bash
-   node scripts/smoke-test.js
-   ```
-3. **Add credentials.** Copy `references/.env.example` → `.env` (in this skill
+2. **Add credentials. Copy `references/.env.example` → `.env` (in this skill
    folder) and fill in the five values.
    To obtain them, follow `README.md` → *Setup Google Ads API*. If you only have a
    `client_id` + `client_secret`, generate a refresh token interactively:
@@ -48,7 +43,7 @@ This skill is the low-level *connection layer* those workflows can build on.
    ```
    > Auth runs in the **foreground** and waits for the user to authorize in the
    > browser — never background it.
-4. **Test the live connection:**
+3. **Test the live connection:**
    ```bash
    node scripts/cli.js --action=test-connection
    ```
@@ -523,7 +518,7 @@ Full flow for a new account: `create-campaigns` → `create-ad-groups` →
   The number is not banned from the account; it belongs in a **CALL asset**, where
   Google formats it, counts the clicks and can swap it per country. Written into a
   headline, a sitelink description or a callout, it is a disapproval. The digit
-  threshold is what keeps real copy out of the net: "1200 szt.", "52,27 zł/kg",
+  threshold is what keeps real copy out of the net: "120 szt.", "12,49 zł/szt.",
   "od 1 do 50 kg" and "2026-09-07" never reach nine digits in one run.
 
 Both are PROHIBITED topics — hard disapprovals, not warnings. Since these actions
@@ -601,6 +596,36 @@ nothing to do with a **Merchant Center promotion**: the asset decorates text ads
 Merchant one decorates Shopping and free listings. An account that wants the discount
 in both places has to set it up in both.
 
+**Call assets (`add-call-assets`).** Puts the business phone number next to the
+ad — the only legitimate place for it, since a number in ad text is a
+`PHONE_NUMBER_IN_AD_TEXT` disapproval. Level `customer`, `campaign` or `ad_group`.
+
+```bash
+node scripts/cli.js --action=add-call-assets --account=zielonyogrod --input=telefon.csv
+#  telefon.csv: level,campaign_id,country_code,phone_number,call_conversion_reporting_state,call_conversion_action,schedule
+#               customer,,PL,+48 000 000 000,resource,987654321,MON-FRI 09:00-17:00
+```
+
+- `schedule` limits the number to office hours: entries split by `;`, each
+  `DAYS HH:MM-HH:MM`, days a single day or a range in English or Polish codes
+  (`MON-FRI`, `pn-pt`). Minutes only 00/15/30/45 — the API has no others. Empty =
+  always. Nobody wants the ad inviting a call to an empty office.
+- `call_conversion_reporting_state`: `account` (Google's default — the account-level
+  call conversion), `resource` (needs `call_conversion_action` = the conversion ID)
+  or `off`. A "calls from ads" conversion is created with `create-conversions`,
+  type `AD_CALL` (see Conversions below).
+- **Idempotent on country + digits** per level — "+48 000 000 000" and
+  "000-000-000" differ in formatting only, but "+48 000…" and "000…" differ in
+  digits, so keep one spelling per account.
+- **A different number already ENABLED at the same level is not touched** — it is
+  listed in `plan.otherEnabledNumbers` with its link. Google rotates between the
+  enabled numbers, so a leftover (e.g. a foreign number from an old setup) can show
+  instead of the new one. Pause it with `pause-assets --links=<link>` AFTER the new
+  number is in, so the ads never run without one.
+- Call assets are **immutable**: a new number or schedule means add + pause the old
+  link. The simulation is validated by Google (`validate_only`), which is where a
+  number that is not dialable in the given country is caught.
+
 ### Conversions — deploying conversion tracking
 
 Three actions cover the Google Ads half of a conversion deployment. The tagging
@@ -615,7 +640,7 @@ node scripts/cli.js --action=list-conversions --customer=1234567890 --days=30
 node scripts/cli.js --action=create-conversions --customer=1234567890 --input=konwersje.csv
 #  konwersje.csv: name,type,category[,primary_for_goal,counting_type,default_value,
 #                 currency,always_use_default_value,click_lookback_days,
-#                 view_lookback_days,attribution_model,status]
+#                 view_lookback_days,attribution_model,status,call_duration_seconds]
 #                 Zakup,WEBPAGE,PURCHASE,true,MANY_PER_CLICK,,PLN,,30
 
 # 3. The exact snippets / values for the GTM tag.
@@ -634,10 +659,14 @@ nothing. `--days=N` adds the volume in the window plus the date the action **las
 fired at all** (lifetime, so an empty window still distinguishes "dead since March"
 from "never fired" — the first thing to check after deploying a tag).
 
-**Only tag-based and offline types are creatable:** `WEBPAGE`, `WEBSITE_CALL`,
-`UPLOAD_CLICKS`, `UPLOAD_CALLS`. GA4 and Firebase conversions appear in the account
-by **linking the property**, not through this API — asking for one is blocked with
-that explanation rather than creating a dead action.
+**Only tag-based, call and offline types are creatable:** `WEBPAGE`, `WEBSITE_CALL`,
+`AD_CALL`, `UPLOAD_CLICKS`, `UPLOAD_CALLS`. GA4 and Firebase conversions appear in
+the account by **linking the property**, not through this API — asking for one is
+blocked with that explanation rather than creating a dead action. `AD_CALL` counts
+calls made straight from a call asset; `call_duration_seconds` (0-10000, Google's
+default 60) sets the minimum call length that counts, and is refused on a non-call
+type. Point the call asset at it with `call_conversion_reporting_state=resource`.
+The dry run is checked by Google (`validate_only`).
 
 **Idempotent by name** (case-insensitively), and stricter than elsewhere: a failed
 read of the existing actions **blocks** the write. Two live actions measuring the

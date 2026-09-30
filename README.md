@@ -49,7 +49,6 @@ macOS and Windows.
 ```bash
 npm install               # once, from this folder
 
-npm run connector:smoke   # offline self-test (no credentials)
 npm run connector:auth    # generate a Google Ads refresh token
 npm run connector:test    # verify the live API connection
 ```

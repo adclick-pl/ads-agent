@@ -1,6 +1,6 @@
 /**
  * analiza.js — logika wykrywania haseł do wykluczenia. Czyste funkcje, zero I/O
- * i zero HTML: dzięki temu da się ją przetestować offline (`smoke-test.js`).
+ * i zero HTML: dzięki temu da się ją przetestować offline.
  *
  * Sygnały (każdy ma poziom: „pewny" albo „do sprawdzenia"):
  *   1. Wydajność 30 dni       — koszt bez konwersji / ROAS poniżej celu

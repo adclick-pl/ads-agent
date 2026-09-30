@@ -155,13 +155,13 @@ function tableHeader(isEcom) {
     const wynikowe30 = isEcom
         ? '<th class="right">Wart. konw.</th><th class="right">ROAS</th><th class="right">Wsp. konw.</th>'
         : '<th class="right">Koszt konw.</th><th class="right">Wsp. konw.</th>';
-    const wynikoweRok = '<th class="right yr-col">Konw.</th>'
+    const wynikoweRok = '<th class="right yr-col">Koszt</th><th class="right yr-col">Konw.</th>'
         + (isEcom ? '<th class="right yr-col">ROAS</th>' : '<th class="right yr-col">Koszt konw.</th>')
         + '<th class="right yr-col">Wsp. konw.</th>';
     return `<tr>
         <th colspan="2"></th>
         <th colspan="${cur}" class="right" style="${grp}">OSTATNIE 30 DNI</th>
-        <th colspan="3" class="right yr-col" style="${grp}">OSTATNI ROK (365 DNI)</th>
+        <th colspan="4" class="right yr-col" style="${grp}">OSTATNI ROK (365 DNI)</th>
         <th></th>
       </tr>
       <tr>
@@ -175,8 +175,9 @@ function tableHeader(isEcom) {
 
 function yearCells(y, isEcom) {
     const dash = '<td class="right yr-col"><span style="color:var(--text3)">–</span></td>';
-    if (!y) return dash.repeat(3);
-    const conv = `<td class="right yr-col">${fmt(y.conversions, 1)}</td>`;
+    if (!y) return dash.repeat(4);
+    const conv = `<td class="right yr-col"><strong>${fmtMoney(y.cost)}</strong></td>`
+        + `<td class="right yr-col">${fmt(y.conversions, 1)}</td>`;
     const cvr = `<td class="right yr-col">${fmt(y.clicks > 0 ? (y.conversions / y.clicks * 100) : 0, 1)}%</td>`;
     if (isEcom) {
         const roas = y.cost > 0 ? y.value / y.cost : null;
@@ -222,8 +223,14 @@ function candidateRow(c, isEcom, yearMap, pewny) {
 function candidateTable(list, isEcom, yearMap, pewny) {
     const widoczne = list.slice(0, MAX_WIERSZY);
     const ucieto = list.length - widoczne.length;
+    // Lista jest posortowana malejąco, więc pierwszy pominięty to najdroższy z ogona.
+    // Hasła z samymi wyświetleniami (koszt 0) też bywają kandydatami — stąd osobny opis.
+    const maxPominiety = ucieto > 0 ? list[MAX_WIERSZY].row.cost : 0;
+    const opisOgona = maxPominiety > 0
+        ? `kosztowały najwyżej ${fmtMoney(maxPominiety)}`
+        : 'nie miały kosztu';
     const notka = ucieto > 0
-        ? `<div class="panel-desc"><strong>Pokazano ${widoczne.length} z ${list.length}</strong> (wg kosztu malejąco) — pominięte ${ucieto} kosztowały mniej niż ${fmtMoney(widoczne[widoczne.length - 1].row.cost)} w 30 dniach.</div>`
+        ? `<div class="panel-desc"><strong>Pokazano ${widoczne.length} z ${list.length}</strong> (wg kosztu malejąco) — pominięte ${ucieto} ${opisOgona} w 30 dniach.</div>`
         : '';
     return notka + `
       <div class="st-table-wrap">
