@@ -1,7 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { getCustomer, unpackError } from './client.js';
 import { getKeywordsByCriteria, getCampaignBasics, getCampaignBiddingInfo, getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts, getExistingStructuredSnippets, getExistingPriceAssets, getExistingPromotions, promotionIdentity, getAdGroupAdsByAdIds, getAdGroupsByIds, getExistingYoutubeAssets, getExistingDemandGenAds, getExistingDemandGenProductAds, getExistingListingGroups, getAssetGroupsByIds, getListingFilterTree, LISTING_FILTER_TYPE_NAME, getAdGroupTargetingCriteria, getCampaignChannelTypes, getCallToActionAssets, getConversionActions, getExistingCampaigns, getBudgetsByName, COPYABLE_CRITERION_TYPES } from './queries.js';
-import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkPriceOfferings, checkPromotion, checkDemandGenAdTexts, checkDemandGenChannels, DEMAND_GEN_LIMITS, adTextLength, checkConversionAction, checkCampaignSpec, checkListingFilterFlip, checkLabelExclusion, checkItemExclusion, planCustomAudienceUrls, planAudienceSegmentAdd } from './safety.js';
+import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkPriceOfferings, checkPromotion, checkDemandGenAdTexts, checkDemandGenChannels, DEMAND_GEN_LIMITS, adTextLength, checkConversionAction, checkCampaignSpec, checkListingFilterFlip, checkLabelExclusion, checkItemExclusion, planCustomAudienceUrls, planAudienceSegmentAdd, checkCampaignTextAsset, CAMPAIGN_TEXT_ASSET_LIMITS, isIsoDate } from './safety.js';
 
 /**
  * Entity metadata for Final URL updates. Maps our short entity key to the
@@ -991,35 +991,60 @@ export async function createCustomAudience(customerId, { name, urls = [], keywor
 }
 
 /**
- * Add a custom audience to the audience signal of a Performance Max asset group.
+ * Add segments — custom audiences and/or remarketing user lists — to the audience
+ * signal of a Performance Max asset group.
  *
  * A PMax asset group has at most one audience signal, pointing at an Audience
  * whose segment list mixes user lists, custom audiences and interests. We append
- * the custom audience to that list (`planAudienceSegmentAdd`) and keep the rest.
+ * the new segments to that list (`planAudienceSegmentAdd`) and keep the rest.
  * An asset group WITHOUT an audience signal is refused — creating the signal from
  * scratch is a separate job; add it once in the UI, then use this action.
  *
  * @param {string} customerId
  * @param {string|number} assetGroupId
- * @param {string|number} customAudienceId
+ * @param {{customAudienceIds?: Array<string|number>, userListIds?: Array<string|number>}} segments
  * @param {boolean} [dryRun=false]
  * @param {string} [loginCustomerId]
  * @returns {Promise<object>} Summary (+ API response when written)
  */
-export async function addCustomAudienceToAssetGroup(customerId, assetGroupId, customAudienceId, dryRun = false, loginCustomerId) {
+export async function addAudienceSegmentsToAssetGroup(customerId, assetGroupId, segments = {}, dryRun = false, loginCustomerId) {
   const cleanCustomerId = String(customerId).replace(/-/g, '');
   const agId = String(assetGroupId).replace(/[^0-9]/g, '');
-  const caId = String(customAudienceId).replace(/[^0-9]/g, '');
-  if (!agId || !caId) throw new Error('add-asset-group-audience: wymaga --asset-group=<ID> i --custom-audience=<ID>.');
+  const ids = (list) => [...new Set((list || []).map((x) => String(x).replace(/[^0-9]/g, '')).filter(Boolean))];
+  const caIds = ids(segments.customAudienceIds);
+  const ulIds = ids(segments.userListIds);
+  if (!agId || (caIds.length === 0 && ulIds.length === 0)) {
+    throw new Error('add-asset-group-audience: wymaga --asset-group=<ID> oraz --custom-audience=<ID> i/lub --user-list=<ID[,ID]>.');
+  }
 
   const customer = getCustomer(cleanCustomerId, loginCustomerId);
-  const caRows = await customer.query(`
-    SELECT custom_audience.resource_name, custom_audience.name
-    FROM custom_audience
-    WHERE custom_audience.id = ${caId}
-  `);
-  const ca = caRows?.[0]?.custom_audience;
-  if (!ca) throw new Error(`add-asset-group-audience: nie znaleziono segmentu ${caId} na koncie ${cleanCustomerId}.`);
+  const wanted = [];
+  if (caIds.length) {
+    const rows = await customer.query(`
+      SELECT custom_audience.id, custom_audience.resource_name, custom_audience.name
+      FROM custom_audience
+      WHERE custom_audience.id IN (${caIds.join(',')})
+    `);
+    const byId = new Map(rows.map((r) => [String(r.custom_audience.id), r.custom_audience]));
+    for (const id of caIds) {
+      const ca = byId.get(id);
+      if (!ca) throw new Error(`add-asset-group-audience: nie znaleziono segmentu ${id} na koncie ${cleanCustomerId}.`);
+      wanted.push({ type: 'custom_audience', id, name: ca.name, segment: { custom_audience: ca.resource_name } });
+    }
+  }
+  if (ulIds.length) {
+    const rows = await customer.query(`
+      SELECT user_list.id, user_list.resource_name, user_list.name, user_list.membership_status
+      FROM user_list
+      WHERE user_list.id IN (${ulIds.join(',')})
+    `);
+    const byId = new Map(rows.map((r) => [String(r.user_list.id), r.user_list]));
+    for (const id of ulIds) {
+      const ul = byId.get(id);
+      if (!ul) throw new Error(`add-asset-group-audience: nie znaleziono listy odbiorców ${id} na koncie ${cleanCustomerId}.`);
+      wanted.push({ type: 'user_list', id, name: ul.name, segment: { user_list: ul.resource_name } });
+    }
+  }
 
   const sigRows = await customer.query(`
     SELECT asset_group.name, asset_group_signal.audience.audience
@@ -1039,24 +1064,37 @@ export async function addCustomAudienceToAssetGroup(customerId, assetGroupId, cu
   const audience = audRows?.[0]?.audience;
   if (!audience) throw new Error(`add-asset-group-audience: nie udało się odczytać odbiorców ${audienceRn}.`);
 
-  const plan = planAudienceSegmentAdd(audience.dimensions, ca.resource_name);
+  let dimensions = audience.dimensions;
+  const added = [];
+  const alreadyPresent = [];
+  for (const w of wanted) {
+    const plan = planAudienceSegmentAdd(dimensions, w.segment);
+    const entry = { type: w.type, id: w.id, name: w.name };
+    if (plan.alreadyPresent) alreadyPresent.push(entry);
+    else { added.push(entry); dimensions = plan.dimensions; }
+  }
   const summary = {
     assetGroupId: agId,
     assetGroup: sigRows[0]?.asset_group?.name,
     audience: audienceRn,
-    customAudienceId: caId,
-    customAudience: ca.name,
-    alreadyPresent: plan.alreadyPresent,
+    audienceName: audience.name,
+    added,
+    alreadyPresent,
   };
-  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Asset group ${agId}: ${plan.alreadyPresent ? 'custom audience already in signal' : `adding custom audience "${ca.name}" to signal`}...`);
-  if (dryRun || plan.alreadyPresent) return { success: true, dryRun, ...summary };
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Asset group ${agId}: adding ${added.length} segment(s) to signal, ${alreadyPresent.length} already present...`);
+  if (dryRun || added.length === 0) return { success: true, dryRun, ...summary };
 
   try {
-    const response = await customer.audiences.update([{ resource_name: audienceRn, dimensions: plan.dimensions }]);
+    const response = await customer.audiences.update([{ resource_name: audienceRn, dimensions }]);
     return { success: true, dryRun: false, ...summary, response };
   } catch (error) {
-    throw new Error(`Failed to add custom audience to asset group signal: ${unpackError(error)}`);
+    throw new Error(`Failed to add segments to asset group signal: ${unpackError(error)}`);
   }
+}
+
+/** Backward-compatible single custom audience variant of `addAudienceSegmentsToAssetGroup`. */
+export async function addCustomAudienceToAssetGroup(customerId, assetGroupId, customAudienceId, dryRun = false, loginCustomerId) {
+  return addAudienceSegmentsToAssetGroup(customerId, assetGroupId, { customAudienceIds: [customAudienceId] }, dryRun, loginCustomerId);
 }
 
 /**
@@ -2207,8 +2245,12 @@ export async function updateAdAssets(customerId, items, dryRun = false, loginCus
  * that was deliberately paused.
  *
  * @param {string} customerId
+ * Optional `startDate` / `endDate` (YYYY-MM-DD) schedule the callout — use them
+ * for a temporary offer so it switches itself off instead of waiting for a cleanup.
+ *
  * @param {Array<{level: 'customer'|'campaign'|'ad_group', campaignId?: string|number,
- *                adGroupId?: string|number, adGroupName?: string, text: string, label?: string}>} items
+ *                adGroupId?: string|number, adGroupName?: string, text: string, label?: string,
+ *                startDate?: string, endDate?: string}>} items
  * @param {boolean} [dryRun=false]
  * @param {string} [loginCustomerId]
  * @returns {Promise<object>}
@@ -2230,7 +2272,12 @@ export async function addCallouts(customerId, items, dryRun = false, loginCustom
     const adGroupName = String(it.adGroupName ?? '').trim();
     if (level === 'campaign' && !campaignId) problems.push(`${ref}: level=campaign wymaga campaign_id.`);
     if (level === 'ad_group' && !adGroupId && !(campaignId && adGroupName)) problems.push(`${ref}: level=ad_group wymaga ad_group_id albo campaign_id + ad_group_name.`);
-    return { level, campaignId, adGroupId, adGroupName, text, label: ref };
+    const startDate = String(it.startDate ?? '').trim();
+    const endDate = String(it.endDate ?? '').trim();
+    if (startDate && !isIsoDate(startDate)) problems.push(`${ref}: start_date musi mieć format RRRR-MM-DD (jest: "${startDate}").`);
+    if (endDate && !isIsoDate(endDate)) problems.push(`${ref}: end_date musi mieć format RRRR-MM-DD (jest: "${endDate}").`);
+    if (startDate && endDate && startDate > endDate) problems.push(`${ref}: start_date jest po end_date.`);
+    return { level, campaignId, adGroupId, adGroupName, text, label: ref, startDate, endDate };
   });
   if (problems.length) {
     throw new Error(`🛑 Zablokowano — ${problems.length} problem(ów) walidacji, nic nie zapisano:\n${problems.map((p) => `  • ${p}`).join('\n')}`);
@@ -2270,7 +2317,7 @@ export async function addCallouts(customerId, items, dryRun = false, loginCustom
   }
 
   const plan = {
-    toCreate: toCreate.map((r) => ({ level: r.level, parent: parentOf(r), text: r.text })),
+    toCreate: toCreate.map((r) => ({ level: r.level, parent: parentOf(r), text: r.text, ...(r.startDate && { startDate: r.startDate }), ...(r.endDate && { endDate: r.endDate }) })),
     skipped: skipped.map((r) => ({ level: r.level, parent: parentOf(r), text: r.text, reason: r.reason })),
   };
 
@@ -2284,7 +2331,10 @@ export async function addCallouts(customerId, items, dryRun = false, loginCustom
     toCreate.forEach((r, i) => {
       const tempId = -(i + 1);
       const assetRef = `customers/${cleanCustomerId}/assets/${tempId}`;
-      mutations.push({ entity: 'Asset', operation: 'create', resource: { resource_name: assetRef, callout_asset: { callout_text: r.text } } });
+      const callout = { callout_text: r.text };
+      if (r.startDate) callout.start_date = r.startDate;
+      if (r.endDate) callout.end_date = r.endDate;
+      mutations.push({ entity: 'Asset', operation: 'create', resource: { resource_name: assetRef, callout_asset: callout } });
       const link = { asset: assetRef, field_type: 'CALLOUT', status: 'ENABLED' };
       if (r.level === 'campaign') mutations.push({ entity: 'CampaignAsset', operation: 'create', resource: { ...link, campaign: `customers/${cleanCustomerId}/campaigns/${r.campaignId}` } });
       else if (r.level === 'ad_group') mutations.push({ entity: 'AdGroupAsset', operation: 'create', resource: { ...link, ad_group: `customers/${cleanCustomerId}/adGroups/${r.adGroupId}` } });
@@ -2295,6 +2345,133 @@ export async function addCallouts(customerId, items, dryRun = false, loginCustom
     return { success: true, dryRun: false, entity: 'callout', created: toCreate.length, skipped: skipped.length, chunks: responses.length, plan, resourceNames: mutatedResourceNames(responses) };
   } catch (error) {
     throw new Error(`Nie udało się dodać objaśnień: ${unpackError(error)}`);
+  }
+}
+
+/**
+ * Add campaign-level HEADLINES / DESCRIPTIONS — text assets that Google mixes into
+ * every RSA of the campaign. Handy for a temporary offer: one link per campaign
+ * instead of editing every ad, and pausing the link later restores the old state.
+ *
+ * Google caps ENABLED links per campaign (3 headlines, 2 descriptions). A batch
+ * that would exceed the cap is blocked BEFORE any write, listing the links that
+ * are enabled now — pause one of them first (`pause-assets`).
+ *
+ * Idempotent: a text already linked to the campaign (ENABLED or PAUSED) is skipped;
+ * a PAUSED one is reported with its link so it can be switched back on with
+ * `enable-assets` rather than duplicated. The simulation is validated by Google
+ * (`validate_only`).
+ *
+ * @param {string} customerId
+ * @param {Array<{campaignId: string|number, fieldType: 'HEADLINE'|'DESCRIPTION', text: string, label?: string}>} items
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>}
+ */
+export async function addCampaignTextAssets(customerId, items, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  if (!Array.isArray(items) || items.length === 0) throw new Error('Brak nagłówków/tekstów do dodania (pusta lista).');
+
+  const problems = [];
+  const rows = items.map((it, i) => {
+    const text = String(it.text ?? '').trim();
+    const fieldType = String(it.fieldType ?? 'HEADLINE').trim().toUpperCase();
+    const campaignId = String(it.campaignId ?? '').replace(/[^0-9]/g, '');
+    const ref = it.label || text || `wiersz ${i + 1}`;
+    const check = checkCampaignTextAsset(fieldType, text);
+    if (!check.valid) check.reasons.forEach((r) => problems.push(`${ref}: ${r}`));
+    if (!campaignId) problems.push(`${ref}: brak campaign_id.`);
+    return { campaignId, fieldType, text, label: ref };
+  });
+  if (problems.length) {
+    throw new Error(`🛑 Zablokowano — ${problems.length} problem(ów) walidacji, nic nie zapisano:\n${problems.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  const customer = getCustomer(cleanCustomerId, loginCustomerId);
+  const campaignIds = [...new Set(rows.map((r) => r.campaignId))];
+  const current = await customer.query(`
+    SELECT campaign.id, campaign.name, campaign_asset.resource_name, campaign_asset.field_type,
+           campaign_asset.status, asset.text_asset.text
+    FROM campaign_asset
+    WHERE campaign.id IN (${campaignIds.join(',')})
+      AND campaign_asset.field_type IN ('HEADLINE', 'DESCRIPTION')
+      AND campaign_asset.status IN ('ENABLED', 'PAUSED')
+  `);
+  const FIELD = { 2: 'HEADLINE', 3: 'DESCRIPTION' };
+  const STATUS = { 2: 'ENABLED', 3: 'REMOVED', 4: 'PAUSED' };
+  const links = current.map((r) => ({
+    campaignId: String(r.campaign.id),
+    campaignName: r.campaign.name,
+    fieldType: FIELD[r.campaign_asset.field_type] || String(r.campaign_asset.field_type),
+    status: STATUS[r.campaign_asset.status] || String(r.campaign_asset.status),
+    text: r.asset?.text_asset?.text || '',
+    linkResourceName: r.campaign_asset.resource_name,
+  }));
+  const found = new Set(links.map((l) => l.campaignId));
+  const missing = campaignIds.filter((id) => !found.has(id));
+  if (missing.length) {
+    const rowsC = await customer.query(`SELECT campaign.id FROM campaign WHERE campaign.id IN (${missing.join(',')})`);
+    const exists = new Set(rowsC.map((r) => String(r.campaign.id)));
+    const unknown = missing.filter((id) => !exists.has(id));
+    if (unknown.length) throw new Error(`🛑 Nie znaleziono kampanii: ${unknown.join(', ')} — nic nie zapisano.`);
+  }
+
+  const keyOf = (c, f, t) => `${c}|${f}|${String(t).toLowerCase()}`;
+  const existing = new Map(links.map((l) => [keyOf(l.campaignId, l.fieldType, l.text), l]));
+  const toCreate = [];
+  const skipped = [];
+  const seen = new Set();
+  for (const r of rows) {
+    const k = keyOf(r.campaignId, r.fieldType, r.text);
+    const ex = existing.get(k);
+    if (ex) {
+      skipped.push({ ...r, reason: ex.status === 'PAUSED' ? 'jest już podpięty, ale WSTRZYMANY — włącz go (enable-assets)' : 'jest już podpięty i aktywny', linkResourceName: ex.linkResourceName });
+      continue;
+    }
+    if (seen.has(k)) { skipped.push({ ...r, reason: 'duplikat w pliku wejściowym' }); continue; }
+    seen.add(k);
+    toCreate.push(r);
+  }
+
+  const overLimit = [];
+  for (const cid of campaignIds) {
+    for (const f of Object.keys(CAMPAIGN_TEXT_ASSET_LIMITS)) {
+      const enabled = links.filter((l) => l.campaignId === cid && l.fieldType === f && l.status === 'ENABLED');
+      const adding = toCreate.filter((r) => r.campaignId === cid && r.fieldType === f).length;
+      const max = CAMPAIGN_TEXT_ASSET_LIMITS[f].maxEnabled;
+      if (adding && enabled.length + adding > max) {
+        overLimit.push(`kampania ${cid} (${enabled[0]?.campaignName || ''}): ${f} aktywnych ${enabled.length} + nowe ${adding} > limit ${max}. Najpierw wstrzymaj (pause-assets):\n${enabled.map((l) => `      – "${l.text}"  ${l.linkResourceName}`).join('\n')}`);
+      }
+    }
+  }
+  if (overLimit.length) {
+    throw new Error(`🛑 Limit Google na poziomie kampanii — nic nie zapisano:\n${overLimit.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  const mutations = [];
+  toCreate.forEach((r, i) => {
+    const assetRef = `customers/${cleanCustomerId}/assets/${-(i + 1)}`;
+    mutations.push({ entity: 'Asset', operation: 'create', resource: { resource_name: assetRef, text_asset: { text: r.text } } });
+    mutations.push({ entity: 'CampaignAsset', operation: 'create', resource: { asset: assetRef, campaign: `customers/${cleanCustomerId}/campaigns/${r.campaignId}`, field_type: r.fieldType, status: 'ENABLED' } });
+  });
+  const plan = {
+    toCreate: toCreate.map((r) => ({ campaignId: r.campaignId, fieldType: r.fieldType, text: r.text })),
+    skipped: skipped.map((r) => ({ campaignId: r.campaignId, fieldType: r.fieldType, text: r.text, reason: r.reason, ...(r.linkResourceName && { linkResourceName: r.linkResourceName }) })),
+  };
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Nagłówki/teksty kampanii: do utworzenia ${toCreate.length}, pominięte ${skipped.length}...`);
+  if (dryRun) {
+    const validation = toCreate.length ? await validateWithApi(customer, chunk(mutations)) : { ok: true };
+    return { success: validation.ok, dryRun: true, entity: 'campaign_text_asset', toCreate: toCreate.length, skipped: skipped.length, plan, validation };
+  }
+  if (toCreate.length === 0) return { success: true, dryRun: false, entity: 'campaign_text_asset', created: 0, skipped: skipped.length, plan, resourceNames: [] };
+
+  try {
+    const responses = [];
+    for (const part of chunk(mutations)) responses.push(await customer.mutateResources(part));
+    return { success: true, dryRun: false, entity: 'campaign_text_asset', created: toCreate.length, skipped: skipped.length, plan, resourceNames: mutatedResourceNames(responses) };
+  } catch (error) {
+    throw new Error(`Nie udało się dodać nagłówków/tekstów kampanii: ${unpackError(error)}`);
   }
 }
 

@@ -64,7 +64,8 @@ import {
   addItemExclusion,
   updateCustomAudienceUrls,
   createCustomAudience,
-  addCustomAudienceToAssetGroup,
+  addAudienceSegmentsToAssetGroup,
+  addCampaignTextAssets,
 } from './mutator.js';
 import {
   resolveAccount, loadAccounts, registryConflicts, findAccountsFile,
@@ -428,9 +429,10 @@ Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
   create-custom-audience  Nowy niestandardowy segment z URL-i i/lub słów (--name="…" --urls="a,b"
                           --keywords="x,y"; albo --urls-file=plik, 1 URL na linię — dla URL-i
                           z przecinkiem). Segment o tej samej nazwie → zwraca istniejący.
-  add-asset-group-audience  Dopina segment do sygnału odbiorców grupy plików PMax
-                          (--asset-group=<ID> --custom-audience=<ID>). Reszta sygnału zostaje;
-                          grupa bez sygnału odbiorców → odmowa (dodaj go raz w panelu).
+  add-asset-group-audience  Dopina segmenty do sygnału odbiorców grupy plików PMax
+                          (--asset-group=<ID> --custom-audience=<ID[,ID]> i/lub
+                          --user-list=<ID[,ID]> — listy remarketingowe). Reszta sygnału
+                          zostaje; grupa bez sygnału odbiorców → odmowa (dodaj go raz w panelu).
   update-ad-url           Zmiana Final URL reklamy (RSA). Pojedynczo: --ad=<adId> --url=<...>;
                           wsadowo: --input=mapa.csv (kolumny: id,final_url).
   update-keyword-url      Zmiana Final URL słowa kluczowego (override). Pojedynczo:
@@ -466,7 +468,15 @@ Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
                           (kolumny: [ad_group_id|campaign_id+ad_group_name],keyword,match_type[,final_url]).
   add-callouts            Dodaje objaśnienia (callouts) na poziomie konta/kampanii/grupy.
                           Idempotentne. --input=mapa.csv (kolumny: level,campaign_id,
-                          ad_group_name|ad_group_id,text).
+                          ad_group_name|ad_group_id,text[,start_date,end_date]).
+                          Daty RRRR-MM-DD — objaśnienie okresowe samo się wyłączy.
+  add-campaign-headlines  Nagłówki/teksty na poziomie KAMPANII (Google dokleja je do każdej
+                          RSA w kampanii) — dobre na okresową ofertę bez edycji reklam.
+                          Limit Google: 3 aktywne nagłówki i 2 teksty na kampanię; paczka
+                          ponad limit jest blokowana z listą aktywnych linków do
+                          wstrzymania (pause-assets). Tekst już podpięty (też wstrzymany)
+                          jest pomijany. Symulacja walidowana przez Google.
+                          --input=mapa.csv (kolumny: campaign_id,text[,field_type=HEADLINE|DESCRIPTION]).
   pause-callouts          Wstrzymuje objaśnienia — dane zostają. Callout jest niezmienialny,
                           więc "edycja" = add-callouts nowego + pause-callouts starego.
                           --input=mapa.csv (kolumna link_resource_name) lub --links="rn1,rn2".
@@ -1208,10 +1218,13 @@ async function main() {
     }
 
     else if (action === 'add-asset-group-audience') {
-      if (!args['asset-group'] || !args['custom-audience']) {
-        throw new Error('add-asset-group-audience requires --asset-group=<ID> and --custom-audience=<ID>');
+      const idList = (v) => String(v ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+      const customAudienceIds = idList(args['custom-audience']);
+      const userListIds = idList(args['user-list']);
+      if (!args['asset-group'] || (customAudienceIds.length === 0 && userListIds.length === 0)) {
+        throw new Error('add-asset-group-audience requires --asset-group=<ID> and --custom-audience=<ID[,ID]> and/or --user-list=<ID[,ID]>');
       }
-      const result = await addCustomAudienceToAssetGroup(customerId, args['asset-group'], args['custom-audience'], dryRun, loginCustomerId);
+      const result = await addAudienceSegmentsToAssetGroup(customerId, args['asset-group'], { customAudienceIds, userListIds }, dryRun, loginCustomerId);
       console.log(JSON.stringify(result, null, 2));
     }
 
@@ -1366,9 +1379,25 @@ async function main() {
         adGroupId: r.ad_group_id || '',
         adGroupName: r.ad_group_name || r.ad_group || '',
         text: r.text || r.callout_text,
+        startDate: r.start_date || '',
+        endDate: r.end_date || '',
         label: `${r.text || r.callout_text} (wiersz ${i + 2})`,
       }));
       const result = await addCallouts(customerId, items, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'add-campaign-headlines') {
+      if (!args.input) throw new Error('add-campaign-headlines wymaga --input=mapa.csv (kolumny: campaign_id,text[,field_type=HEADLINE|DESCRIPTION])');
+      const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+      if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
+      const items = rows.map((r, i) => ({
+        campaignId: r.campaign_id || r.campaign || '',
+        fieldType: r.field_type || 'HEADLINE',
+        text: r.text,
+        label: `${r.text} (wiersz ${i + 2})`,
+      }));
+      const result = await addCampaignTextAssets(customerId, items, dryRun, loginCustomerId);
       console.log(JSON.stringify(result, null, 2));
     }
 

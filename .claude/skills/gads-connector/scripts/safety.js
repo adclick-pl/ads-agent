@@ -1279,24 +1279,63 @@ export function planCustomAudienceUrls(currentMembers, add = [], remove = []) {
 }
 
 /**
- * Plan adding a custom audience to a PMax asset group's audience signal. The signal
+ * Plan adding a segment to a PMax asset group's audience signal. The signal
  * points at an Audience whose `dimensions` hold one `audience_segments` list (user
  * lists, custom audiences, interests…); adding = appending one segment to it, the
  * rest stays. Returns the FULL `dimensions` to write back.
  *
+ * The segment is either a custom audience resource name (string) or an object
+ * `{ user_list: rn }` / `{ custom_audience: rn }` — a remarketing list goes in the
+ * same list as a custom segment.
+ *
  * @param {Array<object>} dimensions - `audience.dimensions` as read from the API
- * @param {string} customAudienceResourceName
+ * @param {string|{user_list?: string, custom_audience?: string}} segment
  * @returns {{dimensions: object[], alreadyPresent: boolean}}
  */
-export function planAudienceSegmentAdd(dimensions, customAudienceResourceName) {
+export function planAudienceSegmentAdd(dimensions, segment) {
+  const spec = typeof segment === 'string' ? { custom_audience: segment } : (segment || {});
+  const kind = spec.user_list ? 'user_list' : 'custom_audience';
+  const rn = spec[kind];
   const dims = JSON.parse(JSON.stringify(dimensions || []));
   const segDim = dims.find((d) => d.audience_segments);
   const segments = segDim?.audience_segments?.segments || [];
-  if (segments.some((s) => s.custom_audience?.custom_audience === customAudienceResourceName)) {
+  if (segments.some((s) => s[kind]?.[kind] === rn)) {
     return { dimensions: dims, alreadyPresent: true };
   }
-  const seg = { custom_audience: { custom_audience: customAudienceResourceName } };
+  const seg = { [kind]: { [kind]: rn } };
   if (segDim) segDim.audience_segments.segments = [...segments, seg];
   else dims.push({ audience_segments: { segments: [seg] } });
   return { dimensions: dims, alreadyPresent: false };
+}
+
+/** Google Ads limits for headlines / descriptions linked at CAMPAIGN level. */
+export const CAMPAIGN_TEXT_ASSET_LIMITS = {
+  HEADLINE: { chars: 30, maxEnabled: 3 },
+  DESCRIPTION: { chars: 90, maxEnabled: 2 },
+};
+
+/**
+ * Validate a campaign-level headline / description (a text asset that Google
+ * mixes into every RSA of the campaign). Same length and policy checks as RSA text.
+ *
+ * @param {string} fieldType - 'HEADLINE' | 'DESCRIPTION'
+ * @param {string} text
+ * @returns {{valid: boolean, reasons: string[]}}
+ */
+export function checkCampaignTextAsset(fieldType, text) {
+  const reasons = [];
+  const limits = CAMPAIGN_TEXT_ASSET_LIMITS[fieldType];
+  const raw = String(text ?? '').trim();
+  if (!limits) reasons.push(`field_type musi być HEADLINE albo DESCRIPTION (jest: "${fieldType}").`);
+  if (!raw) reasons.push('Pusty tekst.');
+  if (limits && adTextLength(raw) > limits.chars) reasons.push(`${fieldType} ma ${adTextLength(raw)} zn. (limit ${limits.chars}): "${raw}"`);
+  reasons.push(...adTextPolicyReasons([[fieldType === 'DESCRIPTION' ? 'Tekst' : 'Nagłówek', [raw]]]));
+  return { valid: reasons.length === 0, reasons };
+}
+
+/** YYYY-MM-DD that is a real calendar date. */
+export function isIsoDate(s) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(s ?? ''))) return false;
+  const d = new Date(`${s}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
 }

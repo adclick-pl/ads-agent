@@ -1654,5 +1654,30 @@ check('planAudienceSegmentAdd: no segment dimension yet → one is created, othe
   assert(r.dimensions.length === 2 && r.dimensions[1].audience_segments.segments.length === 1, JSON.stringify(r));
 });
 
+const UL_RN = 'customers/1/userLists/5';
+check('planAudienceSegmentAdd: user list is appended next to custom audiences', () => {
+  const dims = [{ audience_segments: { segments: [{ custom_audience: { custom_audience: CA_RN } }] } }];
+  const r = safety.planAudienceSegmentAdd(dims, { user_list: UL_RN });
+  const segs = r.dimensions[0].audience_segments.segments;
+  assert(!r.alreadyPresent && segs.length === 2 && segs[1].user_list.user_list === UL_RN, JSON.stringify(r));
+});
+check('planAudienceSegmentAdd: user list already present is a no-op', () => {
+  const dims = [{ audience_segments: { segments: [{ user_list: { user_list: UL_RN } }] } }];
+  const r = safety.planAudienceSegmentAdd(dims, { user_list: UL_RN });
+  assert(r.alreadyPresent && r.dimensions[0].audience_segments.segments.length === 1, JSON.stringify(r));
+});
+check('checkCampaignTextAsset: headline within 30 chars passes', () => {
+  assert(safety.checkCampaignTextAsset('HEADLINE', 'Umowa tylko na 9 miesięcy').valid);
+});
+check('checkCampaignTextAsset: headline over 30 chars is blocked', () => {
+  assert(!safety.checkCampaignTextAsset('HEADLINE', 'To jest zdecydowanie za długi nagłówek').valid);
+});
+check('checkCampaignTextAsset: unknown field type is blocked', () => {
+  assert(!safety.checkCampaignTextAsset('CALLOUT', 'Krótko').valid);
+});
+check('isIsoDate: accepts a real date, rejects malformed or impossible ones', () => {
+  assert(safety.isIsoDate('2026-11-30') && !safety.isIsoDate('30.11.2026') && !safety.isIsoDate('2026-02-30'));
+});
+
 console.log(`\nResult: ${passed} passed, ${failed} failed.\n`);
 process.exit(failed === 0 ? 0 : 1);

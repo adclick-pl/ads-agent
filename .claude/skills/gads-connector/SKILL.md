@@ -307,6 +307,13 @@ node scripts/cli.js --action=update-custom-audience --customer=1234567890 --audi
 node scripts/cli.js --action=create-custom-audience --customer=1234567890 --name="Konkurencja - okucia" --urls="konkurent.example/klamki,inny.example/pochwyty"
 # URLs with a comma in the path (e.g. "/pochwyty,c18.html") → --urls-file / --add-urls-file, one URL per line
 node scripts/cli.js --action=add-asset-group-audience --customer=1234567890 --asset-group=4455667788 --custom-audience=555666777
+# Remarketing lists go into the same signal (--user-list, comma-separated IDs; combinable with --custom-audience)
+node scripts/cli.js --action=add-asset-group-audience --customer=1234567890 --asset-group=4455667788 --user-list=111222333,444555666
+
+# Temporary offer without editing ads: campaign-level headlines (limit 3 enabled per campaign,
+# descriptions 2) — CSV columns: campaign_id,text[,field_type=HEADLINE|DESCRIPTION]
+node scripts/cli.js --action=add-campaign-headlines --customer=1234567890 --input=naglowki.csv
+# Callouts can end on their own: add-callouts CSV takes optional start_date,end_date (YYYY-MM-DD)
 
 # Change an ad's Final URL — single ad (works for RSA; legacy text ads are immutable)
 node scripts/cli.js --action=update-ad-url --customer=1234567890 --ad=670502653180 --url="https://example.pl/kategoria/" --domain=example.pl
