@@ -20,6 +20,12 @@ restarcie sesji. Szczegóły każdego skilla: `.claude/skills/<skill>/SKILL.md`.
 - **Konwersja „Połączenia z reklam” (`create-conversions`, typ `AD_CALL`)** z nową kolumną
   `call_duration_seconds` — minimalna długość rozmowy, która się liczy.
 
+### Poprawione
+
+- **`update-bidding --strategy=MAXIMIZE_CLICKS` bez `--cpc-bid-ceiling`** przestał się
+  wywracać błędem `TOO_LOW`. Przełączenie istniejącej kampanii na „Maksymalizację liczby
+  kliknięć" bez limitu stawki działa.
+
 ### Zmienione
 
 - Symulacja `create-conversions` jest teraz sprawdzana przez Google (`validate_only`).

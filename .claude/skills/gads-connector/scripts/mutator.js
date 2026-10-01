@@ -649,9 +649,12 @@ export function setBiddingStrategy(campaign, spec, opts = {}) {
   const noTarget = (subfield) => (forUpdate ? { [subfield]: 0 } : {});
   const strategy = String(spec.biddingStrategy ?? '').trim().toUpperCase();
   if (strategy === 'MAXIMIZE_CLICKS') {
+    // No ceiling on update: cpc_bid_ceiling_micros=0 is rejected as TOO_LOW (unlike
+    // target_cpa/target_roas, where 0 means "no target"). The deprecated
+    // target_spend_micros=0 is the subfield the API accepts to say "no ceiling".
     campaign.target_spend = spec.cpcBidCeiling
       ? { cpc_bid_ceiling_micros: standardToMicros(spec.cpcBidCeiling) }
-      : noTarget('cpc_bid_ceiling_micros');
+      : noTarget('target_spend_micros');
   } else if (strategy === 'MAXIMIZE_CONVERSIONS') {
     campaign.maximize_conversions = spec.targetCpa
       ? { target_cpa_micros: standardToMicros(spec.targetCpa) }
