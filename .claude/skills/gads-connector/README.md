@@ -55,8 +55,9 @@ So when this README says "copy `.env.example`", the file is at
 
 **Write (mutations, all support `--dry-run`):** `update-status` (pause/enable a
 campaign — never delete), `update-budget` (daily budget, with the 40% SafetyLimit),
-`add-negatives` (campaign negative keywords), `add-negative-placements`
-(account-level domain exclusions). The connector has **no delete action** — see the
+`add-negatives` / `remove-negatives` (campaign negative keywords), `add-negative-placements`
+(account-level domain exclusions). The connector removes only what can be
+restored — a removed negative comes back with a single `add-negatives`. See the
 [Safety model](#safety-model).
 
 Run `node scripts/cli.js --help` for the full option list.

@@ -20,7 +20,7 @@ All commands below are run **from inside that folder** unless noted.
 - The user wants to **read** a Google Ads account: campaigns, keywords, search
   terms, placements, budgets, or an arbitrary GAQL query.
 - The user wants to **mutate** an account: pause/enable a campaign, change a daily
-  budget, add campaign negative keywords, or add account-level placement exclusions
+  budget, add or remove campaign negative keywords, or add account-level placement exclusions
   (website domains and YouTube channels).
 - Agency / MCC setups (parent → child accounts) and single in-house accounts both work.
 
@@ -202,8 +202,28 @@ node scripts/cli.js --action=add-item-exclusion --customer=1234567890 --asset-gr
 # Change a daily budget (standard currency, not micros)
 node scripts/cli.js --action=update-budget --customer=1234567890 --budget-id=111222333 --amount=150.00
 
-# Add campaign negative keywords (comma-separated; default broad match)
-node scripts/cli.js --action=add-negatives --customer=1234567890 --campaign=987654321 --keywords="darmowy,tani,za darmo"
+# Add campaign negative keywords (comma-separated; --match-type is mandatory)
+node scripts/cli.js --action=add-negatives --customer=1234567890 --campaign=987654321 --keywords="darmowy,tani,za darmo" --match-type=EXACT
+
+# Remove campaign negative keywords (same text AND match type; prints the undo command)
+node scripts/cli.js --action=remove-negatives --customer=1234567890 --campaign=987654321 --keywords="donice betonowe" --match-type=EXACT
+
+### `remove-negatives` — the undoable removal
+
+The no-delete policy exists so that **every change can be undone** — not because
+removal as such is bad. A campaign negative keyword is the case where removal is
+undoable: it is pure configuration (text + match type), has no spend history of
+its own, and re-adding the same text with the same match type restores exactly the
+previous state. It also has no status field, so it cannot be paused — removal is
+the only way to switch it off. Typical need: a negative turned out to block
+traffic the client does want.
+
+The carve-out is narrow on purpose: only campaign-level criteria with
+`negative = TRUE` and `type = KEYWORD`; text **and** match type must match
+(`[donice betonowe]` never takes `"donice betonowe"` with it); never positive keywords,
+ad-group criteria or shared negative lists. The simulation is validated by Google
+(`validate_only`), entries that are not on the campaign are listed as `notFound`,
+and the result always prints the `add-negatives` command that reverses it.
 
 ### `add-item-exclusion` — the same machinery, one product at a time
 
@@ -804,7 +824,10 @@ this action reports what it left behind instead of quietly succeeding.
    asks to delete something, **show this warning and stop**: removal in Google Ads
    is permanent and irreversible — instead pause it (`--status=PAUSED`), or, if a
    true deletion is really needed, do it by hand in the Google Ads UI. Pausing is
-   reversible; deleting is not.
+   reversible; deleting is not. The rule protects undoability, so the connector's
+   two removals are the undoable ones: `remove-negatives` (campaign negative
+   keywords) and the listing-tree rebuild in `add-label-exclusion` /
+   `add-item-exclusion` — each explained in its own section above.
 2. **Safety first.** Never pass `--commit` without first showing the simulated
    result and getting explicit user confirmation. The CLI makes simulation the
    default so a slip can't write, but `--commit` is yours to type deliberately —

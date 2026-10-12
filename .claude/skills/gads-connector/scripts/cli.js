@@ -30,6 +30,7 @@ import {
   renameCampaign,
   BIDDING_STRATEGIES,
   addCampaignNegativeKeywords,
+  removeCampaignNegativeKeywords,
   addAccountNegativePlacements,
   addAccountNegativeYouTubeChannels,
   updateFinalUrls,
@@ -421,6 +422,10 @@ Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
                           Odmawia, gdy nazwa jest już zajęta przez inną kampanię
                           (Google wymaga unikalnych nazw wśród nieusuniętych).
   add-negatives           Negatywne słowa kluczowe (--campaign, --keywords, --match-type).
+  remove-negatives        Usuwa wykluczające słowa z kampanii (--campaign, --keywords, --match-type).
+                          Jedyne usuwanie słów w konektorze — dozwolone, bo da się je cofnąć:
+                          wynik podaje gotową komendę add-negatives przywracającą stan.
+                          Rusza tylko wykluczenia kampanii o tym samym tekście I typie dopasowania.
   add-negative-placements Wykluczenia miejsc docelowych — domeny (--domains).
   add-negative-youtube-channels  Wykluczenia kanałów YouTube na poziomie konta (--channels).
   update-custom-audience  Dopisuje/usuwa URL-e w niestandardowym segmencie odbiorców
@@ -587,7 +592,7 @@ Opcje:
   --snapshot=<plik.json>      Gdzie zapisać drzewo sprzed przebudowy.
   --query="<GAQL>"            Zapytanie GAQL (dla raw-query).
   --keywords="a,b"            Słowa-zalążki dla keyword-ideas; lub frazy do add-negatives (po przecinku).
-  --match-type=<typ>          OBOWIĄZKOWE dla add-negatives: EXACT | PHRASE | BROAD (wybierz świadomie).
+  --match-type=<typ>          OBOWIĄZKOWE dla add-negatives i remove-negatives: EXACT | PHRASE | BROAD (wybierz świadomie).
   --url=<https://...>         Strona-zalążek dla keyword-ideas (zamiast/oprócz --keywords).
   --geo=<ID>                  geoTargetConstant dla keyword-ideas (domyślnie 2616 = Polska).
   --language=<ID>             languageConstant dla keyword-ideas (domyślnie 1030 = polski).
@@ -1211,6 +1216,20 @@ async function main() {
       }
       const keywords = keywordsString.split(',').map((k) => ({ text: k.trim(), matchType })).filter((k) => k.text);
       const result = await addCampaignNegativeKeywords(customerId, campaignId, keywords, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'remove-negatives') {
+      // The one undoable removal in the connector — see planNegativeRemoval in safety.js.
+      const campaignId = args.campaign;
+      const keywordsString = args.keywords;
+      if (!campaignId || !keywordsString) throw new Error('remove-negatives requires --campaign=<ID> and --keywords="fraza1,fraza 2"');
+      const matchType = String(args['match-type'] || '').trim().toUpperCase();
+      if (!['EXACT', 'PHRASE', 'BROAD'].includes(matchType)) {
+        throw new Error('remove-negatives requires --match-type=EXACT|PHRASE|BROAD — only a negative with the same text AND match type is removed');
+      }
+      const keywords = keywordsString.split(',').map((k) => ({ text: k.trim(), matchType })).filter((k) => k.text);
+      const result = await removeCampaignNegativeKeywords(customerId, campaignId, keywords, dryRun, loginCustomerId);
       console.log(JSON.stringify(result, null, 2));
     }
 

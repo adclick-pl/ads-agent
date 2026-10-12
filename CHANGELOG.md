@@ -7,6 +7,18 @@ restarcie sesji. Szczegóły każdego skilla: `.claude/skills/<skill>/SKILL.md`.
 
 ---
 
+## 2026-10-09
+
+### Nowe
+
+- **Usuwanie wykluczających słów z kampanii (`remove-negatives`).** Gdy wykluczenie
+  okazało się błędem i blokuje dobry ruch, konektor zdejmie je z kampanii. Rusza tylko
+  wykluczenie o tym samym tekście i typie dopasowania, symulację sprawdza Google, a wynik
+  podaje gotową komendę `add-negatives`, która przywraca stan sprzed zmiany. To jedyne
+  usuwanie słów w konektorze — dozwolone, bo w całości odwracalne.
+
+---
+
 ## 2026-09-30
 
 ### Nowe

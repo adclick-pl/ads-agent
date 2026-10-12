@@ -17,6 +17,8 @@ export const DEFAULT_MAX_BUDGET_CHANGE_PCT = 40;
  * (campaigns, ad groups, keywords, etc.) — removal is permanent and irreversible.
  * Anything that can be paused should be paused, not deleted. There is no `--force`
  * override for this: deletion must be done by hand in the Google Ads UI.
+ * The goal is that every change stays undoable; the two carve-outs below
+ * (campaign negatives, listing-group leaves) are removals that are undoable.
  */
 export const NO_DELETE_POLICY =
   'Connector nie usuwa zasobów Google Ads (kampanii, grup reklam, słów kluczowych itd.). ' +
@@ -38,7 +40,47 @@ export function assertNotRemoval(status) {
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
- * The one carve-out from NO_DELETE_POLICY: listing-group filter leaves
+ * Carve-out from NO_DELETE_POLICY: campaign NEGATIVE keywords
+ *
+ * The policy exists so that every change the connector makes can be undone.
+ * Removing a campaign negative keyword is fully undoable: the criterion is pure
+ * configuration (text + match type), carries no spend history of its own, and
+ * re-adding the same text with the same match type (`add-negatives`) restores
+ * exactly the state before. A negative also has no status field — it cannot be
+ * paused — so removal is the only way to switch it off.
+ *
+ * The carve-out stays narrow:
+ *   - campaign-level criteria with `negative = TRUE` and `type = KEYWORD` only —
+ *     never a positive keyword, an ad group criterion or a shared-list entry;
+ *   - text AND match type must match exactly — `[donice betonowe]` never removes
+ *     `"donice betonowe"`;
+ *   - the result always prints the `add-negatives` command that undoes it.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Pick the campaign negatives to remove. Pure — `existing` is what the account
+ * returns for the campaign, so the matching is testable offline. Text compares
+ * case-insensitively with collapsed whitespace; match type must be identical.
+ *
+ * @param {Array<{resourceName: string, text: string, matchType: string}>} existing
+ * @param {Array<{text: string, matchType: string}>} requested
+ * @returns {{toRemove: Array<object>, notFound: Array<object>}}
+ */
+export function planNegativeRemoval(existing, requested) {
+  const key = (t, m) => `${String(t).trim().toLowerCase().replace(/\s+/g, ' ')}|${String(m).toUpperCase()}`;
+  const byKey = new Map((existing || []).map((e) => [key(e.text, e.matchType), e]));
+  const toRemove = [];
+  const notFound = [];
+  for (const r of requested || []) {
+    const hit = byKey.get(key(r.text, r.matchType));
+    if (hit && !toRemove.includes(hit)) toRemove.push(hit);
+    else if (!hit) notFound.push(r);
+  }
+  return { toRemove, notFound };
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * The other carve-out from NO_DELETE_POLICY: listing-group filter leaves
  *
  * Every other resource the connector touches has a `status`, so "retire it"
  * means "pause it" and nothing is ever destroyed. A listing-group filter node

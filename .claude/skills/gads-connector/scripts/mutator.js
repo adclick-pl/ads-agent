@@ -1,7 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { getCustomer, unpackError } from './client.js';
 import { getKeywordsByCriteria, getCampaignBasics, getCampaignBiddingInfo, getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts, getExistingStructuredSnippets, getExistingCallAssets, callAssetIdentity, getExistingPriceAssets, getExistingPromotions, promotionIdentity, getAdGroupAdsByAdIds, getAdGroupsByIds, getExistingYoutubeAssets, getExistingDemandGenAds, getExistingDemandGenProductAds, getExistingListingGroups, getAssetGroupsByIds, getListingFilterTree, LISTING_FILTER_TYPE_NAME, getAdGroupTargetingCriteria, getCampaignChannelTypes, getCallToActionAssets, getConversionActions, getExistingCampaigns, getBudgetsByName, COPYABLE_CRITERION_TYPES } from './queries.js';
-import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkCallAsset, parseCallSchedule, normalizeCallReportingState, checkPriceOfferings, checkPromotion, checkDemandGenAdTexts, checkDemandGenChannels, DEMAND_GEN_LIMITS, adTextLength, checkConversionAction, checkCampaignSpec, checkListingFilterFlip, checkLabelExclusion, checkItemExclusion, planCustomAudienceUrls, planAudienceSegmentAdd, checkCampaignTextAsset, CAMPAIGN_TEXT_ASSET_LIMITS, isIsoDate } from './safety.js';
+import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkCallAsset, parseCallSchedule, normalizeCallReportingState, checkPriceOfferings, checkPromotion, checkDemandGenAdTexts, checkDemandGenChannels, DEMAND_GEN_LIMITS, adTextLength, checkConversionAction, checkCampaignSpec, checkListingFilterFlip, checkLabelExclusion, checkItemExclusion, planCustomAudienceUrls, planNegativeRemoval, planAudienceSegmentAdd, checkCampaignTextAsset, CAMPAIGN_TEXT_ASSET_LIMITS, isIsoDate } from './safety.js';
 
 /**
  * Entity metadata for Final URL updates. Maps our short entity key to the
@@ -889,6 +889,58 @@ export async function addCampaignNegativeKeywords(customerId, campaignId, keywor
     };
   } catch (error) {
     throw new Error(`Failed to add campaign negative keywords: ${unpackError(error)}`);
+  }
+}
+
+/**
+ * Removes negative keywords from a campaign — the undoable carve-out from the
+ * no-delete policy (see `planNegativeRemoval` in safety.js for why it is allowed).
+ * Only campaign-level negative KEYWORD criteria with the exact text + match type
+ * are touched. The simulation is validated by Google (`validate_only`); the result
+ * always carries the `add-negatives` command that restores what was removed.
+ *
+ * @param {string} customerId
+ * @param {string|number} campaignId
+ * @param {Array<{text: string, matchType: string}>} keywords
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>} Plan summary (+ API response when written)
+ */
+export async function removeCampaignNegativeKeywords(customerId, campaignId, keywords, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  const cleanCampaignId = String(campaignId).replace(/\D/g, '');
+  const MATCH = { 2: 'EXACT', 3: 'PHRASE', 4: 'BROAD' };
+  try {
+    const customer = getCustomer(cleanCustomerId, loginCustomerId);
+    const rows = await customer.query(`
+      SELECT campaign_criterion.resource_name, campaign_criterion.keyword.text, campaign_criterion.keyword.match_type
+      FROM campaign_criterion
+      WHERE campaign.id = ${cleanCampaignId}
+        AND campaign_criterion.negative = TRUE
+        AND campaign_criterion.type = KEYWORD`);
+    const existing = rows.map((r) => ({
+      resourceName: r.campaign_criterion.resource_name,
+      text: r.campaign_criterion.keyword.text,
+      matchType: MATCH[r.campaign_criterion.keyword.match_type] || String(r.campaign_criterion.keyword.match_type),
+    }));
+    const { toRemove, notFound } = planNegativeRemoval(existing, keywords);
+    const undo = toRemove.length
+      ? [...new Set(toRemove.map((k) => k.matchType))].map((m) =>
+          `node scripts/cli.js --action=add-negatives --customer=${cleanCustomerId} --campaign=${cleanCampaignId} --match-type=${m} --keywords="${toRemove.filter((k) => k.matchType === m).map((k) => k.text).join(',')}"`)
+      : [];
+    const summary = { campaignId: cleanCampaignId, toRemove: toRemove.map(({ text, matchType }) => ({ text, matchType })), notFound, undo };
+    console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Removing ${toRemove.length} negative keywords from campaign ${cleanCampaignId}${notFound.length ? ` (${notFound.length} not found)` : ''}...`);
+    if (!toRemove.length) return { success: true, dryRun, ...summary };
+
+    const mutations = toRemove.map((k) => ({ entity: 'CampaignCriterion', operation: 'remove', resource: k.resourceName }));
+    if (dryRun) {
+      const validation = await validateWithApi(customer, [mutations]);
+      return { success: validation.ok, dryRun: true, validation, ...summary };
+    }
+    const response = await customer.mutateResources(mutations);
+    return { success: true, dryRun: false, ...summary, response };
+  } catch (error) {
+    throw new Error(`Failed to remove campaign negative keywords: ${unpackError(error)}`);
   }
 }
 
