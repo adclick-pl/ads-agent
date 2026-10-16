@@ -7,6 +7,28 @@ restarcie sesji. Szczegóły każdego skilla: `.claude/skills/<skill>/SKILL.md`.
 
 ---
 
+## 2026-10-15
+
+### Nowe
+
+- **Kampanie Performance Max tylko z feedem (`create-pmax`).** Konektor zakłada PMax
+  dla wybranych typów produktów z feedu: budżet, kampanię, grupę plików i filtr
+  produktów (wskazane typy włączone, reszta wykluczona) w jednym atomowym zapisie.
+  Typowy przypadek: wydzielenie kategorii z kampanii zbiorczej z osobnym budżetem.
+  Kampania powstaje wstrzymana, bez tekstów i grafik (działa głównie jako reklamy
+  produktowe), ze strategią maks. wartości konwersji i opcjonalnym docelowym ROAS.
+  Symulację sprawdza Google przed zapisem, a ponowne uruchomienie nie tworzy duplikatu.
+
+### Poprawki
+
+- **Czytelny komunikat przy chwilowym błędzie Google.** Gdy Google Ads zwracał pusty
+  błąd (zdarza się chwilowo, np. przy pobieraniu haseł z Performance Max), konektor
+  wypisywał samo „Unknown error occurred.” i wyglądało to na błąd w zapytaniu. Teraz
+  komunikat mówi, że to zwykle chwilowy problem po stronie Google, podaje `request_id`
+  i podpowiada, żeby powtórzyć wywołanie.
+
+---
+
 ## 2026-10-09
 
 ### Nowe

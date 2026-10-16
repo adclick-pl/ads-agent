@@ -1,7 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { getCustomer, unpackError } from './client.js';
 import { getKeywordsByCriteria, getCampaignBasics, getCampaignBiddingInfo, getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts, getExistingStructuredSnippets, getExistingCallAssets, callAssetIdentity, getExistingPriceAssets, getExistingPromotions, promotionIdentity, getAdGroupAdsByAdIds, getAdGroupsByIds, getExistingYoutubeAssets, getExistingDemandGenAds, getExistingDemandGenProductAds, getExistingListingGroups, getAssetGroupsByIds, getListingFilterTree, LISTING_FILTER_TYPE_NAME, getAdGroupTargetingCriteria, getCampaignChannelTypes, getCallToActionAssets, getConversionActions, getExistingCampaigns, getBudgetsByName, COPYABLE_CRITERION_TYPES } from './queries.js';
-import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkCallAsset, parseCallSchedule, normalizeCallReportingState, checkPriceOfferings, checkPromotion, checkDemandGenAdTexts, checkDemandGenChannels, DEMAND_GEN_LIMITS, adTextLength, checkConversionAction, checkCampaignSpec, checkListingFilterFlip, checkLabelExclusion, checkItemExclusion, planCustomAudienceUrls, planNegativeRemoval, planAudienceSegmentAdd, checkCampaignTextAsset, CAMPAIGN_TEXT_ASSET_LIMITS, isIsoDate } from './safety.js';
+import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkCallAsset, parseCallSchedule, normalizeCallReportingState, checkPriceOfferings, checkPromotion, checkDemandGenAdTexts, checkDemandGenChannels, DEMAND_GEN_LIMITS, adTextLength, checkConversionAction, checkCampaignSpec, checkPmaxSpec, checkListingFilterFlip, checkLabelExclusion, checkItemExclusion, planCustomAudienceUrls, planNegativeRemoval, planAudienceSegmentAdd, checkCampaignTextAsset, CAMPAIGN_TEXT_ASSET_LIMITS, isIsoDate } from './safety.js';
 
 /**
  * Entity metadata for Final URL updates. Maps our short entity key to the
@@ -1780,6 +1780,269 @@ function normaliseIdList(value, fallback) {
   const raw = Array.isArray(value) ? value : String(value).split(/[|,\s]+/);
   const out = raw.map((v) => String(v).trim()).filter(Boolean);
   return out.length ? [...new Set(out)] : [...fallback];
+}
+
+/**
+ * Mutations for ONE feed-only Performance Max campaign, wired with temporary
+ * resource names so the whole tree goes out in a single atomic request.
+ *
+ * Pure: no API call, so the plan can be inspected and tested offline. The tree:
+ * budget (unless reused) → campaign (PERFORMANCE_MAX, Merchant Center, value
+ * bidding) → geo + language criteria → one asset group with a final URL and NO
+ * creative assets → its listing-group filter. With product types the filter is a
+ * root split by `product_type` at the given level: each listed type INCLUDED,
+ * "everything else" EXCLUDED. Without them the root is a single INCLUDED unit —
+ * the whole feed.
+ *
+ * `brand_guidelines_enabled` is set to false on purpose: with it on, Google wants
+ * the business name and logo as campaign-level assets, and a feed-only campaign
+ * created without them would sit there not serving.
+ *
+ * @param {string} cid - customer ID without dashes
+ * @param {object} r - normalised row (see createPmaxCampaigns)
+ * @param {() => number} nextTemp - returns the next (negative) temporary ID
+ * @returns {Array<object>} mutateResources operations
+ */
+export function buildPmaxMutations(cid, r, nextTemp) {
+  const mutations = [];
+  let budgetRef;
+  if (r.reuseBudget) {
+    budgetRef = `customers/${cid}/campaignBudgets/${r.reuseBudget.budgetId}`;
+  } else {
+    budgetRef = `customers/${cid}/campaignBudgets/${nextTemp()}`;
+    mutations.push({
+      entity: 'campaign_budget',
+      operation: 'create',
+      resource: {
+        resource_name: budgetRef,
+        name: r.budgetName,
+        amount_micros: standardToMicros(r.budgetAmount),
+        delivery_method: 'STANDARD',
+        // PMax rejects shared budgets.
+        explicitly_shared: false,
+      },
+    });
+  }
+
+  const campaignRef = `customers/${cid}/campaigns/${nextTemp()}`;
+  const shopping = { merchant_id: Number(r.merchantId) };
+  if (r.feedLabel) shopping.feed_label = r.feedLabel;
+  const campaign = {
+    resource_name: campaignRef,
+    name: r.name,
+    status: r.status,
+    advertising_channel_type: 'PERFORMANCE_MAX',
+    campaign_budget: budgetRef,
+    shopping_setting: shopping,
+    geo_target_type_setting: {
+      positive_geo_target_type: r.geoTargetType,
+      negative_geo_target_type: 'PRESENCE',
+    },
+    contains_eu_political_advertising: r.euPoliticalAdvertising,
+    brand_guidelines_enabled: false,
+  };
+  if (r.startDate) campaign.start_date = r.startDate;
+  if (r.endDate) campaign.end_date = r.endDate;
+  setBiddingStrategy(campaign, { biddingStrategy: 'MAXIMIZE_CONVERSION_VALUE', targetRoas: r.targetRoas });
+  mutations.push({ entity: 'campaign', operation: 'create', resource: campaign });
+
+  for (const geo of r.geoTargets) {
+    mutations.push({
+      entity: 'campaign_criterion',
+      operation: 'create',
+      resource: { campaign: campaignRef, location: { geo_target_constant: `geoTargetConstants/${geo}` } },
+    });
+  }
+  for (const lang of r.languages) {
+    mutations.push({
+      entity: 'campaign_criterion',
+      operation: 'create',
+      resource: { campaign: campaignRef, language: { language_constant: `languageConstants/${lang}` } },
+    });
+  }
+
+  const agTemp = nextTemp();
+  const assetGroupRef = `customers/${cid}/assetGroups/${agTemp}`;
+  mutations.push({
+    entity: 'asset_group',
+    operation: 'create',
+    resource: { resource_name: assetGroupRef, name: r.assetGroupName, campaign: campaignRef, final_urls: [r.finalUrl], status: 'ENABLED' },
+  });
+
+  const filter = (resource) => ({
+    entity: 'asset_group_listing_group_filter',
+    operation: 'create',
+    resource: { asset_group: assetGroupRef, listing_source: 'SHOPPING', ...resource },
+  });
+  if (r.productTypes.length === 0) {
+    mutations.push(filter({ type: 'UNIT_INCLUDED' }));
+    return mutations;
+  }
+  const rootRef = `customers/${cid}/assetGroupListingGroupFilters/${agTemp}~${nextTemp()}`;
+  const level = `LEVEL${r.productTypeLevel}`;
+  mutations.push(filter({ resource_name: rootRef, type: 'SUBDIVISION' }));
+  for (const value of r.productTypes) {
+    mutations.push(filter({ type: 'UNIT_INCLUDED', parent_listing_group_filter: rootRef, case_value: { product_type: { level, value } } }));
+  }
+  // "Everything else" — a subdivision without it is rejected, and EXCLUDED keeps
+  // the rest of the feed with the campaigns that already own it.
+  mutations.push(filter({ type: 'UNIT_EXCLUDED', parent_listing_group_filter: rootRef, case_value: { product_type: { level } } }));
+  return mutations;
+}
+
+/**
+ * Create feed-only Performance Max campaigns — budget, campaign, one asset group
+ * and its product filter — on an account.
+ *
+ * Same contract as `createSearchCampaigns`: born PAUSED by default, idempotent on
+ * the campaign NAME (the read must succeed — a duplicate cannot be undone), a
+ * same-named budget is reused and never rewritten, and the dry run is validated
+ * by Google itself. Each campaign is its own atomic request, so one bad row
+ * cannot leave another campaign half-built.
+ *
+ * Deliberately feed-only: no headlines, images or logo. Such a campaign serves
+ * mainly as Shopping ads; creative assets can be added in the UI later.
+ *
+ * @param {string} customerId
+ * @param {Array<object>} items - rows: {name, budgetAmount, merchantId, finalUrl,
+ *        budgetName?, assetGroupName?, targetRoas?, productTypes?, productTypeLevel?,
+ *        feedLabel?, status?, geoTargets?, languages?, geoTargetType?,
+ *        euPoliticalAdvertising?, startDate?, endDate?, label?}
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>}
+ */
+export async function createPmaxCampaigns(customerId, items, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  if (!Array.isArray(items) || items.length === 0) throw new Error('Brak kampanii do utworzenia (pusta lista).');
+
+  const problems = [];
+  const warnings = [];
+  const rows = items.map((it, i) => {
+    const name = String(it.name ?? '').trim();
+    const ref = it.label || name || `wiersz ${i + 1}`;
+    const status = String(it.status ?? 'PAUSED').trim().toUpperCase();
+    assertNotRemoval(status);
+    const productTypes = (Array.isArray(it.productTypes) ? it.productTypes : String(it.productTypes ?? '').split('|'))
+      .map((t) => String(t).trim()).filter(Boolean);
+    const row = {
+      label: ref,
+      name,
+      budgetName: String(it.budgetName ?? '').trim() || name,
+      budgetAmount: it.budgetAmount,
+      assetGroupName: String(it.assetGroupName ?? '').trim() || name,
+      merchantId: String(it.merchantId ?? '').trim(),
+      feedLabel: String(it.feedLabel ?? '').trim() || null,
+      finalUrl: String(it.finalUrl ?? '').trim(),
+      targetRoas: it.targetRoas === '' ? null : it.targetRoas ?? null,
+      productTypes,
+      productTypeLevel: it.productTypeLevel === '' || it.productTypeLevel == null ? 1 : Number(it.productTypeLevel),
+      status,
+      geoTargets: normaliseIdList(it.geoTargets, ['2616']),
+      languages: normaliseIdList(it.languages, ['1030']),
+      geoTargetType: String(it.geoTargetType ?? 'PRESENCE').trim().toUpperCase(),
+      euPoliticalAdvertising: String(it.euPoliticalAdvertising ?? 'DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING').trim().toUpperCase(),
+      startDate: String(it.startDate ?? '').trim() || null,
+      endDate: String(it.endDate ?? '').trim() || null,
+    };
+    const check = checkPmaxSpec(row);
+    check.reasons.forEach((r) => problems.push(`${ref}: ${r}`));
+    check.warnings.forEach((w) => warnings.push(`${ref}: ${w}`));
+    return row;
+  });
+
+  const seenInFile = new Set();
+  for (const r of rows) {
+    const k = r.name.toLowerCase();
+    if (seenInFile.has(k)) problems.push(`${r.label}: nazwa kampanii powtarza się w pliku wejściowym.`);
+    seenInFile.add(k);
+  }
+
+  if (problems.length) {
+    throw new Error(`🛑 Zablokowano — ${problems.length} problem(ów) walidacji, nic nie zapisano:\n${problems.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  const existingCampaigns = await getExistingCampaigns(cleanCustomerId, { loginCustomerId });
+  const byName = new Map(existingCampaigns.map((c) => [c.name.toLowerCase(), c]));
+  const existingBudgets = await getBudgetsByName(cleanCustomerId, { loginCustomerId });
+
+  const toCreate = [];
+  const skipped = [];
+  for (const r of rows) {
+    const hit = byName.get(r.name.toLowerCase());
+    if (hit) { skipped.push({ ...r, campaignId: hit.campaignId }); continue; }
+    const budget = existingBudgets.get(r.budgetName.toLowerCase()) || null;
+    if (budget && budget.amount != null && Number(budget.amount) !== Number(r.budgetAmount)) {
+      warnings.push(`${r.label}: budżet "${r.budgetName}" już istnieje z kwotą ${budget.amount} (żądano ${r.budgetAmount}) — użyję istniejącego, kwoty nie zmieniam. Zmiana kwoty → update-budget.`);
+    }
+    toCreate.push({ ...r, reuseBudget: budget });
+  }
+
+  const plan = {
+    toCreate: toCreate.map((r) => ({
+      name: r.name,
+      status: r.status,
+      budgetName: r.budgetName,
+      budgetDaily: Number(r.budgetAmount),
+      budgetReused: r.reuseBudget ? { budgetId: r.reuseBudget.budgetId, amount: r.reuseBudget.amount } : null,
+      biddingStrategy: 'MAXIMIZE_CONVERSION_VALUE',
+      targetRoas: r.targetRoas ? Number(r.targetRoas) : null,
+      merchantId: r.merchantId,
+      feedLabel: r.feedLabel,
+      assetGroupName: r.assetGroupName,
+      finalUrl: r.finalUrl,
+      productFilter: r.productTypes.length
+        ? { productTypeLevel: r.productTypeLevel, included: r.productTypes, everythingElse: 'EXCLUDED' }
+        : 'cały feed',
+      creativeAssets: 'brak (kampania tylko z feedem)',
+      geoTargets: r.geoTargets,
+      geoTargetType: r.geoTargetType,
+      languages: r.languages,
+      euPoliticalAdvertising: r.euPoliticalAdvertising,
+      startDate: r.startDate,
+      endDate: r.endDate,
+    })),
+    skipped: skipped.map((r) => ({ name: r.name, campaignId: r.campaignId, reason: 'kampania o tej nazwie już jest na koncie' })),
+    warnings,
+  };
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Kampanie PMax: do utworzenia ${toCreate.length}, pominięte (już istnieją) ${skipped.length}...`);
+
+  if (toCreate.length === 0) {
+    if (dryRun) return { success: true, dryRun: true, entity: 'campaign', toCreate: 0, skipped: skipped.length, plan };
+    return { success: true, dryRun: false, entity: 'campaign', created: 0, skipped: skipped.length, plan, createdCampaigns: [], response: null };
+  }
+
+  let tempId = 0;
+  const nextTemp = () => --tempId;
+  const batches = toCreate.map((r) => buildPmaxMutations(cleanCustomerId, r, nextTemp));
+  const tooBig = batches.find((b) => b.length > MUTATE_CHUNK);
+  if (tooBig) {
+    throw new Error(`🛑 Jedna kampania to ${tooBig.length} operacji, a żądanie mieści ${MUTATE_CHUNK} — za dużo typów produktów. Nic nie zapisano.`);
+  }
+
+  const customer = getCustomer(cleanCustomerId, loginCustomerId);
+
+  if (dryRun) {
+    const check = await validateWithApi(customer, batches);
+    return { success: check.ok, dryRun: true, entity: 'campaign', toCreate: toCreate.length, skipped: skipped.length, plan, apiValidated: check.ok, apiError: check.error };
+  }
+
+  const responses = [];
+  try {
+    for (const b of batches) responses.push(await customer.mutateResources(b));
+  } catch (error) {
+    const done = responses.length ? ` Utworzone przed błędem: ${toCreate.slice(0, responses.length).map((r) => r.name).join(', ')}.` : '';
+    throw new Error(`Nie udało się utworzyć kampanii PMax: ${unpackError(error)}.${done}`);
+  }
+
+  const after = await getExistingCampaigns(cleanCustomerId, { loginCustomerId });
+  const afterByName = new Map(after.map((c) => [c.name.toLowerCase(), c]));
+  const createdCampaigns = toCreate.map((r) => {
+    const c = afterByName.get(r.name.toLowerCase());
+    return { name: r.name, campaignId: c ? c.campaignId : null, budgetId: c ? c.budgetId : null, status: r.status };
+  });
+  return { success: true, dryRun: false, entity: 'campaign', created: toCreate.length, skipped: skipped.length, plan, createdCampaigns, resourceNames: mutatedResourceNames(responses) };
 }
 
 /**

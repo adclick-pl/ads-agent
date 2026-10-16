@@ -487,10 +487,11 @@ node scripts/cli.js --action=create-campaigns --account=zielonyogrod --input=kam
 #                [Search] Ogrod,30,PAUSED,MAXIMIZE_CLICKS,10
 ```
 
-**Search only, and born paused.** Other channel types are out of scope on
+**Search only, and born paused.** Other channel types are out of scope here on
 purpose: everything else this connector builds (SEARCH_STANDARD ad groups,
 keywords, RSAs) only makes sense in Search, and under the no-delete policy a
-wrong Shopping or PMax campaign can only ever be paused, never taken back. For
+wrong Shopping or PMax campaign can only ever be paused, never taken back. A
+feed-only PMax has its own action, `create-pmax` (below). For
 the same reason `status` defaults to **PAUSED** — a campaign created ENABLED
 starts spending the second the write lands, before anyone has seen a keyword or
 an ad in it. `ENABLED` works and the plan warns.
@@ -523,6 +524,40 @@ if its amount differs from the CSV, that is reported as a warning and left alone
 lives). The dry run is checked by Google itself (`validate_only`), so
 `apiValidated: true` means the whole tree — budget, oneof strategy, criteria on a
 temporary campaign — was accepted before you commit.
+
+**Creating a feed-only Performance Max (`create-pmax`).** Typical case: a
+product category that should get its own budget (split out of a catch-all
+campaign). Takes `--input=map.csv` (required cols `campaign_name`,
+`budget_amount`, `merchant_id`, `final_url`; optional `target_roas`,
+`product_types`, `product_type_level`, `asset_group_name`, `budget_name`,
+`feed_label`, `status`, `geo_targets`, `languages`, `geo_target_type`,
+`eu_political_advertising`, `start_date`, `end_date`) and builds budget +
+PERFORMANCE_MAX campaign + geo/language criteria + ONE asset group + its product
+filter in one atomic request per campaign.
+
+```bash
+node scripts/cli.js --action=create-pmax --account=zielonyogrod --input=pmax.csv
+#  pmax.csv: campaign_name,budget_amount,merchant_id,final_url,target_roas,product_types,product_type_level
+#            [Pmax] Donice,200,111222333,https://zielonyogrod.example,6,donice|osłonki,1
+```
+
+- **Product filter.** `product_types` (separated by `|`) at `product_type_level`
+  (1–5, default 1): each listed type INCLUDED, "everything else" EXCLUDED — so
+  the rest of the feed stays with the campaigns that already own it. No
+  `product_types` = the whole feed, and the plan warns about overlap. The
+  connector does **not** check whether another campaign already includes the
+  same type — and the reverse: if a catch-all campaign *excludes* that type
+  (which is why it is being split out), nothing else serves it until this
+  campaign is enabled.
+- **Feed only, no creative assets.** No headlines, images or logo — the
+  campaign serves mainly as Shopping ads; add assets in the UI if wanted.
+  `brand_guidelines_enabled` is set to false, because with it on Google expects a
+  business name and logo as campaign assets and the campaign would not serve.
+- **Bidding** is always Maximize conversion value; `target_roas` is optional
+  (empty = no target).
+- Same guarantees as `create-campaigns`: born **PAUSED**, idempotent on the name
+  (read must succeed), same-named budget reused and never rewritten, dry run
+  validated by Google (`apiValidated`). To launch: `update-status --status=ENABLED`.
 
 Full flow for a new account: `create-campaigns` → `create-ad-groups` →
 `add-keywords` → `add-ads` → `add-negatives` → the asset actions.

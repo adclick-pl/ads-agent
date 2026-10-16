@@ -40,6 +40,7 @@ import {
   addSitelinks,
   pauseSitelinkLinks,
   createSearchCampaigns,
+  createPmaxCampaigns,
   createAdGroups,
   addKeywords,
   addAds,
@@ -465,6 +466,16 @@ Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
                           bidding_strategy: MAXIMIZE_CLICKS (domyślnie) | MAXIMIZE_CONVERSIONS |
                           MAXIMIZE_CONVERSION_VALUE | MANUAL_CPC. Domyślnie Polska (2616),
                           polski (1030), obecność w lokalizacji, bez partnerów i sieci reklamowej.
+  create-pmax             Tworzy kampanie PERFORMANCE MAX tylko z feedem (bez tekstów i grafik):
+                          budżet + kampania + jedna grupa plików + filtr produktów, atomowo.
+                          Domyślnie PAUSED, idempotentne po nazwie, budżet o istniejącej nazwie
+                          jest ponownie użyty. Tylko --input=mapa.csv (kolumny: campaign_name,
+                          budget_amount,merchant_id,final_url[,target_roas,product_types,
+                          product_type_level,asset_group_name,budget_name,feed_label,status,
+                          geo_targets,languages,geo_target_type,eu_political_advertising,
+                          start_date,end_date]). product_types rozdziel | — każdy typ jest
+                          włączony, „wszystko inne" wykluczone; bez nich kampania bierze cały feed.
+                          product_type_level: 1-5 (domyślnie 1). Strategia: maks. wartość konw.
   create-ad-groups        Tworzy grupy reklam w istniejących kampaniach Search. Idempotentne:
                           pomija grupę, której nazwa już jest w kampanii. Tylko --input=mapa.csv
                           (kolumny: campaign_id,ad_group_name[,status]).
@@ -1363,6 +1374,37 @@ async function main() {
         label: `${r.campaign_name || r.campaign || r.name} (wiersz ${i + 2})`,
       }));
       const result = await createSearchCampaigns(customerId, items, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'create-pmax') {
+      // Batch-only, like create-campaigns: a campaign typed one flag at a time is a
+      // campaign nobody reviewed, and under the no-delete policy a wrong one can
+      // only be paused.
+      if (!args.input) throw new Error('create-pmax wymaga --input=mapa.csv (kolumny: campaign_name,budget_amount,merchant_id,final_url[,target_roas,product_types,product_type_level,asset_group_name,...])');
+      const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+      if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
+      const items = rows.map((r, i) => ({
+        name: r.campaign_name || r.campaign || r.name,
+        budgetName: r.budget_name || '',
+        budgetAmount: r.budget_amount || r.budget || '',
+        merchantId: r.merchant_id || '',
+        feedLabel: r.feed_label || '',
+        finalUrl: r.final_url || '',
+        targetRoas: r.target_roas || '',
+        productTypes: r.product_types || r.product_type || '',
+        productTypeLevel: r.product_type_level || '',
+        assetGroupName: r.asset_group_name || '',
+        status: r.status || 'PAUSED',
+        geoTargets: r.geo_targets || r.geo || '',
+        languages: r.languages || r.language || '',
+        geoTargetType: r.geo_target_type || 'PRESENCE',
+        euPoliticalAdvertising: r.eu_political_advertising || 'DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING',
+        startDate: r.start_date || '',
+        endDate: r.end_date || '',
+        label: `${r.campaign_name || r.campaign || r.name} (wiersz ${i + 2})`,
+      }));
+      const result = await createPmaxCampaigns(customerId, items, dryRun, loginCustomerId);
       console.log(JSON.stringify(result, null, 2));
     }
 

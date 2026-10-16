@@ -1048,6 +1048,61 @@ export function checkCampaignSpec(c) {
   return { valid: reasons.length === 0, reasons, warnings };
 }
 
+/** Product-type depth a PMax listing filter can split on (LEVEL1..LEVEL5). */
+export const PMAX_PRODUCT_TYPE_LEVELS = [1, 2, 3, 4, 5];
+
+/**
+ * Validate one feed-only Performance Max campaign spec before anything is created.
+ *
+ * Reuses `checkCampaignSpec` for everything the two campaign types share (name,
+ * budget, status, geo, language, EU declaration, dates) — PMax always bids on
+ * conversion value, so the strategy is fixed here and only `target_roas` stays
+ * optional. On top of that: the campaign needs a Merchant Center to read products
+ * from and a landing URL for the asset group, and the product-type filter must
+ * name a real level. A spec without product types is allowed (the whole feed), but
+ * warned about: it overlaps every other product campaign on the account.
+ *
+ * @param {object} c - normalised row (see createPmaxCampaigns)
+ * @returns {{valid: boolean, reasons: string[], warnings: string[]}}
+ */
+export function checkPmaxSpec(c) {
+  const base = checkCampaignSpec({
+    ...c,
+    biddingStrategy: 'MAXIMIZE_CONVERSION_VALUE',
+    cpcBidCeiling: null,
+    targetCpa: null,
+    contentNetwork: false,
+  });
+  const reasons = [...base.reasons];
+  const warnings = [...base.warnings];
+
+  if (!/^\d+$/.test(String(c.merchantId ?? '').trim())) {
+    reasons.push(`merchant_id musi być numerycznym ID Merchant Center (jest "${c.merchantId ?? ''}").`);
+  }
+
+  const url = validateFinalUrl(c.finalUrl);
+  if (!url.valid) reasons.push(`final_url: ${url.reason}`);
+
+  const level = Number(c.productTypeLevel);
+  if (!PMAX_PRODUCT_TYPE_LEVELS.includes(level)) {
+    reasons.push(`product_type_level musi być liczbą 1-5 (jest "${c.productTypeLevel}").`);
+  }
+
+  const types = Array.isArray(c.productTypes) ? c.productTypes : [];
+  const seen = new Set();
+  for (const t of types) {
+    const k = String(t).trim().toLowerCase();
+    if (!k) reasons.push('Pusta nazwa typu produktu w product_types.');
+    else if (seen.has(k)) reasons.push(`Typ produktu "${t}" powtarza się w product_types.`);
+    seen.add(k);
+  }
+  if (types.length === 0) {
+    warnings.push('Brak product_types — kampania obejmie CAŁY feed i będzie konkurować o te same produkty z pozostałymi kampaniami produktowymi na koncie.');
+  }
+
+  return { valid: reasons.length === 0, reasons, warnings };
+}
+
 /**
  * Decide whether a budget change is within the safety limit.
  * @param {number|null|undefined} currentAmount - current daily budget (standard currency)

@@ -66,7 +66,10 @@ export function getCustomer(customerId, loginCustomerId) {
  * @returns {string} Fully readable error report
  */
 export function unpackError(error) {
-  let message = error.message || 'Unknown error occurred.';
+  let message = error.message
+    || (error.request_id
+      ? `Google Ads returned an empty error (request_id: ${error.request_id}) — usually transient on Google's side, retry the call.`
+      : 'Unknown error occurred.');
   const details = [];
 
   if (error.errors && Array.isArray(error.errors)) {
