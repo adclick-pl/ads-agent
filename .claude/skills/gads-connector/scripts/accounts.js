@@ -57,6 +57,8 @@ export function loadAccounts(startDir = process.cwd()) {
     name: a.name,
     id: cleanId(a.id),
     login_customer_id: cleanId(a.login_customer_id),
+    // Google login (e-mail or google-auth label) that sees this account. Absent = default login.
+    googleAccount: a.googleAccount ? String(a.googleAccount).trim() : undefined,
     currency: a.currency,
     timezone: a.timezone,
     type: a.type,

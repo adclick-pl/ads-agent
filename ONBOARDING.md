@@ -227,9 +227,15 @@ myślników. Upewnij się **bez wyświetlania zawartości**, że pola nie są pu
 jeśli któreś umknęło, dopisz je teraz. Pole `refresh_token` zostaw puste —
 uzupełni się automatycznie w kroku 4.
 
-## Krok 4 — Wygeneruj refresh token
+## Krok 4 — Autoryzuj konto Google (refresh token)
 
-1. Uruchom `npm run connector:auth`.
+Tokeny wszystkich konektorów trzyma wspólny skill `google-auth`
+(`.claude/skills/google-auth/SKILL.md`): **jeden token na konto Google**, w
+`~/.ads-agent/google/<email>.json`, nazwany e-mailem, którym faktycznie się
+zalogowano. Kolejne usługi (GA4, Search Console…) dokładają się do tego samego tokena.
+
+1. Uruchom `npm run connector:auth` **w tle** — wypisuje link i od razu czeka na
+   powrót z przeglądarki na `localhost:3000`, więc musi przeżyć między turami.
 2. W konsoli pojawi się **link** — przekaż go użytkownikowi. Niech otworzy go w
    przeglądarce i **zaloguje się dokładnie tym kontem Google, które ma dostęp do
    kont Google Ads (lub MCC)** (to samo, które dodaliście jako Test user w 3.3), a następnie zatwierdzi
@@ -239,7 +245,9 @@ uzupełni się automatycznie w kroku 4.
      innego konta"** i wybierz to z dostępem do kont Ads. Gdy nie ma go na liście —
      najpierw zaloguj się na nie w przeglądarce (lub użyj trybu incognito / innego
      profilu), potem otwórz link ponownie.
-3. Po zatwierdzeniu token zapisze się automatycznie do `~/google-ads.yaml`.
+3. Po zatwierdzeniu token zapisze się automatycznie do `~/.ads-agent/google/<email>.json`,
+   a `~/google-ads.yaml` dostanie refresh token konta domyślnego (★) jako kopię.
+   Stan: `npm run google:status`.
 
 ## Krok 5 — Sprawdź połączenie
 
@@ -264,17 +272,17 @@ OAuth z kroku 3 — nie zakładaj nowego projektu:
 
 Jeśli któregoś zabraknie, konektor zwróci gotowy link aktywacyjny z numerem projektu.
 
-**6.2. Autoryzuj.** Konektor używa tego samego `client_id`/`client_secret` co Google Ads
-(z `~/google-ads.yaml`), ale **własnego tokena** — zakres jest inny (`analytics.readonly`),
-więc nie wolno nadpisać tokena Adsów.
+**6.2. Autoryzuj.** Konektor używa tego samego klienta OAuth i **tego samego tokena konta
+Google** co Google Ads — zgoda na GA4 (`analytics.readonly`) rozszerza istniejący token,
+niczego nie nadpisuje.
 
 ```bash
-npm run ga4:auth
+npm run ga4:auth-listen     # NAJPIERW, W TLE
+npm run ga4:auth            # link dla użytkownika
 ```
 
-Podaj użytkownikowi wypisany link, **uruchom nasłuch w tle** (`npm run ga4:auth-listen`)
-i poczekaj, aż potwierdzi kliknięcie. Logować ma się kontem Google, które ma dostęp do
-usług GA4 klientów.
+Podaj użytkownikowi wypisany link i poczekaj, aż potwierdzi kliknięcie. Logować ma się
+kontem Google, które ma dostęp do usług GA4 klientów.
 
 **6.3. Sprawdź:**
 
@@ -284,8 +292,9 @@ node .claude/skills/ga4-connector/scripts/cli.js --action=properties
 ```
 
 Druga komenda wypisze wszystkie usługi widoczne dla tego konta razem z ich ID. Jeśli
-część usług należy do innego konta Google, autoryzuj je jako osobny profil
-(`--profile=<nazwa>`) — opis w `.claude/skills/ga4-connector/SKILL.md`.
+część usług należy do innego konta Google, autoryzuj to konto tak samo (w oknie Google
+wybierz drugie konto) — token zapisze się obok pierwszego, a `--profile=<email>` wskaże
+je przy zapytaniu. Opis w `.claude/skills/ga4-connector/SKILL.md`.
 
 ---
 
@@ -299,15 +308,15 @@ OAuth z kroku 3:
 
 - https://console.cloud.google.com/apis/library/searchconsole.googleapis.com
 
-**7.2. Autoryzuj.** Konektor używa tego samego `client_id`/`client_secret` co Google Ads,
-ale **własnego tokena** — zakres jest inny (`webmasters.readonly`).
+**7.2. Autoryzuj.** Konektor używa tego samego klienta OAuth i **tego samego tokena konta
+Google** — zgoda na Search Console (`webmasters.readonly`) rozszerza istniejący token.
 
 ```bash
-npm run gsc:auth
+npm run gsc:auth-listen     # NAJPIERW, W TLE
+npm run gsc:auth            # link dla użytkownika
 ```
 
-Podaj użytkownikowi wypisany link, **uruchom nasłuch w tle** (`npm run gsc:auth-listen`)
-i poczekaj, aż potwierdzi kliknięcie. Logować ma się kontem Google, które ma dostęp do
+Podaj użytkownikowi wypisany link i poczekaj, aż potwierdzi kliknięcie. Logować ma się kontem Google, które ma dostęp do
 property w Search Console.
 
 **7.3. Sprawdź:**
@@ -323,8 +332,8 @@ uprawnień. Zwróć uwagę na zapis: `sc-domain:example.com` (property domenowa)
 tego, co wypisała ta lista, inaczej Google odpowiada 403.
 
 Sprawdź na tej liście, czy login widzi wszystkich klientów. Jeśli tak — gotowe. Jeśli
-części brakuje, brakujące konta autoryzuj jako osobne profile (`--profile=<nazwa>`) —
-opis w `.claude/skills/gsc-connector/SKILL.md`.
+części brakuje, autoryzuj brakujące konto Google tak samo (zapisze się obok pierwszego,
+`--profile=<email>` wskaże je przy zapytaniu) — opis w `.claude/skills/gsc-connector/SKILL.md`.
 
 **7.4. Zaproponuj rejestr kont.** Jeśli `.claude/accounts.json` jeszcze nie istnieje,
 zaproponuj użytkownikowi jego założenie — wtedy zamiast pełnego zapisu property wystarczy
@@ -360,13 +369,13 @@ i tylko za potwierdzeniem użytkownika, bo alias to decyzja nazewnicza.
 
 | Objaw | Co zrobić |
 |---|---|
-| `invalid_grant` | Refresh token wygasł → ponów `npm run connector:auth`. Jeśli się powtarza, w ekranie zgody OAuth **opublikuj aplikację** (status „In production"). |
+| `invalid_grant` | Refresh token unieważniony → `npm run google:status` pokaże konto, potem ponów autoryzację (`npm run connector:auth` w tle). Jeśli wraca co 7 dni (status pokazuje „token wygaśnie …"), aplikacja OAuth jest w trybie „Testing" — **opublikuj ją** (3.3, status „In production") i autoryzuj ostatni raz. |
 | `redirect_uri_mismatch` (Błąd 400 przy logowaniu) | **Problem klienta OAuth, NIE konta — zmiana zalogowanego konta tego nie naprawi.** Klient został utworzony jako „Web application" zamiast **Desktop app**. Utwórz nowy klient **Desktop app** (3.4), wstaw jego `client_id`/`client_secret` do `~/google-ads.yaml` i ponów `npm run connector:auth`. (Alternatywnie: w istniejącym kliencie Web dodaj `http://localhost:3000/oauth2callback` do *Authorized redirect URIs*.) |
 | `PERMISSION_DENIED` | Sprawdź `login_customer_id` (numer MCC, jeśli używasz) i czy konto Google ma dostęp do tego konta Ads. |
 | Autoryzacja OAuth blokowana („Access blocked" / „nie zweryfikowano aplikacji" dla danego konta) | Logujesz się kontem, którego **nie ma** na liście **Test users** (3.3), albo aplikacja nie jest opublikowana. Dodaj to konto jako Test user **lub** kliknij **Publish app**. Konto musi mieć dostęp do konta Google Ads (lub MCC). |
 | `CLOUD_PROJECT_NOT_APPROVED_FOR_PRODUCTION` (lub starsze `DEVELOPER_TOKEN_NOT_APPROVED`) | Projekt Cloud ma poziom „Test" → na stronie **Google Ads API Overview** złóż wniosek o Explorer (3.5). Sprawdź też, czy klient OAuth jest w **tym samym** projekcie, który ma dostęp. |
 | GA4: `has not been used` / `is disabled` | Nie włączono Analytics Data albo Analytics Admin API (krok 6.1). Konektor podaje gotowy link — kliknij „Włącz" i odczekaj minutę. |
-| GA4: 403 przy konkretnej usłudze | Zalogowane konto nie ma do niej dostępu. `--action=properties` pokaże, co widzi. Usługa na innym koncie Google → autoryzuj ją jako osobny profil (`--profile=`). |
+| GA4: 403 przy konkretnej usłudze | Zalogowane konto nie ma do niej dostępu. `--action=properties` pokaże, co widzi. Usługa na innym koncie Google → autoryzuj to konto (zapisze się obok) i wskaż je `--profile=<email>`. |
 | `Missing required ... configuration` | Plik `~/google-ads.yaml` nie został wypełniony lub nie został znaleziony. |
 | Błędy importu modułów | Uruchom `npm install` w folderze paczki. |
 | `node` nie jest rozpoznawane | Otwórz **nowy** terminal po instalacji Node.js (albo zrestartuj komputer na Windows). |

@@ -10,9 +10,10 @@
 import fs from 'fs';
 import * as gsc from './api.js';
 import {
-  loadAccounts, accountsFile, listProfiles, tokenPath, registryTarget,
+  loadAccounts, accountsFile,  registryTarget,
   rememberSite, proposeAlias, likelyExisting, siteHost, isSiteLike, looksLikeBareDomain,
 } from './config.js';
+import { listAccounts, storeDir } from '../../google-auth/scripts/tokens.js';
 
 // ---------------------------------------------------------------------------
 // args
@@ -256,7 +257,10 @@ function filterExpr() {
 const ACTIONS = {
   'test-connection': async () => gsc.testConnection(profileArg()),
   sites: async () => gsc.sites(profileArg()),
-  profiles: async () => listProfiles().map((p) => ({ profil: p.label, plik: p.file })),
+  profiles: async () =>
+    listAccounts()
+      .filter((a) => a.services.includes('gsc'))
+      .map((a) => ({ konto: a.email, etykieta: a.label || '', domyslne: a.default ? 'tak' : '' })),
 
   sitemaps: async () => gsc.sitemaps({ site: siteArg(), profile: profileArg() }),
 
@@ -493,7 +497,7 @@ CZEGO API NIE DA — nie obiecuj tego użytkownikowi
 WYJŚCIE
   (domyślnie) tabela   --show=N     --show=all     --json     --output=plik.csv
 ${registry}
-Token: ${tokenPath()}
+Tokeny: ${storeDir()} (node ../google-auth/scripts/cli.js --action=status)
 `);
 }
 

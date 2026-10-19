@@ -10,9 +10,10 @@
 import fs from 'fs';
 import * as ga4 from './api.js';
 import {
-  loadAccounts, accountsFile, listProfiles, tokenPath,
+  loadAccounts, accountsFile, 
   rememberProperty, proposeAlias, likelyExisting, cleanDisplayName, registryTarget,
 } from './config.js';
+import { listAccounts, storeDir } from '../../google-auth/scripts/tokens.js';
 import { parseCompareRange, assertNoTimeDimension, mergeCompare, daysInRange } from './compare.js';
 
 // ---------------------------------------------------------------------------
@@ -375,7 +376,10 @@ async function diagnose() {
 const ACTIONS = {
   'test-connection': async () => ga4.testConnection(profileArg()),
   properties: async () => ga4.properties(profileArg()),
-  profiles: async () => listProfiles().map((p) => ({ profil: p.label, plik: p.file })),
+  profiles: async () =>
+    listAccounts()
+      .filter((a) => a.services.includes('ga4'))
+      .map((a) => ({ konto: a.email, etykieta: a.label || '', domyslne: a.default ? 'tak' : '' })),
   report: async () =>
     reportMaybeCompare({
       dimensions: list('dimensions', []),
@@ -574,7 +578,7 @@ FILTRY (łącz średnikiem = AND)
 WYJŚCIE
   (domyślnie) tabela   --show=N     --show=all     --json     --output=plik.csv
 ${registry}
-Token: ${tokenPath()}
+Tokeny: ${storeDir()} (node ../google-auth/scripts/cli.js --action=status)
 `);
 }
 

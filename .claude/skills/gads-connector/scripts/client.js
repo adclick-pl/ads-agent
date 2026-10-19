@@ -1,5 +1,7 @@
 import { GoogleAdsApi } from 'google-ads-api';
 import { loadConfig, validateConfig } from './config.js';
+import { loadAccounts } from './accounts.js';
+import { hasAccountFor, getCredentials } from '../../google-auth/scripts/tokens.js';
 
 let apiInstance = null;
 let apiConfig = null;
@@ -45,7 +47,7 @@ export function getCustomer(customerId, loginCustomerId) {
 
   const options = {
     customer_id: targetCustomerId,
-    refresh_token: config.refresh_token,
+    refresh_token: refreshTokenFor(targetCustomerId, config),
   };
 
   // Per-call login_customer_id wins over global config; either way an MCC
@@ -58,6 +60,17 @@ export function getCustomer(customerId, loginCustomerId) {
   }
 
   return api.Customer(options);
+}
+
+/**
+ * The Google login that sees this customer: `googleAccount` from accounts.json,
+ * else the default login. GADS_REFRESH_TOKEN in .env always wins.
+ */
+function refreshTokenFor(customerId, config) {
+  if (process.env.GADS_REFRESH_TOKEN || !hasAccountFor('ads')) return config.refresh_token;
+  const entry = loadAccounts().find((a) => a.id === customerId);
+  if (!entry?.googleAccount) return config.refresh_token;
+  return getCredentials('ads', entry.googleAccount).refreshToken;
 }
 
 /**

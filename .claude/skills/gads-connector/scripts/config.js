@@ -4,6 +4,7 @@ import os from 'os';
 import { fileURLToPath } from 'url';
 import yaml from 'js-yaml';
 import dotenv from 'dotenv';
+import { hasAccountFor, getCredentials } from '../../google-auth/scripts/tokens.js';
 
 // Resolve the skill root (one level above /scripts) so the connector works
 // no matter which working directory Claude Code or the agent launches it from.
@@ -68,14 +69,25 @@ export function loadConfig() {
       if (!parsedConfig.default_customer_id) {
         parsedConfig.default_customer_id = parsedConfig.login_customer_id;
       }
-      return parsedConfig;
+      return withStoredToken(parsedConfig);
     } catch (e) {
+      if (e.code) throw e; // google-auth error (e.g. several accounts, none default) — show it as is
       console.warn(`[Warning] Failed to parse ~/google-ads.yaml: ${e.message}`);
     }
   }
 
-  // Return the environment config if yaml doesn't exist
-  return envConfig;
+  return withStoredToken(envConfig);
+}
+
+/**
+ * The google-auth store (one token per Google account) wins over the yaml's
+ * refresh_token — the yaml is only its export for tools that read it directly.
+ * Per-account logins are picked later, in getCustomer().
+ */
+function withStoredToken(config) {
+  if (!hasAccountFor('ads')) return config;
+  const c = getCredentials('ads');
+  return { ...config, client_id: c.clientId, client_secret: c.clientSecret, refresh_token: c.refreshToken, google_account: c.email };
 }
 
 /**
@@ -91,7 +103,7 @@ export function validateConfig(config) {
   if (!config.refresh_token) missing.push('GADS_REFRESH_TOKEN / refresh_token');
 
   if (missing.length > 0) {
-    throw new Error(`Missing required Google Ads API configuration: ${missing.join(', ')}. Please define them in a local .env file or ~/google-ads.yaml.`);
+    throw new Error(`Missing required Google Ads API configuration: ${missing.join(', ')}. Please define them in a local .env file or ~/google-ads.yaml, and authorize a Google account: node .claude/skills/google-auth/scripts/cli.js --action=auth --services=ads`);
   }
 
   return true;

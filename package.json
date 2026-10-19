@@ -6,6 +6,9 @@
   "private": true,
   "license": "SEE LICENSE IN LICENSE",
   "scripts": {
+    "google:listen": "node .claude/skills/google-auth/scripts/cli.js --action=listen --timeout=900",
+    "google:auth": "node .claude/skills/google-auth/scripts/cli.js --action=auth",
+    "google:status": "node .claude/skills/google-auth/scripts/cli.js --action=status --check",
     "connector:auth": "node .claude/skills/gads-connector/scripts/auth.js",
     "connector:test": "node .claude/skills/gads-connector/scripts/cli.js --action=test-connection",
     "connector:mcp": "node .claude/skills/gads-connector/scripts/mcp-server.js",

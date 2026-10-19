@@ -138,7 +138,7 @@ export const TOKEN_DIR = path.join(os.homedir(), '.ads-agent');
 export function assertProfileName(profile) {
   if (profile === undefined || profile === null || profile === '') return undefined;
   const p = String(profile).trim();
-  if (!/^[a-z0-9][a-z0-9._-]*$/i.test(p)) {
+  if (!/^[a-z0-9][a-z0-9._+@-]*$/i.test(p)) {
     throw new Error(
       `Niedozwolona nazwa profilu „${p}”. Dozwolone: litery, cyfry, kropka, myślnik, podkreślenie.`
     );
@@ -255,6 +255,8 @@ export function loadAccounts() {
     ga4PropertyId: bareId(a.ga4PropertyId),
     // Which Google login sees this property. Absent = the default token.
     ga4Profile: a.ga4Profile ? String(a.ga4Profile).trim() : undefined,
+    // Login for all services of this client (google-auth e-mail or label); ga4Profile overrides it.
+    googleAccount: a.googleAccount ? String(a.googleAccount).trim() : undefined,
     default: !!a.default,
     _file: file,
   }));
@@ -294,14 +296,14 @@ export function resolveTarget(input, profile) {
   if (direct && /^\d+$/.test(direct)) {
     // No registry entry to consult unless the id happens to be listed there.
     const known = loadAccounts().find((a) => a.ga4PropertyId === direct);
-    return { propertyId: direct, profile: explicit ?? known?.ga4Profile };
+    return { propertyId: direct, profile: explicit ?? known?.ga4Profile ?? known?.googleAccount };
   }
 
   // 2. A selector from the registry.
   if (raw) {
     const hit = findAccount(raw);
     if (hit?.ga4PropertyId) {
-      return { propertyId: hit.ga4PropertyId, profile: explicit ?? hit.ga4Profile };
+      return { propertyId: hit.ga4PropertyId, profile: explicit ?? hit.ga4Profile ?? hit.googleAccount };
     }
     if (hit) {
       throw new Error(
@@ -326,7 +328,7 @@ export function resolveTarget(input, profile) {
   if (fromEnv) return { propertyId: fromEnv, profile: explicit };
   const fallback = findAccount(null);
   if (fallback?.ga4PropertyId) {
-    return { propertyId: fallback.ga4PropertyId, profile: explicit ?? fallback.ga4Profile };
+    return { propertyId: fallback.ga4PropertyId, profile: explicit ?? fallback.ga4Profile ?? fallback.googleAccount };
   }
 
   throw new Error(

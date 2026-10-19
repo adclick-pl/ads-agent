@@ -142,7 +142,7 @@ export const TOKEN_DIR = path.join(os.homedir(), '.ads-agent');
 export function assertProfileName(profile) {
   if (profile === undefined || profile === null || profile === '') return undefined;
   const p = String(profile).trim();
-  if (!/^[a-z0-9][a-z0-9._-]*$/i.test(p)) {
+  if (!/^[a-z0-9][a-z0-9._+@-]*$/i.test(p)) {
     throw new Error(
       `Niedozwolona nazwa profilu „${p}”. Dozwolone: litery, cyfry, kropka, myślnik, podkreślenie.`
     );
@@ -304,6 +304,8 @@ export function loadAccounts() {
     gscSite: a.gscSite ? normalizeSite(a.gscSite) : undefined,
     // Which Google login sees this property. Absent = the default token.
     gscProfile: a.gscProfile ? String(a.gscProfile).trim() : undefined,
+    // Login for all services of this client (google-auth e-mail or label); gscProfile overrides it.
+    googleAccount: a.googleAccount ? String(a.googleAccount).trim() : undefined,
     default: !!a.default,
     _file: file,
   }));
@@ -342,14 +344,14 @@ export function resolveTarget(input, profile) {
   if (isSiteLike(raw)) {
     const site = normalizeSite(raw);
     const known = loadAccounts().find((a) => a.gscSite === site);
-    return { site, profile: explicit ?? known?.gscProfile };
+    return { site, profile: explicit ?? known?.gscProfile ?? known?.googleAccount };
   }
 
   // 2. A selector from the registry.
   if (raw) {
     const hit = findAccount(raw);
     if (hit?.gscSite) {
-      return { site: hit.gscSite, profile: explicit ?? hit.gscProfile };
+      return { site: hit.gscSite, profile: explicit ?? hit.gscProfile ?? hit.googleAccount };
     }
     if (hit) {
       throw new Error(
@@ -387,7 +389,7 @@ export function resolveTarget(input, profile) {
   if (fromEnv) return { site: normalizeSite(fromEnv), profile: explicit };
   const fallback = findAccount(null);
   if (fallback?.gscSite) {
-    return { site: fallback.gscSite, profile: explicit ?? fallback.gscProfile };
+    return { site: fallback.gscSite, profile: explicit ?? fallback.gscProfile ?? fallback.googleAccount };
   }
 
   throw new Error(

@@ -20,9 +20,8 @@ import {
   writeToken,
   resolveTarget,
   tokenPath,
-  SCOPES,
-  REDIRECT_URI,
 } from './config.js';
+import { hasAccountFor, getAccessToken } from '../../google-auth/scripts/tokens.js';
 
 const DATA = 'https://analyticsdata.googleapis.com/v1beta';
 const ADMIN = 'https://analyticsadmin.googleapis.com/v1beta';
@@ -37,48 +36,22 @@ const PAGE_SIZE = 100000;
 // ---------------------------------------------------------------------------
 // OAuth
 // ---------------------------------------------------------------------------
-export function authUrl() {
-  const { clientId } = oauthClient();
-  const q = new URLSearchParams({
-    client_id: clientId,
-    redirect_uri: REDIRECT_URI,
-    response_type: 'code',
-    scope: SCOPES.join(' '),
-    access_type: 'offline',
-    prompt: 'select_account consent', // force a refresh_token even on re-consent
-  });
-  return `https://accounts.google.com/o/oauth2/v2/auth?${q}`;
-}
-
-export async function exchangeCode(code, profile) {
-  const { clientId, clientSecret } = oauthClient();
-  const res = await fetch(TOKEN_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      code,
-      client_id: clientId,
-      client_secret: clientSecret,
-      redirect_uri: REDIRECT_URI,
-      grant_type: 'authorization_code',
-    }),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(`Wymiana kodu na token nie udała się: ${JSON.stringify(data)}`);
-  if (!data.refresh_token) {
-    throw new Error(
-      'Google nie zwróciło refresh_token. Zwykle znaczy to, że zgoda była już wcześniej wydana —\n' +
-        'usuń dostęp na https://myaccount.google.com/permissions i powtórz autoryzację.'
-    );
-  }
-  const stored = { ...readToken(profile), ...data, expiry: Date.now() + (data.expires_in || 3600) * 1000 };
-  return { token: stored, path: writeToken(stored, profile) };
-}
-
 // Access tokens live per profile, for this process only.
 const memoTokens = new Map();
 
+/**
+ * Access token for a login. The google-auth store (one token per Google
+ * account, `profile` = its e-mail or label) is the source; the per-connector
+ * token files from before it are read only while the store has no GA4 account.
+ */
 export async function accessToken(profile) {
+  if (hasAccountFor('ga4') || !refreshToken(profile)) {
+    return (await getAccessToken('ga4', profile)).accessToken;
+  }
+  return legacyAccessToken(profile);
+}
+
+async function legacyAccessToken(profile) {
   const key = profile || '';
   const now = Date.now();
   const memo = memoTokens.get(key);
@@ -95,7 +68,7 @@ export async function accessToken(profile) {
     throw new Error(
       profile
         ? `Profil „${profile}” nie jest autoryzowany (brak ${tokenPath(profile)}).\n` +
-          `Uruchom: node scripts/auth.js --step=url --profile=${profile}, otwórz link, potem --step=listen --profile=${profile}.\n` +
+          `Uruchom: node scripts/auth.js --step=url --profile=${profile}.\n` +
           'Listę autoryzowanych loginów pokaże `--action=profiles`.'
         : 'Brak refresh tokena GA4 — konektor nie był jeszcze autoryzowany.\n' +
           'Uruchom: node scripts/auth.js --step=url, otwórz link, potem --step=listen.'

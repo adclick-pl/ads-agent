@@ -36,13 +36,21 @@ This skill is the low-level *connection layer* those workflows can build on.
    Node resolves packages up the directory tree, so this skill folder stays clean.
 2. **Add credentials. Copy `references/.env.example` → `.env` (in this skill
    folder) and fill in the five values.
-   To obtain them, follow `README.md` → *Setup Google Ads API*. If you only have a
-   `client_id` + `client_secret`, generate a refresh token interactively:
+   To obtain them, follow `README.md` → *Setup Google Ads API*. The refresh token
+   is no longer typed in by hand: with `client_id` + `client_secret` in place,
+   authorize through the shared `google-auth` skill
+   (`../google-auth/SKILL.md`):
    ```bash
-   node scripts/auth.js        # opens a browser, prints the refresh_token
+   node scripts/auth.js [--account=<email>]   # prints the link AND runs the shared listener
    ```
-   > Auth runs in the **foreground** and waits for the user to authorize in the
-   > browser — never background it.
+   > The script waits for the browser callback on `localhost:3000`, so run it in the
+   > **background** (it must survive between turns), then give the user the link.
+   The token lands in `~/.ads-agent/google/<email>.json` (one file per Google account,
+   e-mail taken from Google — a second login never overwrites the first). The
+   connector reads it from there; `GADS_REFRESH_TOKEN` in `.env` still wins.
+   `~/google-ads.yaml` (if present) is rewritten with the default account's refresh
+   token after every authorization. A client managed from another Google login:
+   set `"googleAccount": "<email>"` on its entry in `.claude/accounts.json`.
 3. **Test the live connection:**
    ```bash
    node scripts/cli.js --action=test-connection

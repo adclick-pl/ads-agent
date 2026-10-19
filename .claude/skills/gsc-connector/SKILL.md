@@ -16,31 +16,35 @@ Jedyny zapis dotyczy naszego rejestru kont (`--action=remember`) i wymaga potwie
 
 ## Konfiguracja — jedno API i jedna zgoda
 
-Konektor używa **tego samego klienta OAuth co Google Ads** (`~/google-ads.yaml` albo
-`GADS_CLIENT_ID`/`GADS_CLIENT_SECRET`), więc nie zakładasz drugiego klienta ani nie
-rejestrujesz drugiego URI przekierowania.
+Konektor używa **tego samego klienta OAuth co Google Ads** (wspólny skill `google-auth`:
+`GOOGLE_CLIENT_ID` → `GADS_CLIENT_ID` → `~/google-ads.yaml`), więc nie zakładasz drugiego
+klienta ani nie rejestrujesz drugiego URI przekierowania.
 
 1. Włącz w **tym samym** projekcie Google Cloud:
    https://console.cloud.google.com/apis/library/searchconsole.googleapis.com
 2. Autoryzuj (dwa kroki — patrz niżej).
 
-Token trzyma **osobno** w `~/.ads-agent/gsc-token.json`. To celowe: zakresy Adsów, GA4
-i Search Console są różne, a nadpisanie któregokolwiek tokena zepsułoby tamten konektor.
+Token leży we wspólnym magazynie `google-auth`: **jeden plik na konto Google**,
+`~/.ads-agent/google/<email>.json`. Zgoda na Search Console rozszerza token konta, które ma
+już np. Google Ads — nic się nie nadpisuje. Stare `~/.ads-agent/gsc-token*.json` są czytane
+już tylko awaryjnie, gdy w magazynie nie ma żadnego konta z GSC.
 Pełna lista zmiennych: `references/.env.example`.
 
 ## Autoryzacja (dwa kroki)
 
 ```bash
-node scripts/auth.js --step=url        # wypisuje link
-node scripts/auth.js --step=listen     # czeka na powrót z przeglądarki
+node scripts/auth.js --step=listen     # NAJPIERW, W TLE — czeka na powrót z przeglądarki
+node scripts/auth.js --step=url        # wypisuje link [--profile=<email>]
 ```
+
+`auth.js` to nakładka na `google-auth` (`--action=listen` / `--action=auth --services=gsc`).
 
 Kolejność jest istotna: **najpierw uruchom nasłuch w tle**, dopiero potem podaj
 użytkownikowi link i poczekaj, aż potwierdzi kliknięcie. Nasłuch musi wystartować przed
 kliknięciem — inaczej przekierowanie trafi w zamknięty port. Musi też przeżyć między
 turami, dlatego idzie w tło.
 
-Z korzenia pakietu: `npm run gsc:auth`, potem `npm run gsc:auth-listen`.
+Z korzenia pakietu: `npm run gsc:auth-listen` (w tle), potem `npm run gsc:auth`.
 
 ## Property: dwa różne obiekty, nie synonimy
 
@@ -88,16 +92,18 @@ warto od razu uzupełnić `id` (konto Ads) i `ga4PropertyId`, żeby alias dział
 
 `--action=sites` pokazuje, co widzi autoryzowany login. Jeśli lista zawiera wszystkich
 klientów — pomiń ten rozdział. Gdy jakiejś property brakuje, autoryzuj login, który ją
-widzi, jako profil (osobny plik tokena):
+widzi — w oknie Google wybierz to konto. Token zapisze się pod e-mailem, którym się
+zalogowano, obok pierwszego. **Profil** (`--profile=`) to e-mail albo etykieta z `google-auth`:
 
 ```bash
-node scripts/auth.js --step=url --profile=firma2   # autoryzacja drugiego konta
-node scripts/cli.js --action=sites --profile=firma2
+node scripts/auth.js --step=listen                 # NAJPIERW, W TLE
+node scripts/auth.js --step=url                    # autoryzacja drugiego konta
+node scripts/cli.js --action=sites --profile=ktos@example.com
 ```
 
-W rejestrze pole `"gscProfile": "firma2"` przypisuje login do klienta na stałe, więc przy
-`--site=<alias>` nie musisz o nim pamiętać. `--action=profiles` pokazuje autoryzowane
-loginy.
+W rejestrze pole `"gscProfile": "ktos@example.com"` (tylko GSC) albo `"googleAccount"`
+(wszystkie usługi klienta) przypisuje login do klienta na stałe, więc przy `--site=<alias>`
+nie musisz o nim pamiętać. `--action=profiles` pokazuje konta z magazynu, które mają GSC.
 
 ## Użycie
 
@@ -192,7 +198,7 @@ Listę adresów do próbki najprościej zbudować z ruchu:
 | 403 przy property | najpierw sprawdź formę zapisu (`sc-domain:` vs prefiks URL) — konektor wypisze, co widzi login; potem uprawnienia |
 | 403 tylko przy `inspect` | URL Inspection wymaga uprawnienia „pełne"/„właściciel"; rola „ograniczona" nie wystarcza |
 | 404 przy property | property w tej formie nie istnieje; prefiks URL musi mieć slash na końcu |
-| `invalid_grant` | token unieważniony — powtórz `auth.js --step=url` |
+| `invalid_grant` | token unieważniony — powtórz `auth.js --step=listen` (w tle) + `--step=url --profile=<email>` |
 | 429 | limit URL Inspection — zmniejsz `--concurrency` albo rozbij listę na kilka dni |
 | Zero wierszy w `query` | opóźnienie 2–3 dni, za wąski zakres albo nie ta property |
 

@@ -28,27 +28,26 @@ Gdy użytkownik nie ma jeszcze żadnego projektu GCP ani konektora Ads — przep
 przez `ONBOARDING.md` (krok 3 zakłada projekt i klienta OAuth typu **Desktop app**, przy
 którym przekierowanie na `localhost` działa bez rejestrowania URI), a potem przez krok 6.
 
-**2. Autoryzuj** — dwa kroki, zawsze na pierwszym planie:
+**2. Autoryzuj** — przez wspólny skill `google-auth` (`.claude/skills/google-auth/SKILL.md`).
+Najpierw **nasłuch w tle** — musi żyć między turami, bo trzyma serwer callbacku na
+`localhost:3000`:
 
 ```bash
-node .claude/skills/ga4-connector/scripts/auth.js --step=url
+node .claude/skills/ga4-connector/scripts/auth.js --step=listen --timeout=900   # NAJPIERW, W TLE
+node .claude/skills/ga4-connector/scripts/auth.js --step=url                    # link dla użytkownika
 ```
 
-Ten krok tylko wypisuje link i kończy się. Zaraz potem **uruchom nasłuch w tle** — musi
-żyć między turami, bo trzyma serwer callbacku na `localhost:3000`:
-
-```bash
-node .claude/skills/ga4-connector/scripts/auth.js --step=listen --timeout=900
-```
-
+`auth.js` to nakładka na `google-auth` (`--action=listen` / `--action=auth --services=ga4`).
 Dopiero teraz podaj użytkownikowi link i **poczekaj, aż potwierdzi kliknięcie**. Nasłuch
 musi wystartować przed kliknięciem, inaczej przekierowanie trafi w zamknięty port.
 Użytkownik nigdy nie klepie komend w terminalu — dostaje gotowy link.
 
-Konektor bierze `client_id`/`client_secret` po kolei z: `GA4_CLIENT_ID`+`GA4_CLIENT_SECRET`,
-`GADS_CLIENT_ID`+`GADS_CLIENT_SECRET`, `~/google-ads.yaml`. **Refresh token trzyma
-osobno** (`~/.ads-agent/ga4-token.json`) — token Google Ads ma inny zakres i nadpisanie
-któregokolwiek zepsułoby drugi konektor.
+Token trafia do wspólnego magazynu: **jeden plik na konto Google**,
+`~/.ads-agent/google/<email>.json`. Zgoda na GA4 dla konta, które ma już Google Ads,
+rozszerza ten sam token — nic się nie nadpisuje. Klienta OAuth wybiera `google-auth`
+(`GOOGLE_CLIENT_ID` → `GADS_CLIENT_ID` → `~/google-ads.yaml`). Stare
+`~/.ads-agent/ga4-token*.json` są czytane już tylko awaryjnie, gdy w magazynie nie ma
+żadnego konta z GA4.
 
 **3. Sprawdź:**
 
@@ -109,30 +108,28 @@ wyprowadzenia. Użytkownik może podać własny alias zamiast proponowanego.
 
 Jeden login rzadko widzi wszystkie usługi klientów — czasem nie da się dodać kolejnego
 użytkownika po stronie klienta, czasem usługi są rozrzucone po Twoich własnych kontach.
-**Profil** to nazwany plik tokena, dzięki czemu kilka loginów żyje obok siebie zamiast
-się nadpisywać.
+Magazyn `google-auth` trzyma token **per konto Google, nazwany e-mailem**, którym faktycznie
+się zalogowano — drugie konto nigdy nie nadpisze pierwszego. **Profil** (`--profile=`) to
+e-mail konta albo jego etykieta z `google-auth`.
 
 ```bash
-# autoryzacja drugiego konta → ~/.ads-agent/ga4-token-firma2.json
-node scripts/auth.js --step=url --profile=firma2
-node scripts/auth.js --step=listen --profile=firma2
+node scripts/auth.js --step=listen                          # NAJPIERW, W TLE
+node scripts/auth.js --step=url                             # w oknie Google wybierz drugie konto
 
-node scripts/cli.js --action=profiles          # które loginy są autoryzowane
-node scripts/cli.js --action=traffic --property=123456789 --profile=firma2
+node scripts/cli.js --action=profiles                       # konta z magazynu, które mają GA4
+node scripts/cli.js --action=traffic --property=123456789 --profile=ktos@example.com
 ```
 
-Żebyś nie musiał o profilu pamiętać, przypisz go do klienta w rejestrze:
+Żebyś nie musiał o profilu pamiętać, przypisz login do klienta w rejestrze:
 
 ```json
-"drugafirma": { "id": "2233445566", "ga4PropertyId": "987654321", "ga4Profile": "firma2" }
+"drugafirma": { "id": "2233445566", "ga4PropertyId": "987654321", "ga4Profile": "ktos@example.com" }
 ```
 
 Odtąd `--property=drugafirma` samo sięga po właściwy token. Pierwszeństwo: jawne
-`--profile` → `ga4Profile` z rejestru → profil domyślny. Przy 403 konektor mówi, który
-login próbował, i podpowiada sprawdzenie pozostałych.
-
-Autoryzacja bez `--profile`, gdy domyślny token już istnieje, **nadpisze go** — `auth.js`
-ostrzega o tym przed pokazaniem linku.
+`--profile` → `ga4Profile` z rejestru → `googleAccount` z rejestru (login dla wszystkich
+usług klienta) → `GOOGLE_ACCOUNT` w `.env` → jedyne konto z GA4 → konto domyślne (★).
+Przy 403 konektor mówi, który login próbował, i podpowiada sprawdzenie pozostałych.
 
 Rejestr jest szukany w górę drzewa katalogów i **jest gitignorowany** — trzyma prawdziwe
 ID klientów i nigdy nie trafia do repozytorium. Kolejność, gdy nie podasz `--property`:
@@ -255,7 +252,7 @@ Wykluczenie spamu z raportu: `--filter="sessionSource!~semalt;sessionSource!~but
 |---|---|
 | `has not been used` / `is disabled` | włączyć Data albo Admin API — konektor podaje gotowy link |
 | 403 przy konkretnej usłudze | konto nie ma do niej dostępu; `--action=properties` pokaże, co widzi |
-| `invalid_grant` | token unieważniony — powtórzyć `auth.js --step=url` |
+| `invalid_grant` | token unieważniony — powtórzyć `auth.js --step=listen` (w tle) + `--step=url --profile=<email>` |
 | 400 „Did you mean" | zła nazwa wymiaru/metryki — `--action=metadata` |
 | 429 | limit usługi wyczerpany — mniej wymiarów, krótszy okres, później |
 | Port 3000 zajęty | inny nasłuch autoryzacji nadal żyje — zamknąć go |

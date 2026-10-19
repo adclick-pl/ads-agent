@@ -7,6 +7,37 @@ restarcie sesji. Szczegóły każdego skilla: `.claude/skills/<skill>/SKILL.md`.
 
 ---
 
+## 2026-10-16
+
+### Nowe
+
+- **Jedno logowanie do Google dla wszystkich konektorów (`google-auth`).** Ads, GA4,
+  Search Console, Merchant Center, Tag Manager, Gmail, Kalendarz i Arkusze korzystają
+  teraz z jednego magazynu tokenów: jeden token na konto Google, zapisany pod e-mailem,
+  którym faktycznie się zalogowałeś. Zalogowanie się drugim kontem dodaje je obok
+  pierwszego, zamiast nadpisać. Kolejną usługę dokładasz do tego samego tokena jednym
+  kliknięciem, a wcześniejsze usługi zostają. `--action=status --check` pokazuje, które
+  konta są podłączone, do czego i czy tokeny działają.
+- **Kilka kont Google w każdym konektorze.** W `.claude/accounts.json` klient może mieć
+  pole `googleAccount` (e-mail logowania, które go widzi); `ga4Profile` i `gscProfile`
+  dalej działają i przyjmują e-mail. `--profile=` w GA4 i Search Console przyjmuje e-mail.
+- **Jeden nasłuch autoryzacji dla wszystkich usług.** Koniec z „Port 3000 jest zajęty”
+  przy dwóch autoryzacjach naraz — jeden nasłuch przyjmie każdy link.
+
+### Zmiany
+
+- **Tokeny wygasające co 7 dni.** Jeśli `status` ostrzega „token wygaśnie …”, Twoja
+  aplikacja OAuth w Google Cloud jest w trybie „Testing” — instrukcja przełączenia na
+  produkcję jest w `.claude/skills/google-auth/SKILL.md`. Po przełączeniu wystarczy
+  jedna, ostatnia autoryzacja.
+- **Po aktualizacji autoryzuj się raz od nowa:**
+  `node .claude/skills/google-auth/scripts/cli.js --action=listen` (w tle), potem
+  `--action=auth --services=all`. Do tego czasu GA4 i Search Console czytają stare tokeny,
+  a Google Ads — `~/google-ads.yaml`. Plik `~/google-ads.yaml` dostaje potem refresh token
+  automatycznie, więc narzędzia, które go czytają, działają bez zmian.
+
+---
+
 ## 2026-10-15
 
 ### Nowe

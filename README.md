@@ -49,8 +49,9 @@ macOS and Windows.
 ```bash
 npm install               # once, from this folder
 
-npm run connector:auth    # generate a Google Ads refresh token
+npm run connector:auth    # authorize Google Ads (prints the link, waits for the callback)
 npm run connector:test    # verify the live API connection
+npm run google:status     # which Google accounts are connected, and to which services
 ```
 
 Getting the Google Ads API credentials is covered step by step in
@@ -61,9 +62,10 @@ Getting the Google Ads API credentials is covered step by step in
 
 | Skill | What it does |
 |---|---|
+| `google-auth` | Shared Google sign-in for every connector (Ads, GA4, Search Console and more): **one refresh token per Google account**, stored under the e-mail you actually signed in with (`~/.ads-agent/google/<email>.json`), so several Google accounts live side by side and granting a new service extends the same token. One shared callback listener (`npm run google:listen`), one link per account (`npm run google:auth`). |
 | `gads-connector` | Connect to and manage Google Ads accounts (read + mutations) via CLI and MCP. Needs the Google Ads API credentials from [`ONBOARDING.md`](ONBOARDING.md). |
 | `gads-reklamy` | Write effective Google Ads RSA ads in Polish via a guided 4-step process (data → company & competitor research → ad angles for approval → headlines/descriptions). Pure prompting — **no setup or credentials needed**, works the moment you open the folder in Claude Code. |
-| `ga4-connector` | Read **Google Analytics 4**: reports (channels, campaigns, landing pages, products, monthly cohorts, realtime) and property configuration (data streams, key events, custom dimensions, attribution settings, Google Ads links). Read-only — the OAuth scope is `analytics.readonly`, so it can never change a client's property. **No npm dependencies**; reuses the Google Ads OAuth client, so setup is two APIs to enable plus one consent. Supports several Google logins side by side via token profiles. |
+| `ga4-connector` | Read **Google Analytics 4**: reports (channels, campaigns, landing pages, products, monthly cohorts, realtime) and property configuration (data streams, key events, custom dimensions, attribution settings, Google Ads links). Read-only — the OAuth scope is `analytics.readonly`, so it can never change a client's property. **No npm dependencies**; reuses the Google Ads OAuth client, so setup is two APIs to enable plus one consent. Supports several Google logins side by side via the shared `google-auth` store. |
 | `gsc-connector` | Read **Google Search Console**: search performance (clicks, impressions, CTR, position by query, page, country, device), submitted sitemaps and their errors, and URL Inspection — whether a URL is indexed, which canonical Google picked, when it was last crawled, and where it knows the URL from. Read-only — the OAuth scope is `webmasters.readonly`, so it can never touch a client's property. **No npm dependencies**; reuses the Google Ads OAuth client, so setup is one API to enable plus one consent. Knows that `sc-domain:` and URL-prefix properties are different objects, and says what your login actually has when Google answers 403. |
 | `gads-wykluczenia-hasel` | Find **negative keywords**: an HTML report, per campaign, splitting wasteful search terms into "certain — exclude" and "check by hand", each with 30-day and 12-month numbers plus a plain-language reason, and copy-paste-ready lists. Combines four signals (30-day spend, a full year without conversions, keyword-match distance, and an AI relevance verdict that knows your offer). Read-only — it never changes the account. Needs `gads-connector` configured. |
 | `gads-przeglad-slow-kluczowych` | Audit the **keywords you added** to the account (not search terms — that's `gads-wykluczenia-hasel`): an HTML report, per campaign, listing pause candidates as "certain" and "check by hand", each with 30-day and 12-month numbers, the reason, and the benchmark it was measured against (campaign tROAS/tCPA → account target → campaign yearly average). Keywords that hit the target in either period are protected. Numbers only, no LLM — one pass takes seconds. The script never changes the account; pausing goes through `gads-connector` (`update-keyword-status`, reversible) only after you confirm. Needs `gads-connector` configured. |
@@ -75,8 +77,10 @@ brought, in Polish: [`CHANGELOG.md`](CHANGELOG.md).)*
 
 - Credentials and the account registry are **gitignored** (`.env`,
   `google-ads.yaml`, `accounts.json`). Only `*.example` templates are shipped.
-- **Where keys live:** the Google Ads connector reads its credentials from
-  `~/google-ads.yaml` or a skill-local `.env`. For keys shared across skills, the
+- **Where keys live:** the Google Ads connector reads its client id/secret and
+  developer settings from `~/google-ads.yaml` or a skill-local `.env`; refresh
+  tokens for all Google connectors live in `~/.ads-agent/google/` (`google-auth`),
+  and `~/google-ads.yaml` gets the default account's token as an export. For keys shared across skills, the
   **canonical place is a single `.env` in this package root** (next to
   `package.json`) — it is loaded automatically and gitignored. Create it only when
   a skill actually needs a key.
