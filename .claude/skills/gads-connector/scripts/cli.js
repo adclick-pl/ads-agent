@@ -68,6 +68,8 @@ import {
   updateCustomAudienceUrls,
   createCustomAudience,
   addAudienceSegmentsToAssetGroup,
+  updateAdGroupAudienceSegments,
+  addCampaignLanguages,
   addCampaignTextAssets,
 } from './mutator.js';
 import {
@@ -440,6 +442,15 @@ Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
                           (--asset-group=<ID> --custom-audience=<ID[,ID]> i/lub
                           --user-list=<ID[,ID]> — listy remarketingowe). Reszta sygnału
                           zostaje; grupa bez sygnału odbiorców → odmowa (dodaj go raz w panelu).
+  update-ad-group-audience  Listy remarketingowe w odbiorcach grupy Demand Gen
+                          (--ad-group=<ID> --add-user-list=<ID[,ID]> i/lub
+                          --remove-user-list=<ID[,ID]>). Wiek, płeć i wykluczenia zostają;
+                          --all-ages zdejmuje ograniczenie wieku (reklama dla każdego wieku).
+                          Usuwa też listy, których konto już nie widzi. Odmawia, gdy tych
+                          samych odbiorców używa inna grupa albo gdy zostałyby puste.
+  add-languages           Dodaje języki do kampanii (--campaign=<ID[,ID]> --languages=ru,uk
+                          albo ID 1031,1036). Kampanię kierowaną na wszystkie języki pomija —
+                          dodanie języka by ją zawęziło.
   update-ad-url           Zmiana Final URL reklamy (RSA). Pojedynczo: --ad=<adId> --url=<...>;
                           wsadowo: --input=mapa.csv (kolumny: id,final_url).
   update-keyword-url      Zmiana Final URL słowa kluczowego (override). Pojedynczo:
@@ -1266,6 +1277,29 @@ async function main() {
         throw new Error('add-asset-group-audience requires --asset-group=<ID> and --custom-audience=<ID[,ID]> and/or --user-list=<ID[,ID]>');
       }
       const result = await addAudienceSegmentsToAssetGroup(customerId, args['asset-group'], { customAudienceIds, userListIds }, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'update-ad-group-audience') {
+      const idList = (v) => String(v ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+      const addUserListIds = idList(args['add-user-list']);
+      const removeUserListIds = idList(args['remove-user-list']);
+      const allAges = !!args['all-ages'];
+      if (!args['ad-group'] || (addUserListIds.length === 0 && removeUserListIds.length === 0 && !allAges)) {
+        throw new Error('update-ad-group-audience requires --ad-group=<ID> and --add-user-list=<ID[,ID]>, --remove-user-list=<ID[,ID]> and/or --all-ages');
+      }
+      const result = await updateAdGroupAudienceSegments(customerId, args['ad-group'], { addUserListIds, removeUserListIds, allAges }, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'add-languages') {
+      const idList = (v) => String(v ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+      const campaignIds = idList(args.campaign);
+      const languages = idList(args.languages);
+      if (campaignIds.length === 0 || languages.length === 0) {
+        throw new Error('add-languages requires --campaign=<ID[,ID]> and --languages=<code|ID[,…]> (e.g. ru,uk)');
+      }
+      const result = await addCampaignLanguages(customerId, campaignIds, languages, dryRun, loginCustomerId);
       console.log(JSON.stringify(result, null, 2));
     }
 

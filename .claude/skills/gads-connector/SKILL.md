@@ -333,6 +333,15 @@ node scripts/cli.js --action=add-asset-group-audience --customer=1234567890 --as
 # Remarketing lists go into the same signal (--user-list, comma-separated IDs; combinable with --custom-audience)
 node scripts/cli.js --action=add-asset-group-audience --customer=1234567890 --asset-group=4455667788 --user-list=111222333,444555666
 
+# Swap remarketing lists in a Demand Gen ad group's audience (age/gender/exclusions stay;
+# lists the account can no longer read can still be removed; a shared audience is refused).
+# --all-ages drops the age limit of that audience.
+node scripts/cli.js --action=update-ad-group-audience --customer=1234567890 --ad-group=4455667788 --add-user-list=111222333 --remove-user-list=444555666 --all-ages
+
+# Add target languages (codes or IDs). A campaign targeting ALL languages is skipped —
+# adding a language would narrow it.
+node scripts/cli.js --action=add-languages --customer=1234567890 --campaign=987654321,987654322 --languages=ru,uk
+
 # Temporary offer without editing ads: campaign-level headlines (limit 3 enabled per campaign,
 # descriptions 2) — CSV columns: campaign_id,text[,field_type=HEADLINE|DESCRIPTION]
 node scripts/cli.js --action=add-campaign-headlines --customer=1234567890 --input=naglowki.csv

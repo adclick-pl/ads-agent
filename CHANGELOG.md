@@ -7,6 +7,23 @@ restarcie sesji. Szczegóły każdego skilla: `.claude/skills/<skill>/SKILL.md`.
 
 ---
 
+## 2026-10-22
+
+### Nowe
+
+- **Dokumenty Google w `google-auth`.** Nowa usługa `docs` (czytanie i edycja Dokumentów
+  Google). Dokładasz ją do konta jak każdą inną:
+  `--action=auth --services=docs --account=<e-mail>`.
+- **Odbiorcy grup Demand Gen w `gads-connector`.** Nowa akcja `update-ad-group-audience`
+  dodaje i usuwa listy remarketingowe w odbiorcach grupy Demand Gen, a z `--all-ages`
+  zdejmuje ograniczenie wieku. Usuwa też listy, których konto już nie widzi (np. po
+  poprzedniej agencji) — przez takie listy grupa potrafi nie wyświetlać się wcale.
+- **Języki kampanii w `gads-connector`.** Nowa akcja `add-languages` dodaje języki do
+  istniejących kampanii: `--campaign=<ID,ID> --languages=ru,uk`. Kampanię kierowaną na
+  wszystkie języki pomija, bo dodanie języka by ją zawęziło.
+
+---
+
 ## 2026-10-16
 
 ### Nowe

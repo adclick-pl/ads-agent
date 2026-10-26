@@ -49,6 +49,7 @@ export const SERVICES = {
   gmail: { name: 'Gmail', scopes: [`${GA}gmail.modify`] },
   calendar: { name: 'Kalendarz Google', scopes: [`${GA}calendar`] },
   sheets: { name: 'Arkusze Google', scopes: [`${GA}spreadsheets`] },
+  docs: { name: 'Dokumenty Google', scopes: [`${GA}documents`] },
 };
 // Non-sensitive; lets us read WHO logged in from the id_token.
 const IDENTITY_SCOPES = ['openid', 'email'];

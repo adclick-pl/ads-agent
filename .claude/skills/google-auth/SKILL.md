@@ -44,7 +44,7 @@ node "$CLI" --action=auth --services=all           # link dla użytkownika
 node "$CLI" --action=auth --services=ga4 --account=ktos@example.com   # dołóż usługę do konta
 ```
 
-Usługi: `ads, ga4, gsc, gmc, gtm, gmail, calendar, sheets` albo `all`. Jeden nasłuch obsłuży
+Usługi: `ads, ga4, gsc, gmc, gtm, gmail, calendar, sheets, docs` albo `all`. Jeden nasłuch obsłuży
 każdy link; drugi `listen`, gdy pierwszy działa, tylko to zgłosi. Po kliknięciu nasłuch
 wypisze konto, usługi i eksporty.
 

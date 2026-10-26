@@ -1,7 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { getCustomer, unpackError } from './client.js';
 import { getKeywordsByCriteria, getCampaignBasics, getCampaignBiddingInfo, getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts, getExistingStructuredSnippets, getExistingCallAssets, callAssetIdentity, getExistingPriceAssets, getExistingPromotions, promotionIdentity, getAdGroupAdsByAdIds, getAdGroupsByIds, getExistingYoutubeAssets, getExistingDemandGenAds, getExistingDemandGenProductAds, getExistingListingGroups, getAssetGroupsByIds, getListingFilterTree, LISTING_FILTER_TYPE_NAME, getAdGroupTargetingCriteria, getCampaignChannelTypes, getCallToActionAssets, getConversionActions, getExistingCampaigns, getBudgetsByName, COPYABLE_CRITERION_TYPES } from './queries.js';
-import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkCallAsset, parseCallSchedule, normalizeCallReportingState, checkPriceOfferings, checkPromotion, checkDemandGenAdTexts, checkDemandGenChannels, DEMAND_GEN_LIMITS, adTextLength, checkConversionAction, checkCampaignSpec, checkPmaxSpec, checkListingFilterFlip, checkLabelExclusion, checkItemExclusion, planCustomAudienceUrls, planNegativeRemoval, planAudienceSegmentAdd, checkCampaignTextAsset, CAMPAIGN_TEXT_ASSET_LIMITS, isIsoDate } from './safety.js';
+import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkCallAsset, parseCallSchedule, normalizeCallReportingState, checkPriceOfferings, checkPromotion, checkDemandGenAdTexts, checkDemandGenChannels, DEMAND_GEN_LIMITS, adTextLength, checkConversionAction, checkCampaignSpec, checkPmaxSpec, checkListingFilterFlip, checkLabelExclusion, checkItemExclusion, planCustomAudienceUrls, planNegativeRemoval, planAudienceSegmentAdd, planAudienceSegmentRemove, planCampaignLanguages, checkCampaignTextAsset, CAMPAIGN_TEXT_ASSET_LIMITS, isIsoDate } from './safety.js';
 
 /**
  * Entity metadata for Final URL updates. Maps our short entity key to the
@@ -1144,6 +1144,241 @@ export async function addAudienceSegmentsToAssetGroup(customerId, assetGroupId, 
     return { success: true, dryRun: false, ...summary, response };
   } catch (error) {
     throw new Error(`Failed to add segments to asset group signal: ${unpackError(error)}`);
+  }
+}
+
+/**
+ * Add and/or remove remarketing user lists in the audience of a Demand Gen ad
+ * group ("audience grouped" — the ad group targets ONE Audience resource through
+ * an AUDIENCE criterion, and the lists live in that Audience's segments).
+ *
+ * Lists to add must be readable on the account. Lists to remove are matched by
+ * resource name only, so dead lists the account can no longer read can be taken
+ * out. Age, gender and exclusions of the Audience stay as they are. The Audience
+ * can be shared: if another ad group uses it too, the change is refused — it
+ * would silently retarget that group as well. Removing every list is refused too.
+ *
+ * @param {string} customerId
+ * @param {string|number} adGroupId
+ * @param {{addUserListIds?: Array<string|number>, removeUserListIds?: Array<string|number>}} change
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>} Summary (+ API response when written)
+ */
+export async function updateAdGroupAudienceSegments(customerId, adGroupId, change = {}, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  const agId = String(adGroupId).replace(/[^0-9]/g, '');
+  const ids = (list) => [...new Set((list || []).map((x) => String(x).replace(/[^0-9]/g, '')).filter(Boolean))];
+  const addIds = ids(change.addUserListIds);
+  const removeIds = ids(change.removeUserListIds);
+  const allAges = !!change.allAges;
+  if (!agId || (addIds.length === 0 && removeIds.length === 0 && !allAges)) {
+    throw new Error('update-ad-group-audience: wymaga --ad-group=<ID> oraz --add-user-list=<ID[,ID]>, --remove-user-list=<ID[,ID]> i/lub --all-ages.');
+  }
+
+  const customer = getCustomer(cleanCustomerId, loginCustomerId);
+  const critRows = await customer.query(`
+    SELECT ad_group.name, campaign.name, ad_group_criterion.audience.audience
+    FROM ad_group_criterion
+    WHERE ad_group.id = ${agId}
+      AND ad_group_criterion.type = 'AUDIENCE'
+      AND ad_group_criterion.status != 'REMOVED'
+  `);
+  const audienceRn = critRows?.[0]?.ad_group_criterion?.audience?.audience;
+  if (!audienceRn) {
+    throw new Error(`update-ad-group-audience: grupa ${agId} nie ma odbiorców w zasobie Audience (to nie jest grupa Demand Gen z odbiorcami grupowanymi).`);
+  }
+  const users = await customer.query(`
+    SELECT ad_group.id, ad_group.name, campaign.name
+    FROM ad_group_criterion
+    WHERE ad_group_criterion.audience.audience = '${audienceRn}'
+      AND ad_group_criterion.status != 'REMOVED'
+      AND ad_group.status != 'REMOVED'
+  `);
+  const others = users.filter((r) => String(r.ad_group.id) !== agId);
+  if (others.length) {
+    const list = others.map((r) => `${r.campaign.name} / ${r.ad_group.name}`).join('; ');
+    throw new Error(`update-ad-group-audience: odbiorców ${audienceRn} używa też: ${list}. Zmiana objęłaby i te grupy — zrób to w panelu albo rozdziel odbiorców.`);
+  }
+
+  const wanted = [];
+  if (addIds.length) {
+    const rows = await customer.query(`
+      SELECT user_list.id, user_list.resource_name, user_list.name, user_list.membership_status
+      FROM user_list
+      WHERE user_list.id IN (${addIds.join(',')})
+    `);
+    const byId = new Map(rows.map((r) => [String(r.user_list.id), r.user_list]));
+    for (const id of addIds) {
+      const ul = byId.get(id);
+      if (!ul) throw new Error(`update-ad-group-audience: nie znaleziono listy odbiorców ${id} na koncie ${cleanCustomerId}.`);
+      wanted.push({ id, name: ul.name, rn: ul.resource_name });
+    }
+  }
+
+  const audRows = await customer.query(`
+    SELECT audience.resource_name, audience.name, audience.dimensions
+    FROM audience
+    WHERE audience.resource_name = '${audienceRn}'
+  `);
+  const audience = audRows?.[0]?.audience;
+  if (!audience) throw new Error(`update-ad-group-audience: nie udało się odczytać odbiorców ${audienceRn}.`);
+
+  let dimensions = audience.dimensions;
+  const removed = [];
+  const notPresent = [];
+  for (const id of removeIds) {
+    const plan = planAudienceSegmentRemove(dimensions, { user_list: `customers/${cleanCustomerId}/userLists/${id}` });
+    if (plan.notPresent) notPresent.push(id);
+    else { removed.push(id); dimensions = plan.dimensions; }
+  }
+  const added = [];
+  const alreadyPresent = [];
+  for (const w of wanted) {
+    const plan = planAudienceSegmentAdd(dimensions, { user_list: w.rn });
+    const entry = { id: w.id, name: w.name };
+    if (plan.alreadyPresent) alreadyPresent.push(entry);
+    else { added.push(entry); dimensions = plan.dimensions; }
+  }
+  // No age dimension = every age range, "unknown" included.
+  const ageCleared = allAges && dimensions.some((d) => d.age);
+  if (ageCleared) dimensions = dimensions.filter((d) => !d.age);
+  const remaining = dimensions.find((d) => d.audience_segments)?.audience_segments?.segments?.length || 0;
+  if (remaining === 0) {
+    throw new Error('update-ad-group-audience: po zmianie odbiorcy nie mieliby żadnego segmentu — dodaj listę zamiast zostawiać pustych odbiorców.');
+  }
+
+  const summary = {
+    adGroupId: agId,
+    adGroup: critRows[0]?.ad_group?.name,
+    campaign: critRows[0]?.campaign?.name,
+    audience: audienceRn,
+    audienceName: audience.name,
+    added,
+    alreadyPresent,
+    removed,
+    notPresent,
+    ageCleared,
+    segmentsAfter: remaining,
+  };
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Ad group ${agId}: +${added.length} / -${removed.length} user list(s) in audience${ageCleared ? ', age limit cleared' : ''}...`);
+  if (added.length === 0 && removed.length === 0 && !ageCleared) return { success: true, dryRun, ...summary };
+  if (dryRun) {
+    // Ask Google whether the rewritten audience is acceptable (e.g. a list type
+    // Demand Gen refuses), so an objection surfaces in the simulation.
+    try {
+      await customer.audiences.update([{ resource_name: audienceRn, dimensions }], { validate_only: true });
+      return { success: true, dryRun: true, ...summary, apiValidated: true };
+    } catch (error) {
+      return { success: false, dryRun: true, ...summary, apiValidated: false, apiError: unpackError(error) };
+    }
+  }
+
+  try {
+    const response = await customer.audiences.update([{ resource_name: audienceRn, dimensions }]);
+    return { success: true, dryRun: false, ...summary, response };
+  } catch (error) {
+    throw new Error(`Failed to update ad group audience: ${unpackError(error)}`);
+  }
+}
+
+/**
+ * Add target languages to existing campaigns. Languages are given as language
+ * constant IDs ("1031") or codes ("ru"). A campaign that targets ALL languages
+ * (no language criteria) is skipped — adding one would narrow it.
+ *
+ * @param {string} customerId
+ * @param {Array<string|number>} campaignIds
+ * @param {Array<string|number>} languages - IDs or ISO codes
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>} Per-campaign plan (+ API response when written)
+ */
+export async function addCampaignLanguages(customerId, campaignIds, languages, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  const campIds = [...new Set((campaignIds || []).map((x) => String(x).replace(/[^0-9]/g, '')).filter(Boolean))];
+  const langs = [...new Set((languages || []).map((x) => String(x).trim().toLowerCase()).filter(Boolean))];
+  if (!campIds.length || !langs.length) {
+    throw new Error('add-languages: wymaga --campaign=<ID[,ID]> oraz --languages=<kod|ID[,…]> (np. ru,uk albo 1031,1036).');
+  }
+
+  const customer = getCustomer(cleanCustomerId, loginCustomerId);
+  const numeric = langs.filter((l) => /^\d+$/.test(l));
+  const codes = langs.filter((l) => !/^\d+$/.test(l));
+  const where = [
+    numeric.length ? `language_constant.id IN (${numeric.join(',')})` : null,
+    codes.length ? `language_constant.code IN (${codes.map((c) => `'${c.replace(/'/g, '')}'`).join(',')})` : null,
+  ].filter(Boolean).join(' OR ');
+  const langRows = await customer.query(`
+    SELECT language_constant.id, language_constant.code, language_constant.name
+    FROM language_constant
+    WHERE ${where}
+  `);
+  const resolved = new Map();
+  for (const r of langRows) {
+    const lc = r.language_constant;
+    resolved.set(String(lc.id), lc);
+    resolved.set(String(lc.code).toLowerCase(), lc);
+  }
+  const missing = langs.filter((l) => !resolved.has(l));
+  if (missing.length) throw new Error(`add-languages: nieznany język: ${missing.join(', ')}.`);
+  const wanted = [...new Set(langs.map((l) => String(resolved.get(l).id)))];
+  const langName = (id) => resolved.get(id)?.name || id;
+
+  const campRows = await customer.query(`
+    SELECT campaign.id, campaign.name
+    FROM campaign
+    WHERE campaign.id IN (${campIds.join(',')})
+  `);
+  const names = new Map(campRows.map((r) => [String(r.campaign.id), r.campaign.name]));
+  const unknown = campIds.filter((id) => !names.has(id));
+  if (unknown.length) throw new Error(`add-languages: nie znaleziono kampanii ${unknown.join(', ')} na koncie ${cleanCustomerId}.`);
+
+  const critRows = await customer.query(`
+    SELECT campaign.id, campaign_criterion.language.language_constant
+    FROM campaign_criterion
+    WHERE campaign_criterion.type = 'LANGUAGE'
+      AND campaign.id IN (${campIds.join(',')})
+  `);
+  const current = new Map(campIds.map((id) => [id, []]));
+  for (const r of critRows) {
+    const lc = r.campaign_criterion?.language?.language_constant;
+    if (lc) current.get(String(r.campaign.id)).push(lc.split('/').pop());
+  }
+
+  const plan = [];
+  const mutations = [];
+  for (const id of campIds) {
+    const p = planCampaignLanguages(current.get(id), wanted);
+    plan.push({
+      campaignId: id,
+      campaign: names.get(id),
+      current: current.get(id),
+      toAdd: p.toAdd.map(langName),
+      alreadyPresent: p.alreadyPresent.map(langName),
+      skipped: p.allLanguages ? 'kampania kieruje na wszystkie języki — dodanie języka zawęziłoby kierowanie' : undefined,
+    });
+    for (const lang of p.toAdd) {
+      mutations.push({
+        entity: 'CampaignCriterion',
+        operation: 'create',
+        resource: { campaign: `customers/${cleanCustomerId}/campaigns/${id}`, language: { language_constant: `languageConstants/${lang}` } },
+      });
+    }
+  }
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Adding ${mutations.length} language criterion(s) across ${campIds.length} campaign(s)...`);
+
+  if (mutations.length === 0) return { success: true, dryRun, toAdd: 0, plan };
+  if (dryRun) {
+    const check = await validateWithApi(customer, chunk(mutations));
+    return { success: check.ok, dryRun: true, toAdd: mutations.length, plan, apiValidated: check.ok, apiError: check.error };
+  }
+  try {
+    const responses = [];
+    for (const part of chunk(mutations)) responses.push(await customer.mutateResources(part));
+    return { success: true, dryRun: false, toAdd: mutations.length, plan, responses };
+  } catch (error) {
+    throw new Error(`Failed to add campaign languages: ${unpackError(error)}`);
   }
 }
 

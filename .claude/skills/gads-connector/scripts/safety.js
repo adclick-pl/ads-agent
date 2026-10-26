@@ -1508,6 +1508,50 @@ export function planAudienceSegmentAdd(dimensions, segment) {
   return { dimensions: dims, alreadyPresent: false };
 }
 
+/**
+ * Plan removing one segment from an Audience — the mirror of
+ * `planAudienceSegmentAdd`, same segment forms. Matching is by resource name only,
+ * so a list the account can no longer read (e.g. one that lived in a former
+ * agency's manager account) can still be taken out. Other dimensions (age,
+ * gender…) stay untouched. Returns the FULL `dimensions` to write back.
+ *
+ * @param {Array<object>} dimensions - `audience.dimensions` as read from the API
+ * @param {string|{user_list?: string, custom_audience?: string}} segment
+ * @returns {{dimensions: Array<object>, notPresent: boolean, remaining: number}}
+ */
+export function planAudienceSegmentRemove(dimensions, segment) {
+  const spec = typeof segment === 'string' ? { custom_audience: segment } : (segment || {});
+  const kind = spec.user_list ? 'user_list' : 'custom_audience';
+  const rn = spec[kind];
+  const dims = JSON.parse(JSON.stringify(dimensions || []));
+  const segDim = dims.find((d) => d.audience_segments);
+  const segments = segDim?.audience_segments?.segments || [];
+  const kept = segments.filter((s) => s[kind]?.[kind] !== rn);
+  if (kept.length === segments.length) return { dimensions: dims, notPresent: true, remaining: segments.length };
+  segDim.audience_segments.segments = kept;
+  return { dimensions: dims, notPresent: false, remaining: kept.length };
+}
+
+/**
+ * Plan adding languages to a campaign. A campaign with NO language criteria
+ * targets every language — adding one would NARROW it, the opposite of the
+ * intent — so such a campaign is reported as `allLanguages` and gets nothing.
+ *
+ * @param {Array<string|number>} currentIds - language constant IDs already targeted
+ * @param {Array<string|number>} wantedIds
+ * @returns {{toAdd: string[], alreadyPresent: string[], allLanguages: boolean}}
+ */
+export function planCampaignLanguages(currentIds = [], wantedIds = []) {
+  const current = new Set(currentIds.map(String));
+  const wanted = [...new Set(wantedIds.map(String))];
+  if (current.size === 0) return { toAdd: [], alreadyPresent: [], allLanguages: true };
+  return {
+    toAdd: wanted.filter((id) => !current.has(id)),
+    alreadyPresent: wanted.filter((id) => current.has(id)),
+    allLanguages: false,
+  };
+}
+
 /** Google Ads limits for headlines / descriptions linked at CAMPAIGN level. */
 export const CAMPAIGN_TEXT_ASSET_LIMITS = {
   HEADLINE: { chars: 30, maxEnabled: 3 },
