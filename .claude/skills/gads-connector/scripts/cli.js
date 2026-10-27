@@ -489,8 +489,9 @@ Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
                           product_type_level: 1-5 (domyślnie 1). Strategia: maks. wartość konw.
   create-ad-groups        Tworzy grupy reklam w istniejących kampaniach Search. Idempotentne:
                           pomija grupę, której nazwa już jest w kampanii. Tylko --input=mapa.csv
-                          (kolumny: campaign_id,ad_group_name[,status]).
-  add-keywords            Dodaje POZYTYWNE słowa kluczowe do grup reklam. Idempotentne: pomija
+                          (kolumny: campaign_id,ad_group_name[,status,cpc_bid]).
+                          cpc_bid = maks. CPC grupy w walucie konta (tylko MANUAL_CPC).
+  add-keywords           Dodaje POZYTYWNE słowa kluczowe do grup reklam. Idempotentne: pomija
                           duplikaty (tekst + typ dopasowania). Grupę wskazujesz przez ad_group_id
                           albo campaign_id + ad_group_name. Tylko --input=mapa.csv
                           (kolumny: [ad_group_id|campaign_id+ad_group_name],keyword,match_type[,final_url]).
@@ -1445,13 +1446,14 @@ async function main() {
     else if (action === 'create-ad-groups') {
       // Batch-only: building a group set one flag at a time invites typos in names
       // that then have to be un-made by hand (no-delete policy).
-      if (!args.input) throw new Error('create-ad-groups wymaga --input=mapa.csv (kolumny: campaign_id,ad_group_name[,status])');
+      if (!args.input) throw new Error('create-ad-groups wymaga --input=mapa.csv (kolumny: campaign_id,ad_group_name[,status,cpc_bid])');
       const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
       if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
       const items = rows.map((r, i) => ({
         campaignId: r.campaign_id || r.campaign,
         name: r.ad_group_name || r.ad_group || r.name,
         status: r.status || 'ENABLED',
+        cpcBid: r.cpc_bid,
         label: `${r.ad_group_name || r.ad_group || r.name} (wiersz ${i + 2})`,
       }));
       const result = await createAdGroups(customerId, items, dryRun, loginCustomerId);

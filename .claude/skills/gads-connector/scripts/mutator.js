@@ -2288,12 +2288,11 @@ export async function createPmaxCampaigns(customerId, items, dryRun = false, log
  * is a no-op instead of an "duplicate ad group name" API error. Paused groups
  * count as existing — a re-run must not resurrect what was deliberately paused.
  *
- * Bids are deliberately not settable here: the campaigns this connector targets
- * run Smart Bidding (tROAS / tCPA), where an ad-group CPC bid is ignored. Setting
- * one would create a number in the UI that does nothing.
+ * `cpcBid` (optional, standard currency) sets the ad group max CPC. It only
+ * matters on MANUAL_CPC campaigns — Smart Bidding ignores ad-group bids.
  *
  * @param {string} customerId
- * @param {Array<{campaignId: string|number, name: string, status?: string, label?: string}>} items
+ * @param {Array<{campaignId: string|number, name: string, status?: string, cpcBid?: number|string, label?: string}>} items
  * @param {boolean} [dryRun=false]
  * @param {string} [loginCustomerId]
  * @returns {Promise<object>} `{plan, toCreate, skipped, ...}` — in dry-run the plan only.
@@ -2314,7 +2313,9 @@ export async function createAdGroups(customerId, items, dryRun = false, loginCus
     const status = String(it.status ?? 'ENABLED').trim().toUpperCase();
     assertNotRemoval(status);
     if (!['ENABLED', 'PAUSED'].includes(status)) problems.push(`${ref}: status musi być ENABLED lub PAUSED (jest "${it.status}").`);
-    return { campaignId, name, status, label: ref };
+    const cpcBid = it.cpcBid === undefined || it.cpcBid === null || it.cpcBid === '' ? null : Number(String(it.cpcBid).replace(',', '.'));
+    if (cpcBid !== null && !(cpcBid > 0)) problems.push(`${ref}: cpc_bid musi być liczbą > 0 (jest "${it.cpcBid}").`);
+    return { campaignId, name, status, cpcBid, label: ref };
   });
 
   // Duplicate names inside the input file itself would pass the "already on the
@@ -2344,7 +2345,7 @@ export async function createAdGroups(customerId, items, dryRun = false, loginCus
   }
 
   const plan = {
-    toCreate: toCreate.map((r) => ({ campaignId: r.campaignId, name: r.name, status: r.status })),
+    toCreate: toCreate.map((r) => ({ campaignId: r.campaignId, name: r.name, status: r.status, cpcBid: r.cpcBid })),
     skipped: skipped.map((r) => ({ campaignId: r.campaignId, name: r.name, adGroupId: r.adGroupId, reason: 'grupa o tej nazwie już istnieje w kampanii' })),
   };
 
@@ -2365,6 +2366,7 @@ export async function createAdGroups(customerId, items, dryRun = false, loginCus
         name: r.name,
         status: r.status,
         type: 'SEARCH_STANDARD',
+        ...(r.cpcBid !== null && { cpc_bid_micros: standardToMicros(r.cpcBid) }),
       },
     }));
     const responses = [];

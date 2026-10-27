@@ -602,8 +602,10 @@ the exact word or number.
 
 **Building out a campaign (`create-ad-groups`, `add-keywords`).** The pair that
 turns a keyword research file into a live structure. `create-ad-groups` takes
-`--input=map.csv` (cols `campaign_id`, `ad_group_name`, optional `status`) and
-creates `SEARCH_STANDARD` ad groups in an existing campaign. `add-keywords` takes
+`--input=map.csv` (cols `campaign_id`, `ad_group_name`, optional `status` and
+`cpc_bid`) and creates `SEARCH_STANDARD` ad groups in an existing campaign.
+`cpc_bid` is the ad group max CPC in account currency — it only matters on
+`MANUAL_CPC` campaigns; Smart Bidding ignores it. `add-keywords` takes
 `--input=map.csv` (cols `keyword`, `match_type`, optional `final_url`, plus either
 `ad_group_id` **or** `campaign_id` + `ad_group_name`) and adds POSITIVE keywords —
 note `add-negatives` is a different action for exclusions.

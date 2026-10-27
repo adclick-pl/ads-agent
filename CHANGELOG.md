@@ -7,6 +7,16 @@ restarcie sesji. Szczegóły każdego skilla: `.claude/skills/<skill>/SKILL.md`.
 
 ---
 
+## 2026-10-26
+
+### Nowe
+
+- **Stawka CPC przy zakładaniu grup reklam w `gads-connector`.** `create-ad-groups`
+  przyjmuje opcjonalną kolumnę `cpc_bid` (maks. CPC grupy w walucie konta, np. `5.30`).
+  Przydaje się w kampaniach na ręcznym CPC; przy Smart Bidding Google stawkę grupy ignoruje.
+
+---
+
 ## 2026-10-22
 
 ### Nowe
