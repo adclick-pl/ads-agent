@@ -70,6 +70,7 @@ import {
   addAudienceSegmentsToAssetGroup,
   updateAdGroupAudienceSegments,
   addCampaignLanguages,
+  updateAssetAutomation,
   addCampaignTextAssets,
 } from './mutator.js';
 import {
@@ -451,6 +452,11 @@ Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
   add-languages           Dodaje języki do kampanii (--campaign=<ID[,ID]> --languages=ru,uk
                           albo ID 1031,1036). Kampanię kierowaną na wszystkie języki pomija —
                           dodanie języka by ją zawęziło.
+  update-asset-automation Włącza/wyłącza automatyzacje kampanii (głównie PMax): --campaign=<ID[,ID]>
+                          --off=<…> i/lub --on=<…>. Przełączniki: url-expansion (rozwijanie
+                          końcowego URL), text, image-extraction, image-enhancement,
+                          image-design-versions, video-enhancement, video-vertical, video-shorter,
+                          video-from-assets, landing-page-preview, all (albo pełna nazwa enuma).
   update-ad-url           Zmiana Final URL reklamy (RSA). Pojedynczo: --ad=<adId> --url=<...>;
                           wsadowo: --input=mapa.csv (kolumny: id,final_url).
   update-keyword-url      Zmiana Final URL słowa kluczowego (override). Pojedynczo:
@@ -1301,6 +1307,16 @@ async function main() {
         throw new Error('add-languages requires --campaign=<ID[,ID]> and --languages=<code|ID[,…]> (e.g. ru,uk)');
       }
       const result = await addCampaignLanguages(customerId, campaignIds, languages, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'update-asset-automation') {
+      const list = (v) => String(v ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+      const campaignIds = list(args.campaign);
+      if (campaignIds.length === 0 || (!args.on && !args.off)) {
+        throw new Error('update-asset-automation requires --campaign=<ID[,ID]> and --off=<…> and/or --on=<…> (e.g. --off=url-expansion,text)');
+      }
+      const result = await updateAssetAutomation(customerId, campaignIds, { on: list(args.on), off: list(args.off) }, dryRun, loginCustomerId);
       console.log(JSON.stringify(result, null, 2));
     }
 

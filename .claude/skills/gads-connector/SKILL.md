@@ -342,6 +342,16 @@ node scripts/cli.js --action=update-ad-group-audience --customer=1234567890 --ad
 # adding a language would narrow it.
 node scripts/cli.js --action=add-languages --customer=1234567890 --campaign=987654321,987654322 --languages=ru,uk
 
+# Switch off what Google generates on its own in a campaign (mostly PMax): Final URL expansion,
+# text, image and video generation. Aliases: url-expansion, text, image-extraction,
+# image-enhancement, image-design-versions, video-enhancement, video-vertical, video-shorter,
+# video-from-assets, landing-page-preview, all (or the full enum name). --on does the reverse.
+# The whole merged list is sent, so switches you don't name stay as they are.
+# Google refuses text OFF while url-expansion is ON — switch them off together.
+# On PMax, switches it does not accept (vertical / shorter videos, videos from other
+# assets, landing page preview) are skipped and listed in plan[].notApplicable.
+node scripts/cli.js --action=update-asset-automation --customer=1234567890 --campaign=987654321 --off=url-expansion,text,image-extraction
+
 # Temporary offer without editing ads: campaign-level headlines (limit 3 enabled per campaign,
 # descriptions 2) — CSV columns: campaign_id,text[,field_type=HEADLINE|DESCRIPTION]
 node scripts/cli.js --action=add-campaign-headlines --customer=1234567890 --input=naglowki.csv
@@ -570,6 +580,12 @@ node scripts/cli.js --action=create-pmax --account=zielonyogrod --input=pmax.csv
   campaign serves mainly as Shopping ads; add assets in the UI if wanted.
   `brand_guidelines_enabled` is set to false, because with it on Google expects a
   business name and logo as campaign assets and the campaign would not serve.
+- **No automation, no TV.** Every asset automation switch PMax accepts is opted
+  out (Final URL expansion, text, image extraction / enhancement / design versions,
+  enhanced videos) and the Google TV network is off — a feed-only e-commerce
+  campaign should show the products, not copy and creatives Google makes up, nor
+  send traffic to pages outside the feed. Turn single switches back on with
+  `update-asset-automation --on=…`.
 - **Bidding** is always Maximize conversion value; `target_roas` is optional
   (empty = no target).
 - Same guarantees as `create-campaigns`: born **PAUSED**, idempotent on the name

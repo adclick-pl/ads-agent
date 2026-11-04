@@ -7,6 +7,23 @@ restarcie sesji. Szczegóły każdego skilla: `.claude/skills/<skill>/SKILL.md`.
 
 ---
 
+## 2026-11-03
+
+### Nowe
+
+- **Automatyzacje kampanii w `gads-connector`.** Nowa akcja `update-asset-automation`
+  włącza i wyłącza to, co Google generuje sam w kampanii (głównie Performance Max):
+  rozwijanie końcowego URL, automatyczne teksty, wyciąganie i ulepszanie grafik, filmy.
+  Przydaje się przy PMax tylko z feedem, który ma wyświetlać same produkty — bez
+  kierowania ruchu na inne podstrony i bez tekstów pisanych przez Google:
+  `--campaign=<ID> --off=url-expansion,text,image-extraction`.
+- **`create-pmax` zakłada PMax bez automatyzacji i bez TV.** Nowa kampania tylko z feedem
+  ma od razu wyłączone wszystkie automatyzacje komponentów (rozwijanie URL, teksty,
+  grafiki, filmy) i reklamy w sieci Google TV — domyślne ustawienie dla e-commerce.
+  Pojedyncze przełączniki włączysz potem przez `update-asset-automation --on=…`.
+
+---
+
 ## 2026-10-26
 
 ### Nowe

@@ -1552,6 +1552,95 @@ export function planCampaignLanguages(currentIds = [], wantedIds = []) {
   };
 }
 
+/**
+ * Short names for the "let Google generate it" switches of a campaign
+ * (`campaign.asset_automation_settings`) — Final URL expansion, text, image and
+ * video generation. The full enum name is accepted as well; `all` means every one.
+ */
+export const ASSET_AUTOMATION_ALIASES = {
+  'url-expansion': 'FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION',
+  text: 'TEXT_ASSET_AUTOMATION',
+  'image-extraction': 'GENERATE_IMAGE_EXTRACTION',
+  'image-enhancement': 'GENERATE_IMAGE_ENHANCEMENT',
+  'image-design-versions': 'GENERATE_DESIGN_VERSIONS_FOR_IMAGES',
+  'video-enhancement': 'GENERATE_ENHANCED_YOUTUBE_VIDEOS',
+  'video-vertical': 'GENERATE_VERTICAL_YOUTUBE_VIDEOS',
+  'video-shorter': 'GENERATE_SHORTER_YOUTUBE_VIDEOS',
+  'video-from-assets': 'GENERATE_VIDEOS_FROM_OTHER_ASSETS',
+  'landing-page-preview': 'GENERATE_LANDING_PAGE_PREVIEW',
+};
+
+/**
+ * The asset automation switches Performance Max accepts. The rest (vertical /
+ * shorter videos, videos from other assets, landing page preview) are refused
+ * for PMax with ENUM_VALUE_NOT_PERMITTED.
+ */
+export const PMAX_ASSET_AUTOMATION = [
+  'FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION',
+  'TEXT_ASSET_AUTOMATION',
+  'GENERATE_IMAGE_EXTRACTION',
+  'GENERATE_IMAGE_ENHANCEMENT',
+  'GENERATE_DESIGN_VERSIONS_FOR_IMAGES',
+  'GENERATE_ENHANCED_YOUTUBE_VIDEOS',
+];
+
+/**
+ * Resolve aliases / enum names to asset automation types.
+ *
+ * @param {string[]} names
+ * @returns {{types: string[], unknown: string[]}}
+ */
+export function resolveAssetAutomationTypes(names = []) {
+  const full = new Set(Object.values(ASSET_AUTOMATION_ALIASES));
+  const types = [];
+  const unknown = [];
+  for (const raw of names) {
+    const n = String(raw).trim();
+    if (!n) continue;
+    if (n.toLowerCase() === 'all') types.push(...full);
+    else if (ASSET_AUTOMATION_ALIASES[n.toLowerCase()]) types.push(ASSET_AUTOMATION_ALIASES[n.toLowerCase()]);
+    else if (full.has(n.toUpperCase())) types.push(n.toUpperCase());
+    else unknown.push(n);
+  }
+  return { types: [...new Set(types)], unknown };
+}
+
+/**
+ * Plan a change of a campaign's asset automation switches.
+ *
+ * `asset_automation_settings` is a repeated field, so the update carries the
+ * WHOLE merged list: the current settings with the requested ones overridden.
+ * Sending only the changed entries would risk dropping the others. A type
+ * missing from the current list is reported as DEFAULT — Google's own default,
+ * which for most switches on Performance Max means opted in.
+ *
+ * Switches outside `allowed` (when given) are left out and listed in
+ * `notApplicable` — `all` on a PMax campaign must not fail the whole batch on
+ * the video switches PMax does not have.
+ *
+ * @param {Object<string,string>} current - type → 'OPTED_IN' | 'OPTED_OUT'
+ * @param {Object<string,string>} wanted - type → 'OPTED_IN' | 'OPTED_OUT'
+ * @param {string[]} [allowed] - types the campaign accepts; all when omitted
+ * @returns {{settings: Array<object>, changes: Array<{type:string,from:string,to:string}>, unchanged: string[], notApplicable: string[]}}
+ */
+export function planAssetAutomation(current = {}, wanted = {}, allowed) {
+  const notApplicable = allowed ? Object.keys(wanted).filter((t) => !allowed.includes(t)) : [];
+  const applicable = Object.fromEntries(Object.entries(wanted).filter(([t]) => !notApplicable.includes(t)));
+  const merged = { ...current, ...applicable };
+  const changes = [];
+  const unchanged = [];
+  for (const [type, to] of Object.entries(applicable)) {
+    const from = current[type] || 'DEFAULT';
+    if (from === to) unchanged.push(type);
+    else changes.push({ type, from, to });
+  }
+  const settings = Object.entries(merged).map(([type, status]) => ({
+    asset_automation_type: type,
+    asset_automation_status: status,
+  }));
+  return { settings, changes, unchanged, notApplicable };
+}
+
 /** Google Ads limits for headlines / descriptions linked at CAMPAIGN level. */
 export const CAMPAIGN_TEXT_ASSET_LIMITS = {
   HEADLINE: { chars: 30, maxEnabled: 3 },

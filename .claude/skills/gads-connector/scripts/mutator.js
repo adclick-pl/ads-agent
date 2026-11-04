@@ -1,7 +1,8 @@
 import { writeFileSync } from 'node:fs';
+import { enums } from 'google-ads-api';
 import { getCustomer, unpackError } from './client.js';
 import { getKeywordsByCriteria, getCampaignBasics, getCampaignBiddingInfo, getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts, getExistingStructuredSnippets, getExistingCallAssets, callAssetIdentity, getExistingPriceAssets, getExistingPromotions, promotionIdentity, getAdGroupAdsByAdIds, getAdGroupsByIds, getExistingYoutubeAssets, getExistingDemandGenAds, getExistingDemandGenProductAds, getExistingListingGroups, getAssetGroupsByIds, getListingFilterTree, LISTING_FILTER_TYPE_NAME, getAdGroupTargetingCriteria, getCampaignChannelTypes, getCallToActionAssets, getConversionActions, getExistingCampaigns, getBudgetsByName, COPYABLE_CRITERION_TYPES } from './queries.js';
-import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkCallAsset, parseCallSchedule, normalizeCallReportingState, checkPriceOfferings, checkPromotion, checkDemandGenAdTexts, checkDemandGenChannels, DEMAND_GEN_LIMITS, adTextLength, checkConversionAction, checkCampaignSpec, checkPmaxSpec, checkListingFilterFlip, checkLabelExclusion, checkItemExclusion, planCustomAudienceUrls, planNegativeRemoval, planAudienceSegmentAdd, planAudienceSegmentRemove, planCampaignLanguages, checkCampaignTextAsset, CAMPAIGN_TEXT_ASSET_LIMITS, isIsoDate } from './safety.js';
+import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkCallAsset, parseCallSchedule, normalizeCallReportingState, checkPriceOfferings, checkPromotion, checkDemandGenAdTexts, checkDemandGenChannels, DEMAND_GEN_LIMITS, adTextLength, checkConversionAction, checkCampaignSpec, checkPmaxSpec, checkListingFilterFlip, checkLabelExclusion, checkItemExclusion, planCustomAudienceUrls, planNegativeRemoval, planAudienceSegmentAdd, planAudienceSegmentRemove, planCampaignLanguages, ASSET_AUTOMATION_ALIASES, PMAX_ASSET_AUTOMATION, resolveAssetAutomationTypes, planAssetAutomation, checkCampaignTextAsset, CAMPAIGN_TEXT_ASSET_LIMITS, isIsoDate } from './safety.js';
 
 /**
  * Entity metadata for Final URL updates. Maps our short entity key to the
@@ -1382,6 +1383,91 @@ export async function addCampaignLanguages(customerId, campaignIds, languages, d
   }
 }
 
+/**
+ * Switch a campaign's asset automation on or off — Final URL expansion and the
+ * text / image / video generation Google does on its own. The typical case is a
+ * feed-only Performance Max that should serve only the products, with Google
+ * neither redirecting traffic to other pages nor writing its own ad copy.
+ *
+ * @param {string} customerId
+ * @param {Array<string|number>} campaignIds
+ * @param {{on?: string[], off?: string[]}} change - aliases (url-expansion, text, …), enum names or `all`
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>} Per-campaign plan (+ resource names when written)
+ */
+export async function updateAssetAutomation(customerId, campaignIds, { on = [], off = [] } = {}, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  const campIds = [...new Set((campaignIds || []).map((x) => String(x).replace(/[^0-9]/g, '')).filter(Boolean))];
+  const optIn = resolveAssetAutomationTypes(on);
+  const optOut = resolveAssetAutomationTypes(off);
+  const unknown = [...optIn.unknown, ...optOut.unknown];
+  if (unknown.length) {
+    throw new Error(`update-asset-automation: nieznany przełącznik: ${unknown.join(', ')}. Dostępne: ${Object.keys(ASSET_AUTOMATION_ALIASES).join(', ')}, all.`);
+  }
+  if (!campIds.length || (!optIn.types.length && !optOut.types.length)) {
+    throw new Error('update-asset-automation: wymaga --campaign=<ID[,ID]> oraz --off=<…> i/lub --on=<…> (np. --off=url-expansion,text).');
+  }
+  const both = optIn.types.filter((t) => optOut.types.includes(t));
+  if (both.length) throw new Error(`update-asset-automation: ${both.join(', ')} jednocześnie w --on i --off.`);
+
+  const wanted = {};
+  for (const t of optIn.types) wanted[t] = 'OPTED_IN';
+  for (const t of optOut.types) wanted[t] = 'OPTED_OUT';
+
+  const customer = getCustomer(cleanCustomerId, loginCustomerId);
+  const rows = await customer.query(`
+    SELECT campaign.id, campaign.name, campaign.advertising_channel_type, campaign.asset_automation_settings
+    FROM campaign
+    WHERE campaign.id IN (${campIds.join(',')})
+  `);
+  const found = new Map(rows.map((r) => [String(r.campaign.id), r.campaign]));
+  const missing = campIds.filter((id) => !found.has(id));
+  if (missing.length) throw new Error(`update-asset-automation: nie znaleziono kampanii ${missing.join(', ')} na koncie ${cleanCustomerId}.`);
+
+  const enumName = (table, v) => (typeof v === 'number' ? table[v] : String(v));
+  const plan = [];
+  const mutations = [];
+  for (const id of campIds) {
+    const c = found.get(id);
+    const current = {};
+    for (const s of c.asset_automation_settings || []) {
+      current[enumName(enums.AssetAutomationType, s.asset_automation_type)] = enumName(enums.AssetAutomationStatus, s.asset_automation_status);
+    }
+    const isPmax = enumName(enums.AdvertisingChannelType, c.advertising_channel_type) === 'PERFORMANCE_MAX';
+    const p = planAssetAutomation(current, wanted, isPmax ? PMAX_ASSET_AUTOMATION : undefined);
+    plan.push({
+      campaignId: id,
+      campaign: c.name,
+      changes: p.changes,
+      unchanged: p.unchanged,
+      notApplicable: p.notApplicable.length ? p.notApplicable : undefined,
+      warning: isPmax ? undefined : 'To nie jest kampania Performance Max — część przełączników jej nie dotyczy; rozstrzyga walidacja Google.',
+    });
+    if (p.changes.length) {
+      mutations.push({
+        entity: 'campaign',
+        operation: 'update',
+        resource: { resource_name: `customers/${cleanCustomerId}/campaigns/${id}`, asset_automation_settings: p.settings },
+      });
+    }
+  }
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Asset automation: ${mutations.length} campaign(s) to update...`);
+
+  if (mutations.length === 0) return { success: true, dryRun, toUpdate: 0, plan };
+  if (dryRun) {
+    const check = await validateWithApi(customer, chunk(mutations));
+    return { success: check.ok, dryRun: true, toUpdate: mutations.length, plan, apiValidated: check.ok, apiError: check.error };
+  }
+  try {
+    const responses = [];
+    for (const part of chunk(mutations)) responses.push(await customer.mutateResources(part));
+    return { success: true, dryRun: false, toUpdate: mutations.length, plan, resourceNames: mutatedResourceNames(responses) };
+  } catch (error) {
+    throw new Error(`Failed to update asset automation: ${unpackError(error)}`);
+  }
+}
+
 /** Backward-compatible single custom audience variant of `addAudienceSegmentsToAssetGroup`. */
 export async function addCustomAudienceToAssetGroup(customerId, assetGroupId, customAudienceId, dryRun = false, loginCustomerId) {
   return addAudienceSegmentsToAssetGroup(customerId, assetGroupId, { customAudienceIds: [customAudienceId] }, dryRun, loginCustomerId);
@@ -2033,6 +2119,11 @@ function normaliseIdList(value, fallback) {
  * the business name and logo as campaign-level assets, and a feed-only campaign
  * created without them would sit there not serving.
  *
+ * Every asset automation switch is opted out and the Google TV network is off:
+ * a feed-only campaign is meant to show the products, not text, images or videos
+ * Google writes on its own, nor to send traffic to pages outside the feed.
+ * `update-asset-automation` turns single switches back on later.
+ *
  * @param {string} cid - customer ID without dashes
  * @param {object} r - normalised row (see createPmaxCampaigns)
  * @param {() => number} nextTemp - returns the next (negative) temporary ID
@@ -2075,6 +2166,11 @@ export function buildPmaxMutations(cid, r, nextTemp) {
     },
     contains_eu_political_advertising: r.euPoliticalAdvertising,
     brand_guidelines_enabled: false,
+    asset_automation_settings: PMAX_ASSET_AUTOMATION.map((type) => ({
+      asset_automation_type: type,
+      asset_automation_status: 'OPTED_OUT',
+    })),
+    network_settings: { target_google_tv_network: false },
   };
   if (r.startDate) campaign.start_date = r.startDate;
   if (r.endDate) campaign.end_date = r.endDate;
@@ -2230,6 +2326,8 @@ export async function createPmaxCampaigns(customerId, items, dryRun = false, log
         ? { productTypeLevel: r.productTypeLevel, included: r.productTypes, everythingElse: 'EXCLUDED' }
         : 'cały feed',
       creativeAssets: 'brak (kampania tylko z feedem)',
+      assetAutomation: 'wszystkie automatyzacje wyłączone (rozwijanie URL, teksty, grafiki, filmy)',
+      googleTv: false,
       geoTargets: r.geoTargets,
       geoTargetType: r.geoTargetType,
       languages: r.languages,
