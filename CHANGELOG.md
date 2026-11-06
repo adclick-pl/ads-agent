@@ -7,6 +7,20 @@ restarcie sesji. Szczegóły każdego skilla: `.claude/skills/<skill>/SKILL.md`.
 
 ---
 
+## 2026-11-05
+
+### Nowe
+
+- **Cele konwersji w `gads-connector`.** `list-goals` pokazuje, na co każda kampania
+  realnie licytuje: czy korzysta z celów konta, czy z własnych, i które kategorie konwersji
+  są w nich aktywne. Akcja główna liczy się do stawek tylko wtedy, gdy jej cel jest aktywny,
+  a samo `list-conversions` tego nie pokazuje. `update-goals` ustawia cele konta
+  (`--account-goals=SUBMIT_LEAD_FORM,CONTACT`, czyli pełna lista) i przełącza kampanie na
+  cele konta (`--campaigns=all --level=account`). Symulacja pokazuje cele każdej kampanii
+  przed i po zmianie i blokuje zmianę, po której kampania na Smart Bidding zostałaby bez celu.
+
+---
+
 ## 2026-11-03
 
 ### Nowe

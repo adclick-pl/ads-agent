@@ -19,6 +19,7 @@ import {
   getConversionActions,
   getConversionActionActivity,
   getConversionTrackingSetting,
+  getConversionGoals,
 } from './queries.js';
 import {
   updateCampaignStatus,
@@ -60,6 +61,7 @@ import {
   addListingGroups,
   createConversionActions,
   updateConversionActions,
+  updateConversionGoals,
   updateAssetGroupStatus,
   updateListingFilter,
   syncListingTypes,
@@ -306,6 +308,10 @@ Akcje odczytu:
                           --user=email[,email] opcjonalny filtr; teksty wykluczeń
                           rozwiązywane dla poziomu grupy i kampanii).
   raw-query               Własne zapytanie GAQL (wymaga --query).
+  list-goals              Cele konwersji: które kategorie są celami konta, który poziom
+                          celów (konto/kampania) ma każda kampania i na co REALNIE
+                          licytuje (efektywne cele). Akcja główna liczy się do stawek
+                          tylko wtedy, gdy jej cel jest aktywny na tym poziomie.
 
 Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
   init-accounts           Zakłada/uzupełnia rejestr .claude/accounts.json z kont
@@ -317,6 +323,13 @@ Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
                           nie daje czytelnego klucza (albo daje klucz zajęty/zderzony
                           z innym kontem), są pomijane z podaniem powodu.
                           Opcje: --commit, --accounts-file=<ścieżka>.
+  update-goals            Cele konwersji. --account-goals=KAT[,KAT~ŹRÓDŁO] to PEŁNA lista
+                          celów konta (reszta przestaje się liczyć), np.
+                          SUBMIT_LEAD_FORM,CONTACT,QUALIFIED_LEAD. --campaigns=all|ID,ID
+                          --level=account|campaign przełącza kampanie na cele konta albo
+                          własne. Symulacja pokazuje cele każdej kampanii przed i po;
+                          blokuje, gdy strategia oparta na konwersjach zostałaby bez celu.
+                          Kampanie próbne eksperymentów są pomijane.
   update-status           Zmiana statusu kampanii (--campaign, --status).
   update-ad-status        Wstrzymanie/wznowienie REKLAM po ID reklamy (tym z UI).
                           Pojedynczo/lista: --ad=<ID[,ID]> --status=<ENABLED|PAUSED>;
@@ -666,6 +679,8 @@ Przykłady:
   node scripts/cli.js --action=create-conversions --account=zielonyogrod --input=konwersje.csv
   node scripts/cli.js --action=create-conversions --account=zielonyogrod --input=konwersje.csv --commit
   node scripts/cli.js --action=update-conversions --account=zielonyogrod --id=987654321 --primary=true --commit
+  node scripts/cli.js --action=list-goals --account=zielonyogrod
+  node scripts/cli.js --action=update-goals --account=zielonyogrod --account-goals=SUBMIT_LEAD_FORM,CONTACT --campaigns=all --level=account
 `);
 }
 
@@ -733,6 +748,7 @@ async function main() {
     'test-connection', 'list-accessible', 'list-accounts', 'get-campaigns', 'get-keywords',
     'get-search-terms', 'get-pmax-search-terms', 'keyword-ideas', 'get-budgets',
     'get-change-history', 'raw-query', 'list-conversions', 'check-accounts', 'get-bidding',
+    'list-goals',
   ]);
   const isMutation = !READ_ONLY_ACTIONS.has(action);
   const dryRun = isMutation && (!args.commit || !!args['dry-run']);
@@ -1921,6 +1937,35 @@ async function main() {
       }
       if (items.length === 0) throw new Error('update-conversions wymaga --input=zmiany.csv (kolumna id + zmieniane pola) albo --id=123 z flagami (np. --primary=true, --status=HIDDEN, --value=150 --currency=PLN)');
       const result = await updateConversionActions(customerId, items, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'list-goals') {
+      const goals = await getConversionGoals(customerId, { loginCustomerId });
+      if (jsonMode) {
+        console.log(JSON.stringify(goals));
+      } else {
+        const acc = goals.account.filter((g) => g.biddable).map((g) => g.goal);
+        console.log(`\n🎯 Cele konta (licytowane): ${acc.length ? acc.join(', ') : '— brak'}`);
+        console.log(`   Pozostałe cele konta: ${goals.account.filter((g) => !g.biddable).map((g) => g.goal).join(', ') || '—'}`);
+        console.log('\n📋 Kampanie — poziom celów i na co realnie licytują:');
+        console.table(goals.campaigns.map((c) => ({
+          ID: c.id, Kampania: c.name, Status: c.status, Strategia: c.biddingStrategyType,
+          Poziom: c.level === 'CUSTOMER' ? 'konto' : c.level === 'CAMPAIGN' ? 'kampania' : c.level,
+          ...(c.experimentType !== 'BASE' && { Eksperyment: c.experimentType }),
+          'Cele efektywne': c.effectiveGoals.join(', ') || '— brak',
+        })));
+      }
+    }
+
+    else if (action === 'update-goals') {
+      const list = (v) => String(v ?? '').split(/[,|;]/).map((x) => x.trim()).filter(Boolean);
+      const spec = {
+        ...(args['account-goals'] !== undefined && { accountGoals: list(args['account-goals']) }),
+        ...(args.campaigns !== undefined && { campaigns: String(args.campaigns).trim().toLowerCase() === 'all' ? 'all' : list(args.campaigns) }),
+        level: args.level,
+      };
+      const result = await updateConversionGoals(customerId, spec, dryRun, loginCustomerId);
       console.log(JSON.stringify(result, null, 2));
     }
 

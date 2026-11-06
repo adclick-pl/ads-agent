@@ -774,6 +774,35 @@ with a flat default value (ROAS becomes fiction), a purchase counted `ONE_PER_CL
 a lead counted `MANY_PER_CLICK`, a purchase left as a secondary action. They ride
 along in the dry-run plan; read them to the user before `--commit`.
 
+### Conversion goals — what bidding actually optimises to
+
+A primary action counts towards bidding only if its **goal** (category~origin,
+e.g. `SUBMIT_LEAD_FORM~WEBSITE`) is active at the level the campaign uses: the
+account goals or the campaign's own copy of them. Two campaigns with the same
+primary actions can bid on different things, and `list-conversions` doesn't show it.
+
+```bash
+# What each campaign really bids on (level + effective goals).
+node scripts/cli.js --action=list-goals --account=zielonyogrod
+
+# Account goals = EXACTLY this list, and every campaign follows the account goals.
+node scripts/cli.js --action=update-goals --account=zielonyogrod \
+  --account-goals=SUBMIT_LEAD_FORM,CONTACT,QUALIFIED_LEAD --campaigns=all --level=account
+```
+
+- `--account-goals` is the **complete** list. Goals not on it stop counting for
+  every campaign on account goals. A bare category takes every origin except
+  `GOOGLE_HOSTED` (the API refuses to make those biddable); `CONTACT~WEBSITE`
+  pins one origin.
+- `--campaigns=all|ID,ID --level=account|campaign` switches the goal level.
+  Experiment trial campaigns are skipped.
+- The dry run lists every campaign's goals **before → after** and is validated by
+  Google. It blocks when a campaign on conversion-based bidding would be left with
+  no goal, and warns for each live Smart Bidding campaign whose goals change
+  (the strategy recalibrates).
+- After `--commit` the goals are read back, and a change the API accepted but did
+  not apply is reported as `notApplied`.
+
 ### Demand Gen — five steps, in order
 
 Demand Gen needs more pieces than a Search ad group, so it is split into five

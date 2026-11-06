@@ -1943,6 +1943,91 @@ export async function getConversionActions(customerId, opts = {}) {
 }
 
 /**
+ * Conversion goals — what each campaign is actually allowed to bid on.
+ *
+ * A conversion action's `primary_for_goal` is only half of the answer. Bidding
+ * sees a primary action only if its goal (category~origin, e.g.
+ * `SUBMIT_LEAD_FORM~WEBSITE`) is biddable at the level the campaign uses:
+ * either the account-level goals (`goal_config_level = CUSTOMER`) or the
+ * campaign's own copy of them (`CAMPAIGN`). Two campaigns with identical
+ * conversion actions can therefore optimise to different things, and nothing in
+ * the conversion list shows it.
+ *
+ * `effectiveGoals` resolves that per campaign: the biddable goals that bidding
+ * really uses right now.
+ *
+ * @param {string} customerId
+ * @param {{loginCustomerId?: string}} [opts]
+ * @returns {Promise<{account: Array<object>, campaigns: Array<object>}>}
+ */
+export async function getConversionGoals(customerId, opts = {}) {
+  const C = enums.ConversionActionCategory;
+  const OR = enums.ConversionOrigin;
+  const LV = enums.GoalConfigLevel;
+  const EX = enums.CampaignExperimentType;
+  const BS = enums.BiddingStrategyType;
+  const ST = enums.CampaignStatus;
+  const ro = { loginCustomerId: opts.loginCustomerId };
+  // Absent booleans mean false in the raw rows.
+  const goalKey = (cat, org) => `${C[cat] || cat}~${OR[org] || org}`;
+
+  const [accRows, cfgRows, campRows] = await Promise.all([
+    runRawQuery(customerId, `
+      SELECT customer_conversion_goal.resource_name, customer_conversion_goal.category,
+             customer_conversion_goal.origin, customer_conversion_goal.biddable
+      FROM customer_conversion_goal`, ro),
+    runRawQuery(customerId, `
+      SELECT campaign.id, campaign.name, campaign.status, campaign.experiment_type,
+             campaign.bidding_strategy_type,
+             conversion_goal_campaign_config.resource_name,
+             conversion_goal_campaign_config.goal_config_level,
+             conversion_goal_campaign_config.custom_conversion_goal
+      FROM conversion_goal_campaign_config
+      WHERE campaign.status != 'REMOVED'`, ro),
+    runRawQuery(customerId, `
+      SELECT campaign.id, campaign_conversion_goal.category,
+             campaign_conversion_goal.origin, campaign_conversion_goal.biddable
+      FROM campaign_conversion_goal
+      WHERE campaign.status != 'REMOVED'`, ro),
+  ]);
+
+  const account = accRows.map((r) => ({
+    goal: goalKey(r['customer_conversion_goal.category'], r['customer_conversion_goal.origin']),
+    biddable: r['customer_conversion_goal.biddable'] === true,
+    resourceName: r['customer_conversion_goal.resource_name'],
+  })).sort((a, b) => a.goal.localeCompare(b.goal));
+  const accountBiddable = account.filter((g) => g.biddable).map((g) => g.goal);
+
+  const ownByCampaign = new Map();
+  for (const r of campRows) {
+    if (r['campaign_conversion_goal.biddable'] !== true) continue;
+    const id = String(r['campaign.id']);
+    if (!ownByCampaign.has(id)) ownByCampaign.set(id, []);
+    ownByCampaign.get(id).push(goalKey(r['campaign_conversion_goal.category'], r['campaign_conversion_goal.origin']));
+  }
+
+  const campaigns = cfgRows.map((r) => {
+    const id = String(r['campaign.id']);
+    const level = LV[r['conversion_goal_campaign_config.goal_config_level']] || 'UNKNOWN';
+    const own = (ownByCampaign.get(id) || []).sort();
+    return {
+      id,
+      name: r['campaign.name'] || '',
+      status: ST[r['campaign.status']] || String(r['campaign.status'] ?? ''),
+      experimentType: EX[r['campaign.experiment_type']] || 'BASE',
+      biddingStrategyType: BS[r['campaign.bidding_strategy_type']] || String(r['campaign.bidding_strategy_type'] ?? ''),
+      level,
+      customGoal: r['conversion_goal_campaign_config.custom_conversion_goal'] || null,
+      campaignGoals: own,
+      effectiveGoals: level === 'CUSTOMER' ? accountBiddable : own,
+      configResourceName: r['conversion_goal_campaign_config.resource_name'],
+    };
+  }).sort((a, b) => a.name.localeCompare(b.name, 'pl'));
+
+  return { account, campaigns };
+}
+
+/**
  * When each conversion action last actually fired, plus its volume in the window.
  *
  * This is the question that matters right after deploying a tag ("did anything

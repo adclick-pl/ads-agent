@@ -1,7 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { enums } from 'google-ads-api';
 import { getCustomer, unpackError } from './client.js';
-import { getKeywordsByCriteria, getCampaignBasics, getCampaignBiddingInfo, getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts, getExistingStructuredSnippets, getExistingCallAssets, callAssetIdentity, getExistingPriceAssets, getExistingPromotions, promotionIdentity, getAdGroupAdsByAdIds, getAdGroupsByIds, getExistingYoutubeAssets, getExistingDemandGenAds, getExistingDemandGenProductAds, getExistingListingGroups, getAssetGroupsByIds, getListingFilterTree, LISTING_FILTER_TYPE_NAME, getAdGroupTargetingCriteria, getCampaignChannelTypes, getCallToActionAssets, getConversionActions, getExistingCampaigns, getBudgetsByName, COPYABLE_CRITERION_TYPES } from './queries.js';
+import { getKeywordsByCriteria, getCampaignBasics, getCampaignBiddingInfo, getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts, getExistingStructuredSnippets, getExistingCallAssets, callAssetIdentity, getExistingPriceAssets, getExistingPromotions, promotionIdentity, getAdGroupAdsByAdIds, getAdGroupsByIds, getExistingYoutubeAssets, getExistingDemandGenAds, getExistingDemandGenProductAds, getExistingListingGroups, getAssetGroupsByIds, getListingFilterTree, LISTING_FILTER_TYPE_NAME, getAdGroupTargetingCriteria, getCampaignChannelTypes, getCallToActionAssets, getConversionActions, getConversionGoals, getExistingCampaigns, getBudgetsByName, COPYABLE_CRITERION_TYPES } from './queries.js';
 import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkCallAsset, parseCallSchedule, normalizeCallReportingState, checkPriceOfferings, checkPromotion, checkDemandGenAdTexts, checkDemandGenChannels, DEMAND_GEN_LIMITS, adTextLength, checkConversionAction, checkCampaignSpec, checkPmaxSpec, checkListingFilterFlip, checkLabelExclusion, checkItemExclusion, planCustomAudienceUrls, planNegativeRemoval, planAudienceSegmentAdd, planAudienceSegmentRemove, planCampaignLanguages, ASSET_AUTOMATION_ALIASES, PMAX_ASSET_AUTOMATION, resolveAssetAutomationTypes, planAssetAutomation, checkCampaignTextAsset, CAMPAIGN_TEXT_ASSET_LIMITS, isIsoDate } from './safety.js';
 
 /**
@@ -4924,6 +4924,176 @@ export async function updateConversionActions(customerId, items, dryRun = false,
     };
   } catch (error) {
     throw new Error(`Nie udało się zmienić konwersji: ${unpackError(error)}`);
+  }
+}
+
+// --- Conversion goals (cele konwersji) ---------------------------------------
+
+/** Bidding strategies that optimise to conversions — the ones a goal change retrains. */
+const CONVERSION_BASED_BIDDING = new Set([
+  'MAXIMIZE_CONVERSIONS', 'MAXIMIZE_CONVERSION_VALUE', 'TARGET_CPA', 'TARGET_ROAS',
+]);
+
+/** Accept the operator's words for the two goal levels. */
+function normalizeGoalLevel(v) {
+  const s = String(v ?? '').trim().toLowerCase();
+  if (['customer', 'account', 'konto', 'konta'].includes(s)) return 'CUSTOMER';
+  if (['campaign', 'kampania', 'kampanii'].includes(s)) return 'CAMPAIGN';
+  return null;
+}
+
+/**
+ * Set which conversion goals bidding uses — at account level, and which campaigns
+ * follow the account goals instead of their own copy.
+ *
+ * Two independent switches, both optional:
+ *   - `accountGoals`: the COMPLETE list of biddable account goals. Every account
+ *     goal not on the list becomes non-biddable — a partial list is not "add
+ *     these", it is "exactly these". A bare category (`CONTACT`) means that
+ *     category for every origin present in the account except GOOGLE_HOSTED;
+ *     `CONTACT~WEBSITE` pins one.
+ *   - `campaigns` + `level`: move campaigns to account goals (`CUSTOMER`) or back
+ *     to campaign-specific goals (`CAMPAIGN`). `all` takes every non-removed base
+ *     campaign; experiment trial campaigns are skipped — their goals follow the
+ *     experiment, and the API rejects editing them.
+ *
+ * The plan resolves what each campaign will bid on AFTER the change, because that
+ * is the real effect and neither switch shows it on its own. A campaign on
+ * conversion-based bidding that would end up with no biddable goal blocks the
+ * whole batch: Smart Bidding with nothing to optimise is never what was meant.
+ * After a commit the goals are read back, so a change the API accepted but did
+ * not apply is reported instead of assumed.
+ *
+ * @param {string} customerId
+ * @param {{accountGoals?: string[], campaigns?: string[]|'all', level?: string}} spec
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>} plan with per-campaign before→after goals
+ */
+export async function updateConversionGoals(customerId, spec = {}, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  const problems = [];
+  const warnings = [];
+
+  const wantsAccount = Array.isArray(spec.accountGoals);
+  const wantsLevel = spec.campaigns !== undefined && spec.campaigns !== null;
+  if (!wantsAccount && !wantsLevel) {
+    throw new Error('Nic do zmiany: podaj --account-goals=KATEGORIA,... i/lub --campaigns=all|ID,ID --level=account|campaign.');
+  }
+  const level = wantsLevel ? normalizeGoalLevel(spec.level) : null;
+  if (wantsLevel && !level) problems.push(`--level musi być "account" albo "campaign" (podano: ${spec.level ?? 'brak'}).`);
+
+  const state = await getConversionGoals(cleanCustomerId, { loginCustomerId });
+
+  // 1. Account goals: resolve the list into exact category~origin keys.
+  let targetBiddable = new Set(state.account.filter((g) => g.biddable).map((g) => g.goal));
+  const accountChanges = [];
+  if (wantsAccount) {
+    targetBiddable = new Set();
+    for (const raw of spec.accountGoals) {
+      const token = String(raw).trim().toUpperCase();
+      if (!token) continue;
+      // A bare category skips GOOGLE_HOSTED (local actions): the API refuses to
+      // make those biddable, and one refused goal fails the whole batch.
+      const hits = state.account.filter((g) => (token.includes('~')
+        ? g.goal === token
+        : g.goal.split('~')[0] === token && !g.goal.endsWith('~GOOGLE_HOSTED')));
+      if (hits.length === 0) problems.push(`cel "${token}" nie istnieje w koncie (dostępne: ${state.account.map((g) => g.goal).join(', ')}).`);
+      hits.forEach((g) => targetBiddable.add(g.goal));
+    }
+    if (problems.length === 0 && targetBiddable.size === 0) problems.push('lista celów konta jest pusta — konto zostałoby bez żadnego celu do optymalizacji.');
+    for (const g of state.account) {
+      const to = targetBiddable.has(g.goal);
+      if (g.biddable !== to) accountChanges.push({ goal: g.goal, from: g.biddable, to, resourceName: g.resourceName });
+    }
+  }
+
+  // 2. Campaign levels.
+  const levelChanges = [];
+  const skipped = [];
+  if (wantsLevel && level) {
+    const byId = new Map(state.campaigns.map((c) => [c.id, c]));
+    let picked;
+    if (spec.campaigns === 'all') {
+      picked = state.campaigns;
+    } else {
+      const ids = spec.campaigns.map((v) => String(v).replace(/[^0-9]/g, '')).filter(Boolean);
+      const missing = ids.filter((id) => !byId.has(id));
+      if (missing.length) problems.push(`kampanii nie ma w koncie albo jest usunięta: ${missing.join(', ')}.`);
+      picked = ids.filter((id) => byId.has(id)).map((id) => byId.get(id));
+    }
+    for (const c of picked) {
+      if (c.experimentType !== 'BASE') { skipped.push({ id: c.id, name: c.name, reason: `kampania próbna eksperymentu (${c.experimentType}) — cele idą za eksperymentem` }); continue; }
+      if (c.level === level) continue;
+      if (c.customGoal) warnings.push(`${c.name}: ma niestandardowy cel konwersji — on ma pierwszeństwo przed celami konta i kampanii.`);
+      levelChanges.push({ id: c.id, name: c.name, from: c.level, to: level, resourceName: c.configResourceName });
+    }
+  }
+
+  const block = () => {
+    throw new Error(`🛑 Zablokowano — ${problems.length} problem(ów), nic nie zapisano:\n${problems.map((p) => `  • ${p}`).join('\n')}`);
+  };
+  // A bad input would make every campaign look goal-less below — report the cause only.
+  if (problems.length) block();
+
+  // 3. What each campaign will bid on afterwards — the actual effect.
+  const accountAfter = [...targetBiddable].sort();
+  const levelAfter = new Map(levelChanges.map((l) => [l.id, l.to]));
+  const campaignPlan = state.campaigns.map((c) => {
+    const lvl = levelAfter.get(c.id) || c.level;
+    const after = lvl === 'CUSTOMER' ? accountAfter : c.campaignGoals;
+    const changed = after.join('|') !== c.effectiveGoals.join('|');
+    return { id: c.id, name: c.name, status: c.status, bidding: c.biddingStrategyType, levelFrom: c.level, levelTo: lvl, goalsBefore: c.effectiveGoals, goalsAfter: after, changed };
+  });
+  for (const p of campaignPlan) {
+    const smart = CONVERSION_BASED_BIDDING.has(p.bidding);
+    if (smart && p.status !== 'REMOVED' && p.goalsAfter.length === 0) {
+      problems.push(`${p.name}: strategia ${p.bidding} zostałaby bez żadnego celu konwersji.`);
+    } else if (smart && p.changed && p.status === 'ENABLED') {
+      warnings.push(`${p.name}: zmienia cele, na które licytuje ${p.bidding} — strategia przelicza się na nowo (okres nauki).`);
+    }
+  }
+
+  if (problems.length) block();
+
+  const mutations = [
+    ...accountChanges.map((c) => ({ entity: 'CustomerConversionGoal', operation: 'update', resource: { resource_name: c.resourceName, biddable: c.to } })),
+    ...levelChanges.map((c) => ({ entity: 'ConversionGoalCampaignConfig', operation: 'update', resource: { resource_name: c.resourceName, goal_config_level: c.to } })),
+  ];
+  const plan = {
+    accountGoals: { before: state.account.filter((g) => g.biddable).map((g) => g.goal), after: accountAfter, changes: accountChanges.map(({ resourceName, ...c }) => c) },
+    levelChanges: levelChanges.map(({ resourceName, ...c }) => c),
+    skipped,
+    campaigns: campaignPlan,
+  };
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Cele konwersji: ${accountChanges.length} zmian celów konta, ${levelChanges.length} kampanii zmienia poziom celów...`);
+  if (dryRun || mutations.length === 0) {
+    const validation = dryRun && mutations.length ? await validateWithApi(getCustomer(cleanCustomerId, loginCustomerId), [mutations]) : { ok: true };
+    return { success: validation.ok, dryRun, entity: 'conversion_goals', mutations: mutations.length, plan, warnings, validation };
+  }
+
+  try {
+    const customer = getCustomer(cleanCustomerId, loginCustomerId);
+    const response = await customer.mutateResources(mutations);
+
+    // Read back: the field mask is built from the resource, and a dropped field
+    // would be a silent no-op — verify instead of trusting the 200.
+    const after = await getConversionGoals(cleanCustomerId, { loginCustomerId });
+    const accNow = new Map(after.account.map((g) => [g.goal, g.biddable]));
+    const lvlNow = new Map(after.campaigns.map((c) => [c.id, c.level]));
+    const notApplied = [
+      ...accountChanges.filter((c) => accNow.get(c.goal) !== c.to).map((c) => `cel konta ${c.goal}`),
+      ...levelChanges.filter((c) => lvlNow.get(c.id) !== c.to).map((c) => `kampania ${c.name}`),
+    ];
+    return {
+      success: notApplied.length === 0, dryRun: false, entity: 'conversion_goals',
+      mutations: mutations.length, plan, warnings,
+      ...(notApplied.length && { notApplied, error: `API przyjęło zmianę, ale odczyt jej nie potwierdza: ${notApplied.join(', ')}` }),
+      resourceNames: mutatedResourceNames([response]),
+    };
+  } catch (error) {
+    throw new Error(`Nie udało się zmienić celów konwersji: ${unpackError(error)}`);
   }
 }
 
