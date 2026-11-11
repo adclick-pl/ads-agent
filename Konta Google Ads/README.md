@@ -1,6 +1,6 @@
-# Klienci
+# Konta Google Ads
 
-Jeden podfolder na klienta: `Klienci/<alias>/`. Strukturę folderu opisuje `CLAUDE.md` w korzeniu pakietu.
+Jeden podfolder na klienta: `Konta Google Ads/<alias>/`. Strukturę folderu opisuje `CLAUDE.md` w korzeniu pakietu.
 
 ## config.json
 
@@ -8,7 +8,7 @@ Wymagane są tylko `alias` i `googleAdsId`, reszta jest opcjonalna. Klucze zaczy
 
 ```json
 {
-  "_README": "Kontekst klienta dla skilli Ads-Agent. Skopiuj ten plik do Klienci/<alias>/config.json i wypełnij. Wymagane są tylko alias i googleAdsId. Klucze zaczynające się od _ są ignorowane. Opis pól: Klienci/README.md.",
+  "_README": "Kontekst klienta dla skilli Ads-Agent. Skopiuj ten plik do Konta Google Ads/<alias>/config.json i wypełnij. Wymagane są tylko alias i googleAdsId. Klucze zaczynające się od _ są ignorowane. Opis pól: Konta Google Ads/README.md.",
 
   "name": "Zielony Ogród sp. z o.o.",
   "alias": "zielonyogrod",

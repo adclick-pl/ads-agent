@@ -57,7 +57,7 @@ na leadgen z ostrzeżeniem — nie licz na to. **Ustal typ, zanim wywołasz skry
 
 Sprawdzaj po kolei, kończ na pierwszym pewnym sygnale:
 
-**1,5a. Config klienta.** Jeśli `Klienci/<alias>/config.json` ma pole `businessType`
+**1,5a. Config klienta.** Jeśli `Konta Google Ads/<alias>/config.json` ma pole `businessType`
 (`ecom` / `ecommerce` / `leadgen`) — użyj i idź do KROK 2. Nie sprawdzaj dalej.
 
 **1,5b. Aktywne akcje konwersji na koncie.**
@@ -81,7 +81,7 @@ idź dalej.
 **1,5c. Strona WWW klienta.**
 
 Znajdź URL. Kolejność źródeł:
-1. `Klienci/<alias>/Kontekst/kontekst.md` — jeśli jest, zwykle ma domenę w treści.
+1. `Konta Google Ads/<alias>/Kontekst/kontekst.md` — jeśli jest, zwykle ma domenę w treści.
 2. Ostatecznie odpytaj konto o URL reklamowy:
 
    ```bash
@@ -106,14 +106,14 @@ usługi B2B na osobnych podstronach) → nie decyduj, idź dalej.
 Gdy typ ustaliłeś w tej sesji (nie odczytany z configu w 1,5a), zapisz go na stałe —
 przy kolejnych uruchomieniach detekcja się nie powtórzy.
 
-- Jeśli `Klienci/<alias>/config.json` istnieje: dopisz/nadpisz pole `businessType`.
+- Jeśli `Konta Google Ads/<alias>/config.json` istnieje: dopisz/nadpisz pole `businessType`.
 - Jeśli config nie istnieje, ale folder klienta jest: utwórz `config.json`
   z `{ "businessType": "<typ>" }`.
-- Jeśli folderu klienta w ogóle nie ma: utwórz `Klienci/<alias>/` i `config.json`
+- Jeśli folderu klienta w ogóle nie ma: utwórz `Konta Google Ads/<alias>/` i `config.json`
   w jednym ruchu.
 
 Poinformuj usera jednym zdaniem, co zapisałeś („ustaliłem `businessType=ecom`
-na podstawie X, dopisałem do `Klienci/<alias>/config.json`"). Nie pytaj o zgodę —
+na podstawie X, dopisałem do `Konta Google Ads/<alias>/config.json`"). Nie pytaj o zgodę —
 zapis jest bezpieczny (folder klienta i tak powstałby przy zapisie raportu w KROK 2,
 a config jest edytowalny).
 
@@ -132,7 +132,7 @@ ponownie z:
 
 ```bash
 node .claude/skills/gads-przeglad-slow-kluczowych/scripts/przeglad-slow-kluczowych.js \
-  --account={alias|ID} --out=Klienci/<slug>/Optymalizacja
+  --account={alias|ID} --out="Konta Google Ads/<slug>/Optymalizacja"
 ```
 
 ## KROK 2 — Uruchom
@@ -155,7 +155,7 @@ Konto bez słów kluczowych (same PMax / Shopping / DSA) kończy się komunikate
   ustala KROK 1,5, zanim tu dojdziesz.
 - `--cel-roas=3.5` (ecom) / `--cel-cpa=80` (leadgen) — nadpisuje `targetRoas`/`targetCpa`
   z `config.json`.
-- `--out=<folder>` — inny folder zapisu (domyślnie: `Klienci/{alias}/Optymalizacja`).
+- `--out=<folder>` — inny folder zapisu (domyślnie: `Konta Google Ads/{alias}/Optymalizacja`).
 - `--accounts-dir=<ścieżka>` — katalog, od którego szukamy `.claude/accounts.json`.
 
 ## KROK 3 — Zreferuj wyniki
@@ -202,7 +202,7 @@ Wstrzymanie to jedyna informacja z tego audytu, która ma wartość **po** zamkn
 raportu: przy rozszerzaniu kierowania trzeba wiedzieć, czego już próbowaliśmy. Konto
 pamięta sam status `PAUSED` — nie pamięta liczb ani powodu.
 
-Plik: `Klienci/{alias}/Optymalizacja/status-slowa-kluczowe.md`. Utwórz z szablonem,
+Plik: `Konta Google Ads/{alias}/Optymalizacja/status-slowa-kluczowe.md`. Utwórz z szablonem,
 jeśli go nie ma.
 
 **Zapisuj wyłącznie słowa, które operator faktycznie wstrzymał w koncie** — nie
@@ -223,7 +223,7 @@ Powód przepisz z kolumny „Uwagi" raportu, skrócony do jednego zdania.
 
 ## Konfiguracja klienta
 
-Ścieżka: `Klienci/{alias}/config.json`. Pole `businessType` ustalane jest przez
+Ścieżka: `Konta Google Ads/{alias}/config.json`. Pole `businessType` ustalane jest przez
 KROK 1,5 (przy pierwszym uruchomieniu — jeśli nie ma, skill je wykryje i zapisze).
 Pozostałe pola są opcjonalne; poprzeczką bez celów są średnie roczne kampanii.
 
@@ -426,13 +426,13 @@ Dwie pułapki znalezione pomiarem:
 
 ## Output
 
-- `Klienci/{alias}/Optymalizacja/YYYY-MM-DD-slowa-kluczowe.html` — raport.
-- `Klienci/{alias}/Optymalizacja/YYYY-MM-DD-slowa-kluczowe-kandydaci.csv` — klucze
+- `Konta Google Ads/{alias}/Optymalizacja/YYYY-MM-DD-slowa-kluczowe.html` — raport.
+- `Konta Google Ads/{alias}/Optymalizacja/YYYY-MM-DD-slowa-kluczowe-kandydaci.csv` — klucze
   kryteriów kandydatów (`criterion, slowo, dopasowanie, kampania, grupa, poziom,
   klikniecia_rok, koszt_rok, konw_rok, wynik_rok, powod`). Wejście dla KROK 3,5.
   `slowo` w notacji Google Ads (`[ścisłe]`, `"do wyrażenia"`, przybliżone bez
   znaczników).
-- `Klienci/{alias}/Optymalizacja/status-slowa-kluczowe.md` — pamięć wstrzymań,
+- `Konta Google Ads/{alias}/Optymalizacja/status-slowa-kluczowe.md` — pamięć wstrzymań,
   pisana ręcznie w KROK 4. **Nieczytana przez skrypt.**
 
 Folder wyjściowy można nadpisać flagą `--out=<folder>`.

@@ -246,7 +246,7 @@ export function keywordsByCampaign(adGroupKeywords) {
 // polskiej fleksji (ten sam próg podobieństwa co przy tematach ze statusu).
 //
 // Świadomie tożsamość, a NIE „objęte dopasowaniem": słowo kluczowe do wyrażenia
-// `skup samochodów` pokrywa też „skup samochodów warszawa", które chcemy móc
+// `naprawa rowerów` pokrywa też „naprawa rowerów kraków", które chcemy móc
 // wyciąć. Równość liczby słów załatwia obie strony naraz — hasło ani nie dokłada
 // obcego członu, ani nie gubi kwalifikatora.
 export function isSameAsKeyword(term, keywords) {

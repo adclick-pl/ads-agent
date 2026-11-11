@@ -12,10 +12,12 @@ Use memory only on the user's explicit instruction. Avoid saving unnecessary thi
 
 ## Foldery klientów
 
-Dane klienta: `Klienci/<alias>/`. Alias jak w `.claude/accounts.json` — małe litery, bez spacji i polskich znaków.
+Dane klienta: `Konta Google Ads/<alias>/`. Alias jak w `.claude/accounts.json` — małe litery, bez spacji i polskich znaków.
 
-    Klienci/<alias>/
-    ├── config.json           cele i dane strukturalne (pola: Klienci/README.md)
+`Klienci/` to stara nazwa tego folderu. Jeśli foldery kont są w `Klienci/`, a w `Konta Google Ads/` ich nie ma, dane kont są w `Klienci/` — korzystaj z niego (skrypty robią to same).
+
+    Konta Google Ads/<alias>/
+    ├── config.json           cele i dane strukturalne (pola: Konta Google Ads/README.md)
     ├── Kontekst/
     │   └── kontekst.md       opis oferty
     ├── Optymalizacja/        praca nad kontem

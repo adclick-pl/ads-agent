@@ -81,7 +81,7 @@ How to add a lesson: append a bullet under the right section in the form
   `campaign_search_term_view.search_term`, NOT `segments.search_term`, which raises
   "incompatible segment", and not `keyword.info.text`). Avoid
   `campaign_search_term_insight` too — it only returns bucketed categories and is
-  empty for fresh campaigns. (verified on the MWM meble account)
+  empty for fresh campaigns.
 
 - **`ad_group_ad_asset_view` returns only `metrics.impressions` for Search RSA text
   assets (headlines/descriptions)** → clicks / conversions / cost per single

@@ -47,8 +47,8 @@ node ".claude/skills/gads-wykluczenia-hasel/scripts/wykluczenia-hasel.js" --acco
 ```
 
 Uruchamiaj z korzenia pakietu (tam, gdzie `package.json`) — wtedy skrypt sam znajdzie
-`.claude/accounts.json`. Raport trafia do `Klienci/{alias}/Optymalizacja/`, opis oferty
-czytany jest z `Klienci/{alias}/Kontekst/kontekst.md`, a cele z `Klienci/{alias}/config.json`.
+`.claude/accounts.json`. Raport trafia do `Konta Google Ads/{alias}/Optymalizacja/`, opis oferty
+czytany jest z `Konta Google Ads/{alias}/Kontekst/kontekst.md`, a cele z `Konta Google Ads/{alias}/config.json`.
 Obie ścieżki zmieniają flagi `--out` i `--kontekst`; pełna lista flag jest na końcu.
 
 Skrypt **tylko czyta** konto — nie potrzebuje uprawnień do zmian i niczego nie modyfikuje.
@@ -61,7 +61,7 @@ na leadgen z WARN — nie licz na to. **Ustal typ, zanim wywołasz skrypt.**
 
 Sprawdzaj po kolei, kończ na pierwszym pewnym sygnale:
 
-**1,5a. Config klienta.** Jeśli `Klienci/<alias>/config.json` ma pole `businessType`
+**1,5a. Config klienta.** Jeśli `Konta Google Ads/<alias>/config.json` ma pole `businessType`
 (`ecom` / `ecommerce` / `leadgen`) — użyj i idź do KROK 2.
 
 **1,5b. Aktywne akcje konwersji na koncie.**
@@ -80,7 +80,7 @@ Klasyfikuj po polu `category` (tylko akcje `status=ENABLED` i primary):
 Wszystkie decydujące akcje w jednej kategorii → mamy typ, idź do 1,5e. Mieszanka albo
 same neutralne → dalej.
 
-**1,5c. Strona WWW klienta.** URL bierz z `Klienci/<alias>/Kontekst/kontekst.md`, a jak
+**1,5c. Strona WWW klienta.** URL bierz z `Konta Google Ads/<alias>/Kontekst/kontekst.md`, a jak
 nie ma:
 
 ```bash
@@ -96,7 +96,7 @@ Jasny sygnał → mamy typ. Hybryda → dalej.
 co widziałeś na koncie i stronie.
 
 **1,5e. Zapisz typ automatycznie do configu.** Gdy ustaliłeś typ w tej sesji
-(nie odczytany w 1,5a), zapisz go na stałe do `Klienci/<alias>/config.json`
+(nie odczytany w 1,5a), zapisz go na stałe do `Konta Google Ads/<alias>/config.json`
 (pole `businessType`). Utwórz plik i folder klienta, jeśli nie istnieją. Bez pytania
 o zgodę — zapis jest bezpieczny, a przy kolejnym uruchomieniu detekcja się nie
 powtórzy. Poinformuj usera jednym zdaniem, co zapisałeś.
@@ -111,7 +111,7 @@ na stderr sygnały które widział. NIGDY nie tworzy folderu z surowych cyfr.
 Gdy dostaniesz exit 78 — **zapytaj usera** (`AskUserQuestion`) jaką nazwę nadać
 folderowi klienta, wklejając do pytania listę zebranych sygnałów jako podpowiedź.
 Slug małymi literami, myślniki zamiast spacji, bez polskich znaków. Potem uruchom
-ponownie z `--out=Klienci/<slug>/Optymalizacja`.
+ponownie z `--out="Konta Google Ads/<slug>/Optymalizacja"`.
 
 ## KROK 2 — Przepływ (dwuprzebiegowy)
 
@@ -323,8 +323,8 @@ słowa kluczowego zabija je w koncie (negatyw ma pierwszeństwo) i wyłącza seg
 
 Porównanie idzie do słów kluczowych **całej kampanii**, nie grupy reklam — wykluczające
 dodaje się per kampania. Liczy się **tożsamość** haseł (te same znaczące słowa, z tolerancją
-polskiej fleksji), a nie objęcie dopasowaniem: słowo kluczowe do wyrażenia `skup samochodów`
-pokrywa też „skup samochodów warszawa", które chcemy móc wyciąć. Ograniczenie tolerancji:
+polskiej fleksji), a nie objęcie dopasowaniem: słowo kluczowe do wyrażenia `naprawa rowerów`
+pokrywa też „naprawa rowerów kraków", które chcemy móc wyciąć. Ograniczenie tolerancji:
 przy krótkich słowach w silnej odmianie („katowicach" wobec „katowice") podobieństwo
 3-gramowe nie łapie progu i degradacja nie zadziała — skutkiem jest wtedy zachowanie sprzed
 tej reguły, nic gorszego.
@@ -378,8 +378,8 @@ zostaje na nowe tematy.
 |---|---|
 | `--account` | alias z `.claude/accounts.json` albo 10-cyfrowy customer ID (wymagane) |
 | `--accounts-dir` | katalog, od którego szukamy `.claude/accounts.json` (domyślnie: bieżący) |
-| `--out` | folder raportu (domyślnie `Klienci/{alias}/Optymalizacja`) |
-| `--kontekst` | ścieżka do `kontekst.md` (domyślnie `Klienci/{alias}/Kontekst/kontekst.md`) |
+| `--out` | folder raportu (domyślnie `Konta Google Ads/{alias}/Optymalizacja`) |
+| `--kontekst` | ścieżka do `kontekst.md` (domyślnie `Konta Google Ads/{alias}/Kontekst/kontekst.md`) |
 | `--typ` | `ecom` \| `leadgen` — nadpisuje `config.json`. Bez ustawienia skrypt wypisze WARN i zakłada leadgen — normalnie typ ustala KROK 1,5. |
 | `--cel-roas` | docelowy ROAS (ecom) — nadpisuje `targetRoas` z `config.json` |
 | `--open` | otwórz raport po wygenerowaniu (macOS) |
@@ -390,9 +390,9 @@ z WARN — detekcja (akcje konwersji + strona + dopytanie + auto-zapis do config
 należy do KROK 1,5, wykonywanego przed uruchomieniem skryptu.
 
 **Skąd brany jest `config.json`.** Skrypt szuka go **obok pliku wskazanego przez
-`--kontekst`**, potem **piętro wyżej**, a na końcu w domyślnym `Klienci/<alias>/`.
-Domyślny układ pakietu trafia w drugie miejsce (`Klienci/<alias>/Kontekst/kontekst.md`
-→ `Klienci/<alias>/config.json`); pierwsze obsługuje układy, w których config leży
+`--kontekst`**, potem **piętro wyżej**, a na końcu w domyślnym `Konta Google Ads/<alias>/`.
+Domyślny układ pakietu trafia w drugie miejsce (`Konta Google Ads/<alias>/Kontekst/kontekst.md`
+→ `Konta Google Ads/<alias>/config.json`); pierwsze obsługuje układy, w których config leży
 w jednym folderze z kontekstem. Dzięki temu skill działa też poza pakietem, bez
 przepisywania ścieżek.
 

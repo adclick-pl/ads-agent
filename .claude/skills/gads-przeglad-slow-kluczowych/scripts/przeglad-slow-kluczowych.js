@@ -20,7 +20,7 @@
  * Opcje:
  *   --account       alias z .claude/accounts.json albo 10-cyfrowy customer ID (wymagane)
  *   --accounts-dir  katalog, od którego szukamy .claude/accounts.json (domyślnie: bieżący)
- *   --out           folder raportu (domyślnie: Klienci/{alias}/Optymalizacja)
+ *   --out           folder raportu (domyślnie: Konta Google Ads/{alias}/Optymalizacja)
  *   --typ           ecom | leadgen — nadpisuje config.json i wykrywanie automatyczne
  *   --cel-roas      docelowy ROAS (ecom) — nadpisuje targetRoas z config.json
  *   --cel-cpa       docelowy koszt konwersji (leadgen) — nadpisuje targetCpa z config.json
@@ -31,7 +31,7 @@ import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'fs';
 import { join, isAbsolute, resolve } from 'path';
 import { execFileSync } from 'child_process';
 
-import { runRawQuery, resolveAccount, getAccountTimezone, accountSlug } from './connector.js';
+import { runRawQuery, resolveAccount, getAccountTimezone, accountSlug, clientsDir } from './connector.js';
 import { setCurrency, getDates, formatDate, fmt, fmtMoney } from './format.js';
 import {
     fetchKeywordList, fetchMetrics30, fetchMetricsYear, fetchCampaignTargets,
@@ -69,7 +69,7 @@ async function ustalKonto(selector, accountsDir) {
     // ZAWSZE próbuj rejestru — `resolveAccount` znajduje wpis po `id`, aliasie, kluczu
     // albo nazwie. Wcześniejszy warunek `czyId ? null : …` pomijał rejestr, gdy user
     // podał ID; tracono wtedy zdefiniowany alias i folder klienta lądował z surową
-    // liczbą (`Klienci/1234567890/`) mimo że w rejestrze siedział sensowny slug.
+    // liczbą (`Konta Google Ads/1234567890/`) mimo że w rejestrze siedział sensowny slug.
     const zRejestru = resolveAccount(selector, accountsDir);
 
     if (!zRejestru && !czyId) {
@@ -108,7 +108,7 @@ async function ustalKonto(selector, accountsDir) {
     konto.name ||= konto.id;
     // Klucz folderu — hierarchia od najczytelniejszego. Zasada: NIGDY surowe cyfry.
     // Jeśli żadne ze źródeł nie da sensownej nazwy → wyjście z sygnałem dla orchestratora
-    // (SKILL.md: zapytaj usera przez AskUserQuestion, re-run z `--out=Klienci/<nazwa>/…`).
+    // (SKILL.md: zapytaj usera przez AskUserQuestion, re-run z `--out="Konta Google Ads/<nazwa>/…"`).
     let key = zRejestru?.key || accountSlug(konto.name, konto.id);
     let zrodlo = zRejestru?.key ? 'rejestr' : (key ? 'nazwa konta z API' : null);
     let urlKandydat = null;
@@ -132,7 +132,7 @@ async function ustalKonto(selector, accountsDir) {
         console.error(`     • URL reklam: ${urlKandydat || '(brak włączonych reklam z final_urls)'}`);
         console.error(`     • słowa w kampanii Brand: ${brandKandydat || '(brak kampanii z „brand" w nazwie)'}`);
         console.error(`   Zapytaj usera jaką nazwę nadać folderowi (małe litery i cyfry, bez separatorów),`);
-        console.error(`   następnie uruchom ponownie z --out=Klienci/<nazwa>/Optymalizacja.`);
+        console.error(`   następnie uruchom ponownie z --out="Konta Google Ads/<nazwa>/Optymalizacja".`);
         process.exit(78);
     }
     konto.key = key;
@@ -229,7 +229,7 @@ async function brandKeywordCore(account) {
 // KONFIG KLIENTA
 // ============================================================
 
-// Cele i typ konta z `Klienci/<alias>/config.json`. Brak pliku albo błąd składni daje
+// Cele i typ konta z `Konta Google Ads/<alias>/config.json`. Brak pliku albo błąd składni daje
 // pusty obiekt — config jest wygodą, nie warunkiem uruchomienia. Bez configu skrypt
 // wykryje typ konta automatycznie (po wartości konwersji), a poprzeczką będą średnie
 // roczne kampanii.
@@ -255,8 +255,9 @@ async function main() {
     // Daty liczone w strefie konta (zwykle dopiero po `ustalKonto`, bo tam ją dociągamy).
     const dates = getDates(account.timezone);
 
-    // Folder klienta wg konwencji pakietu: Klienci/<alias>/Optymalizacja/…
-    const clientDir = resolve(process.cwd(), 'Klienci', String(account.key).toLowerCase());
+    // Folder klienta wg konwencji pakietu: Konta Google Ads/<alias>/Optymalizacja/…
+    // (stara nazwa `Klienci/` działa dalej — patrz clientsDir w gads-connector)
+    const clientDir = join(clientsDir(), String(account.key).toLowerCase());
     const outputDir = args.out
         ? (isAbsolute(args.out) ? args.out : resolve(process.cwd(), args.out))
         : join(clientDir, 'Optymalizacja');
@@ -309,7 +310,7 @@ async function main() {
     const isEcom = ['ecom', 'ecommerce'].includes(typ);
     if (!typ) {
         console.log(`   ⚠ Nie podano typu konta (brak config.businessType i --typ) — zakładam leadgen.`);
-        console.log(`     Dla konta ecom uruchom z --typ=ecom albo dopisz \`"businessType":"ecom"\` do Klienci/${account.key}/config.json.`);
+        console.log(`     Dla konta ecom uruchom z --typ=ecom albo dopisz \`"businessType":"ecom"\` do Konta Google Ads/${account.key}/config.json.`);
     }
     console.log(`   Tryb: ${isEcom ? 'e-commerce (ROAS)' : 'lead gen (koszt konwersji)'}`
         + `${isEcom && targetRoas ? ` · cel ROAS ${targetRoas}` : ''}`

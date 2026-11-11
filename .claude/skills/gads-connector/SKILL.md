@@ -101,7 +101,7 @@ aliases, aliases shadowed by another entry's key or name, and multiple accounts
 flagged `default`. Exit code 1 when it finds something. A selector matching more
 than one entry now **stops the run** instead of silently taking the first match.
 
-The registry key doubles as the client's folder name under `Klienci/`, so keys are
+The registry key doubles as the client's folder name under `Konta Google Ads/`, so keys are
 lowercase ASCII with no separators (`zielonyogrod`). That is the same shape the
 `ga4-connector` and `gsc-connector` propose, which is why one client resolves the
 same way in all three.
@@ -830,7 +830,7 @@ node scripts/cli.js --action=add-demand-gen-ads --account=zielonyogrod --input=r
 # 4b. The PRODUCT ad — this is what makes the campaign dynamic.
 node scripts/cli.js --action=add-demand-gen-product-ads --account=zielonyogrod --input=produktowe.csv --domain=zielonyogrod.example
 #    produktowe.csv: ad_group_id,final_url,headline,description,logo_asset_id,business_name,cta
-#                    111222333,https://zielonyogrod.example,Meble ogrodowe od producenta,Komplety na taras. Sprawdz oferte.,987654321,Zielony Ogrod,SHOP_NOW
+#                    111222333,https://zielonyogrod.example,Konewki i grabie od producenta,Solidne narzedzia do ogrodu. Sprawdz oferte.,987654321,Zielony Ogrod,SHOP_NOW
 
 # 5. Product feed, restricted to chosen products.
 node scripts/cli.js --action=add-listing-groups --account=zielonyogrod --input=produkty.csv

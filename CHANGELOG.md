@@ -7,6 +7,17 @@ restarcie sesji. Szczegóły każdego skilla: `.claude/skills/<skill>/SKILL.md`.
 
 ---
 
+## 2026-11-11
+
+### Zmiany
+
+- **Folder z danymi kont nazywa się teraz `Konta Google Ads/`** (wcześniej `Klienci/`).
+  Jeśli masz już foldery kont w `Klienci/`, nic nie musisz robić — skille dalej z nich
+  korzystają. Chcesz nowej nazwy? Przenieś foldery kont z `Klienci/` do
+  `Konta Google Ads/` — zawartość zostaje bez zmian, skille same zaczną używać nowego miejsca.
+
+---
+
 ## 2026-11-05
 
 ### Nowe

@@ -19,4 +19,5 @@ export {
 export {
     resolveAccount,
     accountSlug,
+    clientsDir,
 } from '../../gads-connector/scripts/accounts.js';

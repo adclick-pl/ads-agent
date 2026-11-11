@@ -153,7 +153,7 @@ function proposeRegistry(accountCount) {
   console.log(`\n💡 Rejestru kont (.claude/accounts.json) jeszcze nie ma — dlatego konto trzeba`);
   console.log(`   podawać 10-cyfrowym ID. Rejestr pozwala pisać --account=zielonyogrod, sam`);
   console.log(`   dobiera MCC i strefę czasową, a klucz wpisu jest zarazem nazwą folderu`);
-  console.log(`   klienta w Klienci/ i działa tak samo w konektorach GA4 i Search Console.`);
+  console.log(`   klienta w Konta Google Ads/ i działa tak samo w konektorach GA4 i Search Console.`);
   if (accountCount) console.log(`   Kont do zarejestrowania: ${accountCount}.`);
   console.log(`   Zobacz, co zostałoby zapisane (nic nie zmienia):`);
   console.log(`   node scripts/cli.js --action=init-accounts`);

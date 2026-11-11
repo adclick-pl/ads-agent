@@ -22,8 +22,8 @@
  * Opcje:
  *   --account       alias z `.claude/accounts.json` albo 10-cyfrowy customer ID (wymagane)
  *   --accounts-dir  katalog, od którego szukamy `.claude/accounts.json` (domyślnie: bieżący)
- *   --out           folder raportu (domyślnie: Klienci/{alias}/Optymalizacja)
- *   --kontekst      ścieżka do kontekst.md (domyślnie: Klienci/{alias}/Kontekst/kontekst.md)
+ *   --out           folder raportu (domyślnie: Konta Google Ads/{alias}/Optymalizacja)
+ *   --kontekst      ścieżka do kontekst.md (domyślnie: Konta Google Ads/{alias}/Kontekst/kontekst.md)
  *   --typ           ecom | leadgen — nadpisuje config.json (bez tego: WARN + leadgen)
  *   --cel-roas      docelowy ROAS (ecom) — nadpisuje targetRoas z config.json
  *   --open          otwórz raport po wygenerowaniu (macOS)
@@ -33,7 +33,7 @@ import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'fs';
 import { join, isAbsolute, resolve, dirname } from 'path';
 import { execSync } from 'child_process';
 
-import { runRawQuery, getSearchTerms, resolveAccount, accountSlug } from './connector.js';
+import { runRawQuery, getSearchTerms, resolveAccount, accountSlug, clientsDir } from './connector.js';
 import { fmt, fmtMoney, setCurrency, getDates, formatDate } from './format.js';
 import {
     collectUncertainTerms, buildCampExclusionCandidates, withYearSignal, splitCandidatesByYear,
@@ -82,7 +82,7 @@ async function ustalKonto(selector, accountsDir) {
     // ZAWSZE próbuj rejestru — `resolveAccount` znajduje wpis po `id`, aliasie, kluczu
     // albo nazwie. Wcześniejszy warunek `czyId ? null : …` pomijał rejestr, gdy user
     // podał ID; tracono wtedy zdefiniowany alias i folder klienta lądował z surową
-    // liczbą (`Klienci/1234567890/`) mimo że w rejestrze siedział sensowny slug.
+    // liczbą (`Konta Google Ads/1234567890/`) mimo że w rejestrze siedział sensowny slug.
     const zRejestru = resolveAccount(selector, accountsDir);
 
     if (!zRejestru && !czyId) {
@@ -112,7 +112,7 @@ async function ustalKonto(selector, accountsDir) {
     konto.name ||= konto.id;
     // Klucz folderu — hierarchia od najczytelniejszego. Zasada: NIGDY surowe cyfry.
     // Jeśli żadne ze źródeł nie da sensownej nazwy → wyjście z sygnałem dla orchestratora
-    // (SKILL.md: zapytaj usera przez AskUserQuestion, re-run z `--out=Klienci/<nazwa>/…`).
+    // (SKILL.md: zapytaj usera przez AskUserQuestion, re-run z `--out="Konta Google Ads/<nazwa>/…"`).
     let key = zRejestru?.key || accountSlug(konto.name, konto.id);
     let zrodlo = zRejestru?.key ? 'rejestr' : (key ? 'nazwa konta z API' : null);
     let urlKandydat = null;
@@ -136,7 +136,7 @@ async function ustalKonto(selector, accountsDir) {
         console.error(`     • URL reklam: ${urlKandydat || '(brak włączonych reklam z final_urls)'}`);
         console.error(`     • słowa w kampanii Brand: ${brandKandydat || '(brak kampanii z „brand" w nazwie)'}`);
         console.error(`   Zapytaj usera jaką nazwę nadać folderowi (małe litery i cyfry, bez separatorów),`);
-        console.error(`   następnie uruchom ponownie z --out=Klienci/<nazwa>/Optymalizacja.`);
+        console.error(`   następnie uruchom ponownie z --out="Konta Google Ads/<nazwa>/Optymalizacja".`);
         process.exit(78);
     }
     konto.key = key;
@@ -478,8 +478,8 @@ function parseFrontmatter(md) {
 //
 // Szukamy w trzech miejscach, bo `config.json` leży w stałej relacji do `kontekst.md`,
 // ale każdy układ katalogów trzyma go gdzie indziej: OBOK pliku kontekstu (folder typu
-// `<Klient>_Kontekst_AI`) albo PIĘTRO WYŻEJ (`Klienci/<alias>/Kontekst/kontekst.md`
-// → `Klienci/<alias>/config.json`). Dzięki temu skill nie musi znać układu katalogów
+// `<Klient>_Kontekst_AI`) albo PIĘTRO WYŻEJ (`Konta Google Ads/<alias>/Kontekst/kontekst.md`
+// → `Konta Google Ads/<alias>/config.json`). Dzięki temu skill nie musi znać układu katalogów
 // projektu, w którym akurat działa — wystarczy, że dostanie `--kontekst`.
 function loadClientConfig(clientDir, kontekstPath) {
     const katalogi = [];
@@ -803,7 +803,7 @@ async function main() {
 
     // Folder klienta: raporty w `Optymalizacja/`, opis oferty w `Kontekst/`. Obie flagi
     // działają niezależnie — `--out` gdzie indziej nie przenosi kontekstu i odwrotnie.
-    const clientDir = resolve(process.cwd(), 'Klienci', String(account.key).toLowerCase());
+    const clientDir = join(clientsDir(), String(account.key).toLowerCase());
     const outputDir = args.out
         ? (isAbsolute(args.out) ? args.out : resolve(process.cwd(), args.out))
         : join(clientDir, 'Optymalizacja');
@@ -836,7 +836,7 @@ async function main() {
     const branza = cfg.industry || fm.branza || '';
     if (!typ) {
         console.log(`   ⚠ Nie podano typu konta (brak config.businessType, frontmattera i --typ) — zakładam leadgen.`);
-        console.log(`     Dla konta ecom uruchom z --typ=ecom albo dopisz \`"businessType":"ecom"\` do Klienci/${account.key}/config.json.`);
+        console.log(`     Dla konta ecom uruchom z --typ=ecom albo dopisz \`"businessType":"ecom"\` do Konta Google Ads/${account.key}/config.json.`);
     }
     console.log(`   Tryb oceny: ${isEcom ? 'ecommerce (ROAS)' : 'leadgen (koszt konwersji)'}`);
 

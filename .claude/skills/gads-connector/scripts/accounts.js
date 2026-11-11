@@ -176,7 +176,7 @@ export function registryConflicts(startDir = process.cwd()) {
 //
 // ONE implementation, because two separate things read it and they must agree:
 // the key an account is stored under here, and the name of that client's folder
-// under `Klienci/`. When they disagree, adding a registry entry RENAMES the
+// under `Konta Google Ads/`. When they disagree, adding a registry entry RENAMES the
 // folder and every report written before it is orphaned in the old one.
 //
 // Convention: JOINED lowercase ASCII, no separators ("zielonyogrod"). It matches
@@ -224,7 +224,7 @@ export function slugifyName(name) {
  * The registry key / client folder name for an account, or '' when the name
  * yields nothing a human could use.
  *
- * Digits are refused on purpose. `Klienci/1234567890` tells an operator nothing,
+ * Digits are refused on purpose. `Konta Google Ads/1234567890` tells an operator nothing,
  * and a slug equal to `blockId` means the name lookup fell back to the customer
  * id. Callers must treat '' as "ask the user", never as "use the number".
  */
@@ -234,6 +234,27 @@ export function accountSlug(name, blockId) {
   if (/^\d+$/.test(s)) return '';
   if (blockId && s === String(blockId)) return '';
   return s;
+}
+
+/**
+ * Folder with per-client data (`config.json`, context, reports). `Klienci/` is the
+ * old name: an install whose client folders live only in `Klienci/` keeps using it,
+ * so an update never strands a user's data. Everyone else gets `Konta Google Ads/`.
+ *
+ * Decided by client SUBFOLDERS, not by the folder existing: `git pull` moves the
+ * tracked README into `Konta Google Ads/` and leaves the user's data in `Klienci/`.
+ */
+export function clientsDir(startDir = process.cwd()) {
+  const current = path.join(startDir, 'Konta Google Ads');
+  const legacy = path.join(startDir, 'Klienci');
+  const hasClients = (dir) => {
+    try {
+      return fs.readdirSync(dir, { withFileTypes: true }).some((e) => e.isDirectory() && !e.name.startsWith('_'));
+    } catch {
+      return false;
+    }
+  };
+  return !hasClients(current) && hasClients(legacy) ? legacy : current;
 }
 
 // ---------------------------------------------------------------------------
@@ -332,7 +353,7 @@ const REGISTRY_README =
   '("ga4PropertyId") i gsc-connector ("gscSite"). Klucz wpisu jest selektorem dla ' +
   'wszystkich trzech: --account=<klucz> w Adsach, --property=<klucz> w GA4, ' +
   '--site=<klucz> w Search Console. Klucze pisane są małymi literami bez separatorów ' +
-  '(np. "zielonyogrod") i są zarazem nazwą folderu klienta w Klienci/. Klucze ' +
+  '(np. "zielonyogrod") i są zarazem nazwą folderu klienta w Konta Google Ads/. Klucze ' +
   'zaczynające się od _ są ignorowane. Opis pól: ' +
   '.claude/skills/gads-connector/references/accounts.example.json';
 
