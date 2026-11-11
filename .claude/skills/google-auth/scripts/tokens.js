@@ -36,6 +36,9 @@ export const SERVICES = {
   ads: { name: 'Google Ads', scopes: [`${GA}adwords`] },
   ga4: { name: 'Google Analytics 4', scopes: [`${GA}analytics.readonly`] },
   gsc: { name: 'Search Console', scopes: [`${GA}webmasters.readonly`] },
+  // Write access (sitemap submit/delete) is a separate, opt-in consent: `all`
+  // skips it, so a read-only setup never asks to manage someone's property.
+  'gsc-write': { name: 'Search Console (zapis map witryny)', scopes: [`${GA}webmasters`], optIn: true },
   gmc: { name: 'Merchant Center', scopes: [`${GA}content`] },
   gtm: {
     name: 'Tag Manager',
@@ -343,7 +346,9 @@ function clearInvalid(email, refreshToken) {
 // ---------------------------------------------------------------------------
 export function parseServices(list) {
   const raw = String(list || '').split(',').map((s) => s.trim()).filter(Boolean);
-  const names = raw.includes('all') ? Object.keys(SERVICES) : raw;
+  const names = raw.includes('all')
+    ? [...new Set([...Object.keys(SERVICES).filter((k) => !SERVICES[k].optIn), ...raw.filter((n) => n !== 'all')])]
+    : raw;
   names.forEach(assertService);
   if (!names.length) throw new AuthError('CONFIG', `Podaj --services=<lista>. Dostępne: ${Object.keys(SERVICES).join(', ')}, all.`);
   return names;

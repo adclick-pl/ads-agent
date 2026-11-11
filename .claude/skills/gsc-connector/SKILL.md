@@ -1,7 +1,7 @@
 ---
 name: gsc-connector
 description: |
-  Kanoniczne wejście do Google Search Console — lista property, stan zgłoszonych sitemap, dane z wyszukiwarki (kliknięcia/wyświetlenia/CTR/pozycja per URL i fraza) oraz URL Inspection (czy URL jest zaindeksowany, jaki URL Google uznał za kanoniczny, kiedy ostatnio go crawlował, skąd go zna). Tylko odczyt — konektor niczego nie zmienia w GSC. USE WHEN użytkownik chce sprawdzić indeksowanie strony, zdiagnozować dlaczego podstrony nie wchodzą do indeksu, porównać kanoniczny URL wybrany przez Google z zadeklarowanym, zobaczyć które URL-e i frazy zbierają ruch, albo sprawdzić stan sitemap. Triggers "gsc-connector", "Search Console", "GSC", "czy strona jest zaindeksowana", "dlaczego Google nie indeksuje", "URL Inspection", "sprawdź indeksowanie", "sitemapy w GSC", "jaki canonical wybrał Google", "ruch z SEO", "pozycje w Google".
+  Kanoniczne wejście do Google Search Console — lista property, stan zgłoszonych sitemap, dane z wyszukiwarki (kliknięcia/wyświetlenia/CTR/pozycja per URL i fraza) oraz URL Inspection (czy URL jest zaindeksowany, jaki URL Google uznał za kanoniczny, kiedy ostatnio go crawlował, skąd go zna). Odczyt; jedyny zapis w GSC to zgłoszenie/usunięcie mapy witryny (osobna zgoda gsc-write). USE WHEN użytkownik chce sprawdzić indeksowanie strony, zdiagnozować dlaczego podstrony nie wchodzą do indeksu, porównać kanoniczny URL wybrany przez Google z zadeklarowanym, zobaczyć które URL-e i frazy zbierają ruch, sprawdzić stan sitemap albo zgłosić mapę witryny. Triggers "gsc-connector", "Search Console", "GSC", "czy strona jest zaindeksowana", "dlaczego Google nie indeksuje", "URL Inspection", "sprawdź indeksowanie", "sitemapy w GSC", "zgłoś mapę witryny", "jaki canonical wybrał Google", "ruch z SEO", "pozycje w Google".
 ---
 
 # GSC Connector
@@ -10,9 +10,11 @@ Cienka warstwa na Search Console API v3 + URL Inspection API v1. Bez zależnośc
 działa na wbudowanym `fetch` (Node 18+), `npm install` nie jest potrzebny.
 Źródło prawdy: `scripts/api.js`.
 
-**Tylko odczyt.** Zakres OAuth to `webmasters.readonly`, więc konektor nie jest w stanie
-zgłosić sitemapy, poprosić o zaindeksowanie ani niczego zmienić w property klienta.
-Jedyny zapis dotyczy naszego rejestru kont (`--action=remember`) i wymaga potwierdzenia.
+**Odczyt + mapy witryny.** Wszystkie odczyty idą na zakresie `webmasters.readonly`.
+Jedyny zapis w GSC to zgłoszenie albo usunięcie mapy witryny — wymaga **osobnej zgody**
+`gsc-write` (zakres `webmasters`), której `--services=all` nie obejmuje. Prośby
+o zaindeksowanie API nie ma wcale. Zapis do rejestru kont (`--action=remember`) jest
+lokalny i wymaga potwierdzenia.
 
 ## Konfiguracja — jedno API i jedna zgoda
 
@@ -137,6 +139,19 @@ node $S --action=diagnose --site=zielonyogrod
 
 Wyjście: tabela (domyślnie), `--json`, `--output=plik.csv`, `--show=N|all`.
 
+## Zgłaszanie mapy witryny (zapis)
+
+```bash
+node $S --action=submit-sitemap --site=zielonyogrod --sitemap=https://zielonyogrod.example/sitemap_index.xml
+node $S --action=delete-sitemap --site=zielonyogrod --sitemap=https://zielonyogrod.example/stara-mapa.xml
+```
+
+Pierwsze użycie: konektor zgłosi brak zgody i poda komendę
+`google-auth --action=auth --services=gsc-write --account=<email>` — nasłuch najpierw, w tle.
+Login potrzebuje uprawnienia **właściciel** lub **pełne** do property.
+Po zapisie konektor odczytuje stan mapy z GSC, więc widać, że zgłoszenie dotarło.
+Zgłaszaj mapę **klienta tylko na jego prośbę** — to zmiana w jego property.
+
 ## Zakres dat i opóźnienie danych
 
 `--days=90` to ostatnie 90 dni **do wczoraj włącznie**. Dane ostateczne w Search Console
@@ -180,6 +195,8 @@ z kolumny `pozycja` jest poprawna z konstrukcji. Licząc cokolwiek na pozycji z 
 
 ## Czego API nie da — nie obiecuj tego użytkownikowi
 
+- **Prośby o zindeksowanie adresu** — przycisk „Poproś o zindeksowanie” jest tylko
+  w interfejsie GSC; Indexing API obsługuje wyłącznie oferty pracy i transmisje na żywo.
 - **Zbiorczych liczb z raportu „Indeksowanie stron"** (ile URL-i w „Duplikat, Google
   wybrał inną stronę kanoniczną" itp.). Trzeba odczytać w interfejsie GSC.
 - **Statystyk indeksowania** (trafienia robota, czasy odpowiedzi). Tylko interfejs.

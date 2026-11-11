@@ -5,8 +5,9 @@
  *   Search Console  v3  https://www.googleapis.com/webmasters/v3
  *   URL Inspection  v1  https://searchconsole.googleapis.com/v1
  *
- * Read-only by design: the OAuth scope is webmasters.readonly, so nothing here
- * can submit a sitemap, request indexing or change a client's property.
+ * Read-only by default: every read runs on webmasters.readonly. The one write —
+ * submitting or deleting a sitemap — needs the separate, opt-in `gsc-write`
+ * consent (scope webmasters). Requesting indexing has no public API at all.
  *
  * Docs: https://developers.google.com/webmaster-tools/v1/api_reference_index
  *       https://developers.google.com/webmaster-tools/v1/urlInspection.index
@@ -43,7 +44,9 @@ const memoTokens = new Map();
  * account, `profile` = its e-mail or label) is the source; the per-connector
  * token files from before it are read only while the store has no GSC account.
  */
-export async function accessToken(profile) {
+export async function accessToken(profile, service = 'gsc') {
+  // Writes exist only in the google-auth store; the legacy files are read-only.
+  if (service !== 'gsc') return (await getAccessToken(service, profile)).accessToken;
   if (hasAccountFor('gsc') || !refreshToken(profile)) {
     return (await getAccessToken('gsc', profile)).accessToken;
   }
@@ -158,8 +161,8 @@ function explain(status, body, url, { profile, site } = {}) {
   return `Search Console API zwróciło ${status}: ${err.message || JSON.stringify(body)}`;
 }
 
-async function call(url, { method = 'GET', body, profile, site } = {}) {
-  let token = await accessToken(profile);
+async function call(url, { method = 'GET', body, profile, site, service } = {}) {
+  let token = await accessToken(profile, service);
 
   const send = () =>
     fetch(url, {
@@ -174,7 +177,7 @@ async function call(url, { method = 'GET', body, profile, site } = {}) {
   let res = await send();
   if (res.status === 401) {
     memoTokens.delete(profile || ''); // stale access token — refresh once and retry
-    token = await accessToken(profile);
+    token = await accessToken(profile, service);
     res = await send();
   }
 
@@ -354,6 +357,31 @@ export async function sitemaps({ site, profile } = {}) {
     })),
   };
 }
+
+/**
+ * Submit (PUT) or delete (DELETE) a sitemap, then read back what Search Console
+ * now holds for it — so the caller sees the write landed, not just a 204.
+ * Needs the opt-in `gsc-write` consent.
+ */
+async function writeSitemap(method, { site, sitemap, profile } = {}) {
+  if (!/^https?:\/\//.test(sitemap || '')) {
+    throw new Error('Podaj pełny adres mapy: --sitemap=https://zielonyogrod.example/sitemap_index.xml');
+  }
+  const { site: id, profile: prof, assumed } = resolveTarget(site, profile);
+  await call(`${WM}/sites/${enc(id)}/sitemaps/${enc(sitemap)}`, { method, profile: prof, site: id, service: 'gsc-write' });
+  const after = await sitemaps({ site: id, profile: prof });
+  const rows = after.rows.filter((r) => r.sitemap === sitemap);
+  const done =
+    method === 'PUT'
+      ? `✅ Zgłoszono ${sitemap}. Google pobierze ją w ciągu godzin–dni (kolumna „pobrana”).`
+      : rows.length
+        ? `⚠️  Usunięcie wysłane, ale ${sitemap} wciąż jest na liście — sprawdź za chwilę --action=sitemaps.`
+        : `✅ Usunięto ${sitemap} z Search Console.`;
+  return { ...after, assumed, rows, done };
+}
+
+export const submitSitemap = (opts) => writeSitemap('PUT', opts);
+export const deleteSitemap = (opts) => writeSitemap('DELETE', opts);
 
 /**
  * One Search Analytics page. Callers normally want `searchAnalytics` below,

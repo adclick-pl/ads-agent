@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * Search Console connector CLI — read-only.
+ * Search Console connector CLI — read-only, except sitemap submit/delete
+ * (separate opt-in consent `gsc-write`).
  *
  *   node scripts/cli.js --action=<akcja> [--site=<property albo alias>] [opcje]
  *
@@ -42,7 +43,7 @@ const list = (name, fallback) => {
 const VALUE_FLAGS = new Set([
   'account', 'action', 'as', 'concurrency', 'contains', 'data-state', 'days',
   'dimensions', 'filter', 'from', 'limit', 'output', 'profile', 'property',
-  'show', 'site', 'to', 'type', 'url', 'urls-file',
+  'show', 'site', 'sitemap', 'to', 'type', 'url', 'urls-file',
 ]);
 const BOOL_FLAGS = new Set(['help', 'json']);
 
@@ -215,6 +216,7 @@ function emit(result, rowsKey = 'rows') {
     console.log('');
   }
   console.log(table(rows));
+  if (!Array.isArray(result) && result.done) console.log(`\n${result.done}`);
 
   // A batch where half the URLs errored still prints a full-looking table —
   // say how many rows are failures, not verdicts.
@@ -263,6 +265,8 @@ const ACTIONS = {
       .map((a) => ({ konto: a.email, etykieta: a.label || '', domyslne: a.default ? 'tak' : '' })),
 
   sitemaps: async () => gsc.sitemaps({ site: siteArg(), profile: profileArg() }),
+  'submit-sitemap': async () => gsc.submitSitemap({ site: siteArg(), sitemap: arg('sitemap'), profile: profileArg() }),
+  'delete-sitemap': async () => gsc.deleteSitemap({ site: siteArg(), sitemap: arg('sitemap'), profile: profileArg() }),
 
   query: async () =>
     gsc.searchAnalytics({
@@ -435,7 +439,8 @@ function usage() {
     // A broken registry must not stop --help from printing.
   }
   console.log(`
-Search Console connector — tylko odczyt (zakres webmasters.readonly).
+Search Console connector — odczyt (webmasters.readonly) + zgłaszanie map witryny
+(osobna zgoda gsc-write).
 
   node scripts/cli.js --action=<akcja> --site=<property albo alias konta> [opcje]
 
@@ -450,6 +455,10 @@ DANE Z WYSZUKIWARKI
                       (query, page, country, device, date, searchAppearance)
   sitemaps            zgłoszone mapy witryny, ich błędy i daty pobrania
 
+MAPY WITRYNY — zapis (osobna zgoda: google-auth --services=gsc-write)
+  submit-sitemap      zgłoś mapę: --sitemap=https://example.com/sitemap_index.xml
+  delete-sitemap      usuń mapę z Search Console (sam plik na stronie zostaje)
+
 INDEKSOWANIE
   inspect             pojedynczy URL: czy w indeksie, jaki canonical wybrał Google
   inspect-batch       próbka URL-i z pliku (--urls-file=, --concurrency=5)
@@ -460,7 +469,7 @@ DIAGNOSTYKA
   test-connection     czy autoryzacja działa
   profiles            które konta Google są autoryzowane
 
-REJESTR — jedyny zapis konektora
+REJESTR — zapis lokalny (nie dotyka GSC)
   remember            zapamiętaj property pod aliasem: --site=<property> --as=<alias>
                       Uruchamiaj TYLKO po potwierdzeniu użytkownika.
 
@@ -489,6 +498,8 @@ FILTRY (łącz średnikiem = AND; tylko query, page, country, device, searchAppe
   --contains=/k/                     skrót na --filter="page=~/k/"
 
 CZEGO API NIE DA — nie obiecuj tego użytkownikowi
+  Prośby o zindeksowanie adresu — przycisk „Poproś o zindeksowanie” jest tylko
+  w interfejsie GSC (Indexing API obsługuje wyłącznie oferty pracy i transmisje).
   Zbiorczego raportu „Indeksowanie stron” (ile URL-i w „Duplikat, Google wybrał inną
   stronę kanoniczną”) ani statystyk indeksowania. To tylko interfejs GSC. Zamiast
   tego: inspect-batch na reprezentatywnej próbce — te same werdykty, per URL.
