@@ -360,6 +360,7 @@ i tylko za potwierdzeniem użytkownika, bo alias to decyzja nazewnicza.
   Google Ads / RSA po polsku). **Nie wymaga żadnej konfiguracji ani dostępu do
   API** — działa od razu; wystarczy poprosić o napisanie reklam i podać URL
   strony. Szczegóły: `.claude/skills/gads-reklamy/SKILL.md`.
+- Powiedz, że uwagi, błędy i pomysły zgłasza się autorom poleceniem `/feedback`.
 - Przypomnij: plik `~/google-ads.yaml` zawiera sekrety — **nie wysyłać go nikomu
   i nie wrzucać do repozytorium**.
 

@@ -9,6 +9,14 @@ restarcie sesji. Szczegóły każdego skilla: `.claude/skills/<skill>/SKILL.md`.
 
 ## 2026-11-11
 
+### Nowe
+
+- **`/feedback` — zgłoś błąd albo pomysł.** Napisz np. „/feedback konektor nie widzi konta” albo
+  opisz swój pomysł. Claude dopyta o brakujące szczegóły, sam zbierze z rozmowy kontekst
+  (skill, komenda, treść błędu), pokaże dokładnie, co wyśle, i wyśle dopiero po Twojej zgodzie.
+  Dane klientów — nazwy, ID kont, domeny, kwoty — nie trafiają do zgłoszenia.
+  Możesz podać e-mail, na który odpowiemy (nie musisz).
+
 ### Zmiany
 
 - **Folder z danymi kont nazywa się teraz `Konta Google Ads/`** (wcześniej `Klienci/`).
