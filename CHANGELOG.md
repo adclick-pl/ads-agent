@@ -7,6 +7,16 @@ restarcie sesji. Szczegóły każdego skilla: `.claude/skills/<skill>/SKILL.md`.
 
 ---
 
+## 2026-11-13
+
+### Nowe
+
+- **Usuwane pliki trafiają do Kosza.** Claude nie usuwa już plików na stałe poleceniem `rm` —
+  przenosi je do Kosza systemowego (macOS, Windows, Linux), skąd przywrócisz je jednym
+  kliknięciem. Zabezpieczenie działa samo po `git pull` i restarcie Claude Code.
+
+---
+
 ## 2026-11-12
 
 ### Nowe
