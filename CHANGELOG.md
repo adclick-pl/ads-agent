@@ -7,6 +7,17 @@ restarcie sesji. Szczegóły każdego skilla: `.claude/skills/<skill>/SKILL.md`.
 
 ---
 
+## 2026-11-12
+
+### Nowe
+
+- **Zmiana kanałów w istniejącej grupie Demand Gen** (`update-demand-gen-channels`). Np. dołączasz
+  reklamy przed filmami YouTube (in-stream) do grupy, która wyświetlała się tylko w feedzie —
+  bez zakładania grupy od nowa. Podajesz pełną listę kanałów: te spoza listy zostają wyłączone.
+  Symulacja pokazuje kanały każdej grupy przed i po zmianie i jest sprawdzana przez Google.
+
+---
+
 ## 2026-11-11
 
 ### Nowe

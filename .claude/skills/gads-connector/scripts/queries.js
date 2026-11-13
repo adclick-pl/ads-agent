@@ -1089,6 +1089,58 @@ export async function getAdGroupsByIds(customerId, adGroupIds, opts = {}) {
   return out;
 }
 
+/** `DemandGenChannelStrategy` enum number → name, as GAQL returns it. */
+const DEMAND_GEN_STRATEGY_NAME = { 2: 'ALL_CHANNELS', 3: 'ALL_OWNED_AND_OPERATED_CHANNELS' };
+
+/** Selectable channel fields of a Demand Gen ad group (same names as `selected_channels`). */
+const DEMAND_GEN_CHANNEL_FIELDS = ['youtube_in_stream', 'youtube_in_feed', 'youtube_shorts', 'discover', 'gmail', 'display'];
+
+/**
+ * Current channel controls of Demand Gen ad groups, so a channel change can show
+ * a from→to diff and skip groups that already match.
+ *
+ * `selected_channels` itself cannot be SELECTed (only its leaf booleans can), and
+ * `channel_config` tells which branch of the oneof is in use: 2 = strategy,
+ * 3 = selected channels, anything else = the group inherits the campaign default.
+ *
+ * @param {string} customerId
+ * @param {Array<string|number>} adGroupIds
+ * @param {{loginCustomerId?: string}} [opts]
+ * @returns {Promise<Array<{adGroupId: string, name: string, campaignId: string, campaignName: string, channelType: number, mode: 'strategy'|'channels'|'default', strategy: string, channels: string[]}>>}
+ */
+export async function getDemandGenChannelControls(customerId, adGroupIds, opts = {}) {
+  const clean = String(customerId).replace(/-/g, '');
+  const ids = [...new Set((adGroupIds || []).map((a) => String(a).replace(/[^0-9]/g, '')).filter(Boolean))];
+  if (ids.length === 0) return [];
+  const base = 'ad_group.demand_gen_ad_group_settings.channel_controls';
+  const out = [];
+  for (let i = 0; i < ids.length; i += 200) {
+    const part = ids.slice(i, i + 200);
+    const rows = await runRawQuery(clean,
+      `SELECT ad_group.id, ad_group.name, campaign.id, campaign.name, campaign.advertising_channel_type,
+         ${base}.channel_config, ${base}.channel_strategy,
+         ${DEMAND_GEN_CHANNEL_FIELDS.map((c) => `${base}.selected_channels.${c}`).join(', ')}
+       FROM ad_group
+       WHERE ad_group.id IN (${part.join(',')}) AND ad_group.status IN ('ENABLED', 'PAUSED')`,
+      { loginCustomerId: opts.loginCustomerId });
+    for (const r of rows) {
+      const config = Number(r[`${base}.channel_config`]);
+      const mode = config === 2 ? 'strategy' : (config === 3 ? 'channels' : 'default');
+      out.push({
+        adGroupId: String(r['ad_group.id']),
+        name: r['ad_group.name'] || '',
+        campaignId: String(r['campaign.id']),
+        campaignName: r['campaign.name'] || '',
+        channelType: Number(r['campaign.advertising_channel_type']),
+        mode,
+        strategy: mode === 'strategy' ? (DEMAND_GEN_STRATEGY_NAME[r[`${base}.channel_strategy`]] || String(r[`${base}.channel_strategy`])) : '',
+        channels: mode === 'channels' ? DEMAND_GEN_CHANNEL_FIELDS.filter((c) => r[`${base}.selected_channels.${c}`] === true) : [],
+      });
+    }
+  }
+  return out;
+}
+
 /**
  * Look up keywords by their composite `adGroupId~criterionId` key — the same key
  * `update-keyword-url` already uses, and the only one that identifies a keyword

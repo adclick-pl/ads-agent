@@ -172,26 +172,22 @@ export const CUSTOM_LABEL_COUNT = 5;
 /**
  * Decide HOW a `custom_label_N = <value>` exclusion can be put into a PMax tree.
  *
- * Three shapes, in order of how much they disturb the group:
+ * The exclusion belongs on the FIRST split: there it covers every branch with one
+ * node and the rest of the tree stays as it was. A label node deeper down protects
+ * only its own branch, so it does not count as "already excluded".
  *
- *   noop     — the node is already there and already excluded.
- *   flip     — the node is there but included; one leaf swaps state.
- *   add      — the root already splits on this very label, so the exclusion is
- *              a new sibling leaf and nothing existing is touched.
- *   rebuild  — the root splits on something else. A subdivision splits on ONE
- *              dimension, so the label has to become the new first split and the
- *              whole present tree moves under its "everything else" branch.
+ *   noop     — the root splits on this label and the value is excluded.
+ *   flip     — the root splits on this label and the value is included (a leaf or
+ *              a whole branch): it becomes one excluded leaf.
+ *   add      — the root splits on this label without the value: one new sibling.
+ *   rebuild  — the root splits on something else: the label becomes the first split
+ *              and the present tree moves under its "everything else" branch. Deeper
+ *              splits on the same label are folded away on the way (Google forbids
+ *              the same dimension twice on one path, and under the new root they
+ *              would have nothing left to exclude).
  *
- * `rebuild` is the reason this function exists. It is the only operation in the
- * connector that removes criteria, and it is allowed here because in a PMax
- * listing tree removal is NOT destructive in the way it is elsewhere: the tree is
- * pure targeting configuration, the caller snapshots it first, and re-running the
- * same shape restores it. Spend history lives on the campaign and the products,
- * not on the filter nodes — what the rebuilt nodes lose is their per-node stats,
- * which the caller is told about.
- *
- * Pure: `tree` is what `getListingFilterTree` returns, so the whole decision is
- * testable offline. Returns a reason instead of throwing.
+ * Pure: `tree` is what `getListingFilterTree` returns (after
+ * `inferCatchAllDimensions`), so the whole decision is testable offline.
  *
  * @param {Array<object>} tree - every node of one asset group
  * @param {{index: number, value: string}} label - label slot (0-4) and its value
@@ -210,26 +206,6 @@ export function checkLabelExclusion(tree, label) {
     return no('Ta grupa plików nie ma drzewa filtrów (albo nie istnieje / jest usunięta). Nic nie zmieniono.');
   }
 
-  // The API reports the label slot as a ProductCustomAttributeIndex enum, where
-  // INDEX0 = 2 — the two low values are UNSPECIFIED and UNKNOWN. Reading it as
-  // the label number is the classic off-by-two here, so normalise in one place.
-  const slotOf = (node) => Number(node?.dimension?.index) - 2;
-  const isLabelNode = (node) => node?.dimension?.kind === 'product_custom_attribute';
-
-  const existing = tree.find((n) => isLabelNode(n) && slotOf(n) === index && n.dimension.value === value);
-  if (existing) {
-    if (existing.type === SUBDIVISION) {
-      return no(
-        `Węzeł custom_label_${index} = "${value}" jest PODZIAŁEM, nie liściem — pod nim wisi cała gałąź. ` +
-        'Connector nie wykluczy podziału. Zrób to ręcznie w panelu.'
-      );
-    }
-    if (existing.type === UNIT_EXCLUDED) {
-      return { ok: true, reason: null, mode: 'noop', node: existing, root: null };
-    }
-    return { ok: true, reason: null, mode: 'flip', node: existing, root: null };
-  }
-
   const root = tree.find((n) => !n.parentResourceName);
   if (!root) return no('W drzewie nie ma korzenia — odczyt jest niepełny. Nic nie zmieniono.');
   if (root.type !== SUBDIVISION) {
@@ -241,19 +217,32 @@ export function checkLabelExclusion(tree, label) {
   if (!tree.some((n) => n.type === UNIT_INCLUDED)) {
     return no('W tej grupie plików nie ma ani jednego włączonego węzła — nie ma czego chronić przed etykietą. Sprawdź grupę w panelu.');
   }
-
   const rootKids = tree.filter((n) => n.parentResourceName === root.resourceName);
   if (rootKids.length === 0) return no('Korzeń nie ma dzieci — odczyt jest niepełny. Nic nie zmieniono.');
 
-  // Every child of one subdivision splits on the same dimension, so the first
-  // child settles what the root splits on today.
-  const rootSplitsOnThisLabel = rootKids.every((n) => isLabelNode(n) && slotOf(n) === index);
-  if (!rootSplitsOnThisLabel) {
-    const kolizja = kolizjaWymiaru(tree, root, 'product_custom_attribute', `custom_label_${index}`,
-      (n) => slotOf(n) === index);
-    if (kolizja) return no(kolizja);
+  // The API reports the label slot as a ProductCustomAttributeIndex enum, where
+  // INDEX0 = 2 — the two low values are UNSPECIFIED and UNKNOWN. Reading it as
+  // the label number is the classic off-by-two here, so normalise in one place.
+  const tenSlot = (n) => n?.dimension?.kind === 'product_custom_attribute' && Number(n.dimension.index) - 2 === index;
+
+  if (rootKids.every(tenSlot)) {
+    const wezel = rootKids.find((n) => n.dimension.value === value);
+    if (!wezel) return { ok: true, reason: null, mode: 'add', node: null, root };
+    if (wezel.type === UNIT_EXCLUDED) return { ok: true, reason: null, mode: 'noop', node: wezel, root: null };
+    return { ok: true, reason: null, mode: 'flip', node: wezel, root: null };
   }
-  return { ok: true, reason: null, mode: rootSplitsOnThisLabel ? 'add' : 'rebuild', node: null, root };
+
+  // Zwinąć da się tylko podział, który rozróżnia „ta wartość / reszta". Inna jawna
+  // wartość tej etykiety głębiej niesie własne kierowanie, które by przepadło.
+  const inne = [...new Set(tree.filter((n) => tenSlot(n) && n.dimension.value != null && n.dimension.value !== value)
+    .map((n) => n.dimension.value))];
+  if (inne.length) {
+    return no(
+      `Drzewo dzieli się głębiej po custom_label_${index} także na inne wartości (${inne.join(', ')}). `
+      + 'Przeniesienie etykiety na pierwszy podział skasowałoby to kierowanie. Przebuduj drzewo w panelu.'
+    );
+  }
+  return { ok: true, reason: null, mode: 'rebuild', node: null, root };
 }
 
 /**
@@ -1230,6 +1219,40 @@ export function checkDemandGenChannels(cfg) {
     if (!DEMAND_GEN_CHANNELS.includes(c)) reasons.push(`Nieznany kanał "${c}". Dozwolone: ${DEMAND_GEN_CHANNELS.join(', ')}.`);
   }
   return { valid: reasons.length === 0, reasons };
+}
+
+/**
+ * Plan a channel change on an EXISTING Demand Gen ad group.
+ *
+ * The update mask is built from the keys sent, so a channel is switched off only
+ * when it is sent as `false`. That is why `channel_controls` always carries all
+ * six channels — sending just the wanted ones would leave the old ones on.
+ *
+ * @param {{mode: string, strategy?: string, channels?: string[]}} current - from getDemandGenChannelControls
+ * @param {{strategy?: string, channels?: string[]}} wanted - already validated by checkDemandGenChannels
+ * @returns {{changed: boolean, from: string, to: string, channelControls: object}}
+ */
+export function planDemandGenChannelChange(current, wanted) {
+  const strategy = String(wanted.strategy ?? '').trim().toUpperCase();
+  const channels = [...new Set((wanted.channels || []).map((c) => String(c ?? '').trim().toLowerCase()).filter(Boolean))];
+  const describe = (s, ch, mode) => (s ? `strategia ${s}` : (mode === 'default' ? 'domyślne kampanii' : `kanały: ${ch.join(', ') || '(żaden)'}`));
+
+  const from = describe(current.mode === 'strategy' ? current.strategy : '', current.channels || [], current.mode);
+  const to = describe(strategy, DEMAND_GEN_CHANNELS.filter((c) => channels.includes(c)), 'wanted');
+
+  let changed;
+  let channelControls;
+  if (strategy) {
+    changed = !(current.mode === 'strategy' && current.strategy === strategy);
+    channelControls = { channel_strategy: strategy };
+  } else {
+    const have = new Set(current.mode === 'channels' ? current.channels : []);
+    changed = current.mode !== 'channels' || DEMAND_GEN_CHANNELS.some((c) => have.has(c) !== channels.includes(c));
+    const selected = {};
+    for (const c of DEMAND_GEN_CHANNELS) selected[c] = channels.includes(c);
+    channelControls = { selected_channels: selected };
+  }
+  return { changed, from, to, channelControls };
 }
 
 /** Google Ads limits for a promotion asset ("promocja"). */

@@ -550,7 +550,7 @@ KILKA KONT GOOGLE
   więc przy --property=<alias> nie musisz o nim pamiętać.
 
 ZAKRES DAT
-  --days=30                ostatnie 30 PEŁNYCH dni (do wczoraj włącznie)
+  --days=30                ostatnie 30 dni do wczoraj włącznie (wczoraj GA4 jeszcze przetwarza)
   --from=2026-01-01 --to=2026-01-31
   --include-today          dopisz dzisiejszy, niepełny dzień
 

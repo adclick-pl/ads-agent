@@ -55,6 +55,7 @@ import {
   addPriceAssets,
   addYoutubeAssets,
   createDemandGenAdGroups,
+  updateDemandGenChannels,
   copyAdGroupTargeting,
   addDemandGenAds,
   addDemandGenProductAds,
@@ -387,12 +388,11 @@ Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
                           etykietą custom_label_0 = wyklucz).
                           --asset-group=<ID> --label-value="wyklucz"
                           [--label-index=0..4, domyślnie 0]
-                          Sam dobiera najmniejszą możliwą zmianę: nic (już jest),
-                          przełączenie liścia, dołożenie liścia obok istniejącego
-                          podziału po tej etykiecie — albo PRZEBUDOWĘ, gdy korzeń
-                          dzieli po czym innym: etykieta staje się pierwszym
-                          podziałem, a całe obecne drzewo zjeżdża pod jej gałąź
-                          „wszystko inne". Zakres kierowania zostaje ten sam.
+                          Wykluczenie ląduje zawsze na PIERWSZYM podziale: nic (już
+                          tam jest), przełączenie albo dołożenie liścia przy korzeniu —
+                          albo PRZEBUDOWĘ: etykieta staje się pierwszym podziałem, całe
+                          obecne drzewo zjeżdża pod jej gałąź „wszystko inne", a jej
+                          głębsze podziały znikają. Zakres kierowania zostaje ten sam.
                           Jedna z trzech akcji, które usuwają kryteria (obok
                           add-item-exclusion i sync-listing-types) — wolno im,
                           bo drzewo filtrów to sama konfiguracja kierowania, a przed
@@ -578,6 +578,14 @@ Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
                           Puste oba = grupa dziedziczy domyślne kampanii.
                           --input=mapa.csv (kolumny: campaign_id,ad_group_name[,status]
                           [,channel_strategy|channels]).
+  update-demand-gen-channels
+                          Zmienia kanały ISTNIEJĄCYCH grup Demand Gen (np. dołącza in-stream).
+                          Lista kanałów to komplet: kanał spoza listy zostaje WYŁĄCZONY.
+                          Odmawia, gdy grupa nie jest w kampanii DemGen; pomija grupy, które
+                          już mają te kanały. Pojedynczo/lista: --ad-group=<ID[,ID]>
+                          --channels="youtube_in_stream|youtube_in_feed" albo
+                          --channel-strategy=ALL_CHANNELS; wsadowo: --input=mapa.csv
+                          (kolumny: ad_group_id,channel_strategy|channels).
   copy-ad-group-targeting 3/5. Klonuje targetowanie z istniejącej grupy na nową. Zachowanie
                           zależy od trybu grupy DOCELOWEJ (pole "audienceGrouped" w wyniku):
                             • audience grouped (typowe dla DemGen) — całe targetowanie, RAZEM
@@ -1747,6 +1755,31 @@ async function main() {
         label: `${r.ad_group_name || r.ad_group || r.name} (wiersz ${i + 2})`,
       }));
       const result = await createDemandGenAdGroups(customerId, items, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'update-demand-gen-channels') {
+      // "a|b" or "a,b" — same cell format as create-demand-gen-ad-groups.
+      const splitChannels = (v) => String(v || '').split(/[|;,]/).map((c) => c.trim()).filter(Boolean);
+      let items = [];
+      if (args.input) {
+        const rows = parseCsv(readFileSync(path.resolve(args.input), 'utf8'));
+        if (rows.length === 0) throw new Error(`Plik --input jest pusty lub bez wierszy danych: ${args.input}`);
+        items = rows.map((r, i) => ({
+          adGroupId: r.ad_group_id || r.ad_group || r.id,
+          strategy: r.channel_strategy || '',
+          channels: splitChannels(r.channels),
+          label: `grupa ${r.ad_group_id || r.ad_group || r.id} (wiersz ${i + 2})`,
+        }));
+      } else if (args['ad-group']) {
+        // A comma separates ad groups here, so channels take "|" only.
+        const channels = String(args.channels || '').split('|').map((c) => c.trim()).filter(Boolean);
+        items = String(args['ad-group']).split(',').map((id) => ({ adGroupId: id.trim(), strategy: args['channel-strategy'] || '', channels }));
+      }
+      if (items.length === 0) {
+        throw new Error('update-demand-gen-channels wymaga --ad-group=<ID[,ID]> z --channels="kanał|kanał" albo --channel-strategy=<...>, albo --input=mapa.csv (kolumny: ad_group_id,channel_strategy|channels)');
+      }
+      const result = await updateDemandGenChannels(customerId, items, dryRun, loginCustomerId);
       console.log(JSON.stringify(result, null, 2));
     }
 

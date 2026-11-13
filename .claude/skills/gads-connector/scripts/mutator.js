@@ -1,8 +1,8 @@
 import { writeFileSync } from 'node:fs';
 import { enums } from 'google-ads-api';
 import { getCustomer, unpackError } from './client.js';
-import { getKeywordsByCriteria, getCampaignBasics, getCampaignBiddingInfo, getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts, getExistingStructuredSnippets, getExistingCallAssets, callAssetIdentity, getExistingPriceAssets, getExistingPromotions, promotionIdentity, getAdGroupAdsByAdIds, getAdGroupsByIds, getExistingYoutubeAssets, getExistingDemandGenAds, getExistingDemandGenProductAds, getExistingListingGroups, getAssetGroupsByIds, getListingFilterTree, LISTING_FILTER_TYPE_NAME, getAdGroupTargetingCriteria, getCampaignChannelTypes, getCallToActionAssets, getConversionActions, getConversionGoals, getExistingCampaigns, getBudgetsByName, COPYABLE_CRITERION_TYPES } from './queries.js';
-import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkCallAsset, parseCallSchedule, normalizeCallReportingState, checkPriceOfferings, checkPromotion, checkDemandGenAdTexts, checkDemandGenChannels, DEMAND_GEN_LIMITS, adTextLength, checkConversionAction, checkCampaignSpec, checkPmaxSpec, checkListingFilterFlip, checkLabelExclusion, checkItemExclusion, planCustomAudienceUrls, planNegativeRemoval, planAudienceSegmentAdd, planAudienceSegmentRemove, planCampaignLanguages, ASSET_AUTOMATION_ALIASES, PMAX_ASSET_AUTOMATION, resolveAssetAutomationTypes, planAssetAutomation, checkCampaignTextAsset, CAMPAIGN_TEXT_ASSET_LIMITS, isIsoDate } from './safety.js';
+import { getKeywordsByCriteria, getCampaignBasics, getCampaignBiddingInfo, getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts, getExistingStructuredSnippets, getExistingCallAssets, callAssetIdentity, getExistingPriceAssets, getExistingPromotions, promotionIdentity, getAdGroupAdsByAdIds, getAdGroupsByIds, getExistingYoutubeAssets, getExistingDemandGenAds, getExistingDemandGenProductAds, getExistingListingGroups, getAssetGroupsByIds, getListingFilterTree, LISTING_FILTER_TYPE_NAME, getAdGroupTargetingCriteria, getCampaignChannelTypes, getDemandGenChannelControls, getCallToActionAssets, getConversionActions, getConversionGoals, getExistingCampaigns, getBudgetsByName, COPYABLE_CRITERION_TYPES } from './queries.js';
+import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkCallAsset, parseCallSchedule, normalizeCallReportingState, checkPriceOfferings, checkPromotion, checkDemandGenAdTexts, checkDemandGenChannels, planDemandGenChannelChange, DEMAND_GEN_LIMITS, adTextLength, checkConversionAction, checkCampaignSpec, checkPmaxSpec, checkListingFilterFlip, checkLabelExclusion, checkItemExclusion, planCustomAudienceUrls, planNegativeRemoval, planAudienceSegmentAdd, planAudienceSegmentRemove, planCampaignLanguages, ASSET_AUTOMATION_ALIASES, PMAX_ASSET_AUTOMATION, resolveAssetAutomationTypes, planAssetAutomation, checkCampaignTextAsset, CAMPAIGN_TEXT_ASSET_LIMITS, isIsoDate } from './safety.js';
 
 /**
  * Entity metadata for Final URL updates. Maps our short entity key to the
@@ -3733,6 +3733,7 @@ const PRICE_TYPE_ENUM = { BRANDS: 2, EVENTS: 3, LOCATIONS: 4, NEIGHBORHOODS: 5, 
  * that dies half-way is fixed by re-running it, not by unpicking what landed.
  *   1. add-youtube-assets           film → asset on the account
  *   2. create-demand-gen-ad-groups  ad group + channel settings
+ *      update-demand-gen-channels   change channels of an existing group
  *   3. copy-ad-group-targeting      clone audiences/demographics from a sibling
  *   4. add-demand-gen-ads           the video responsive ad itself
  *   5. add-listing-groups           the product feed shown next to the ad
@@ -4013,6 +4014,110 @@ export async function createDemandGenAdGroups(customerId, items, dryRun = false,
     return { success: true, dryRun: false, entity: 'ad_group', created: toCreate.length, skipped: skipped.length, chunks: responses.length, plan, createdGroups, resourceNames: mutatedResourceNames(responses) };
   } catch (error) {
     throw new Error(`Nie udało się utworzyć grup Demand Gen: ${unpackError(error)}`);
+  }
+}
+
+/**
+ * Change the channels of EXISTING Demand Gen ad groups (e.g. switch on
+ * YouTube in-stream next to in-feed).
+ *
+ * Same oneof as on create: `channel_strategy` OR `channels`, never both. The
+ * requested channel list is the complete new set — `planDemandGenChannelChange`
+ * sends every channel as true/false, so channels not listed are switched off.
+ *
+ * Refuses groups outside a Demand Gen campaign. Groups whose channels already
+ * match are skipped, so a re-run is a no-op.
+ *
+ * @param {string} customerId
+ * @param {Array<{adGroupId: string|number, strategy?: string, channels?: string[], label?: string}>} items
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>}
+ */
+export async function updateDemandGenChannels(customerId, items, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  if (!Array.isArray(items) || items.length === 0) throw new Error('Brak grup do zmiany kanałów (pusta lista).');
+
+  const problems = [];
+  const rows = items.map((it, i) => {
+    const adGroupId = String(it.adGroupId ?? '').replace(/[^0-9]/g, '');
+    const ref = it.label || (adGroupId ? `grupa ${adGroupId}` : `wiersz ${i + 1}`);
+    if (!adGroupId) problems.push(`${ref}: brak ad_group_id.`);
+    const strategy = String(it.strategy ?? '').trim().toUpperCase();
+    const channels = (it.channels || []).map((c) => String(c ?? '').trim().toLowerCase()).filter(Boolean);
+    if (!strategy && channels.length === 0) problems.push(`${ref}: podaj channel_strategy albo channels.`);
+    const chCheck = checkDemandGenChannels({ strategy, channels });
+    if (!chCheck.valid) chCheck.reasons.forEach((r) => problems.push(`${ref}: ${r}`));
+    return { adGroupId, strategy, channels, label: ref };
+  });
+  const seenInFile = new Set();
+  for (const r of rows) {
+    if (r.adGroupId && seenInFile.has(r.adGroupId)) problems.push(`${r.label}: grupa powtarza się w pliku wejściowym.`);
+    seenInFile.add(r.adGroupId);
+  }
+  if (problems.length) {
+    throw new Error(`🛑 Zablokowano — ${problems.length} problem(ów) walidacji, nic nie zapisano:\n${problems.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  // Guardrail: the group exists and sits in a Demand Gen campaign.
+  const current = await getDemandGenChannelControls(cleanCustomerId, rows.map((r) => r.adGroupId), { loginCustomerId });
+  const byId = new Map(current.map((g) => [g.adGroupId, g]));
+  const wrongTarget = [];
+  for (const r of rows) {
+    const g = byId.get(r.adGroupId);
+    if (!g) wrongTarget.push(`${r.label}: grupa ${r.adGroupId} nie istnieje, jest usunięta albo niedostępna.`);
+    else if (g.channelType !== DEMAND_GEN_CHANNEL_TYPE) {
+      wrongTarget.push(`${r.label}: grupa "${g.name}" leży w kampanii "${g.campaignName}" (${g.campaignId}), która nie jest Demand Gen (advertising_channel_type=${g.channelType}).`);
+    }
+  }
+  if (wrongTarget.length) {
+    throw new Error(`🛑 Zablokowano — nieprawidłowe grupy docelowe, nic nie zapisano:\n${wrongTarget.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  const toUpdate = [];
+  const skipped = [];
+  for (const r of rows) {
+    const g = byId.get(r.adGroupId);
+    const change = planDemandGenChannelChange(g, r);
+    const entry = { adGroupId: r.adGroupId, name: g.name, campaign: g.campaignName, from: change.from, to: change.to };
+    if (change.changed) toUpdate.push({ ...entry, channelControls: change.channelControls });
+    else skipped.push({ ...entry, reason: 'grupa ma już te kanały' });
+  }
+  const plan = { toUpdate: toUpdate.map(({ channelControls, ...e }) => e), skipped };
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Kanały grup Demand Gen: do zmiany ${toUpdate.length}, pominięte ${skipped.length}...`);
+  if (!dryRun && toUpdate.length === 0) return { success: true, dryRun: false, entity: 'ad_group', updated: 0, skipped: skipped.length, plan, response: null };
+
+  try {
+    const customer = getCustomer(cleanCustomerId, loginCustomerId);
+    const mutations = toUpdate.map((u) => ({
+      entity: 'AdGroup',
+      operation: 'update',
+      resource: {
+        resource_name: `customers/${cleanCustomerId}/adGroups/${u.adGroupId}`,
+        demand_gen_ad_group_settings: { channel_controls: u.channelControls },
+      },
+    }));
+
+    if (dryRun) {
+      const check = mutations.length ? await validateWithApi(customer, chunk(mutations)) : { ok: true };
+      if (!check.ok) console.log(`[Mutator] ⚠️  Google odrzucił zmianę kanałów w walidacji: ${check.error}`);
+      return { success: check.ok, dryRun: true, entity: 'ad_group', toUpdate: toUpdate.length, skipped: skipped.length, plan, apiValidated: check.ok, apiError: check.error };
+    }
+
+    const responses = [];
+    for (const part of chunk(mutations)) responses.push(await customer.mutateResources(part));
+
+    // Read back: a change the API accepted but did not apply must not pass as done.
+    const after = await getDemandGenChannelControls(cleanCustomerId, toUpdate.map((u) => u.adGroupId), { loginCustomerId });
+    const afterById = new Map(after.map((g) => [g.adGroupId, g]));
+    const notApplied = toUpdate
+      .filter((u) => planDemandGenChannelChange(afterById.get(u.adGroupId) || { mode: 'default' }, rows.find((r) => r.adGroupId === u.adGroupId)).changed)
+      .map((u) => ({ adGroupId: u.adGroupId, name: u.name, wanted: u.to }));
+
+    return { success: notApplied.length === 0, dryRun: false, entity: 'ad_group', updated: toUpdate.length - notApplied.length, skipped: skipped.length, plan, notApplied, resourceNames: mutatedResourceNames(responses) };
+  } catch (error) {
+    throw new Error(`Nie udało się zmienić kanałów grup Demand Gen: ${unpackError(error)}`);
   }
 }
 
@@ -5624,6 +5729,95 @@ export function inferCatchAllDimensions(tree) {
 
 
 /**
+ * Drzewo bez podziałów po wymiarze, który przebudowa stawia na korzeniu.
+ *
+ * Pod nowym korzeniem produkt z wykluczaną wartością już tu nie dochodzi, więc taki
+ * podział nic nie rozróżnia — a Google i tak nie pozwala powtórzyć wymiaru na jednej
+ * ścieżce. Podział znika, a jego rodzic przejmuje to, co robiła gałąź „pozostałe":
+ * jej typ (włączony / wykluczony / dalszy podział) i jej dzieci.
+ *
+ * Czysta funkcja na kopii; oryginalne węzły zostają nietknięte.
+ */
+export function bezPodzialowPo(tree, jestWymiarem) {
+  let wynik = tree;
+  for (;;) {
+    const rodzic = wynik.find((p) => wynik.some((k) => k.parentResourceName === p.resourceName && jestWymiarem(k)));
+    if (!rodzic) return wynik;
+    const dzieci = wynik.filter((k) => k.parentResourceName === rodzic.resourceName);
+    const reszta = dzieci.find((k) => k.dimension?.value === null || k.dimension?.value === undefined);
+    if (!reszta) {
+      throw new Error(`🛑 Podział pod węzłem ${rodzic.id} nie ma gałęzi „pozostałe" — odczyt drzewa jest niepełny. Nic nie zmieniono.`);
+    }
+    const out = new Set([reszta.resourceName]);
+    const kolejka = dzieci.filter((k) => k !== reszta);
+    while (kolejka.length) {
+      const x = kolejka.shift();
+      out.add(x.resourceName);
+      kolejka.push(...wynik.filter((k) => k.parentResourceName === x.resourceName));
+    }
+    wynik = wynik.filter((n) => !out.has(n.resourceName)).map((n) => {
+      if (n.resourceName === rodzic.resourceName) return { ...n, type: reszta.type };
+      if (n.parentResourceName === reszta.resourceName) return { ...n, parentResourceName: rodzic.resourceName };
+      return n;
+    });
+  }
+}
+
+/**
+ * Najprostsze drzewo o tym samym zakresie kierowania.
+ *
+ * Gałąź z jawną wartością, która robi dokładnie to samo co jej siostra „pozostałe"
+ * (ten sam typ i to samo poddrzewo), niczego nie rozróżnia — produkt trafiłby
+ * w ten sam wynik bez niej. Taka gałąź znika. Gdy w podziale zostaje sama gałąź
+ * „pozostałe", podział jest zwijany do rodzica jak w `bezPodzialowPo`.
+ *
+ * Czysta funkcja na kopii; oryginalne węzły zostają nietknięte.
+ */
+export function uproscDrzewo(tree) {
+  let wynik = tree;
+  const dzieciOf = (rn) => wynik.filter((k) => k.parentResourceName === rn);
+  const bezWartosci = (n) => n.dimension?.value === null || n.dimension?.value === undefined;
+  const podpis = (n) => {
+    if (n.type !== 2) return String(n.type);
+    const d = dzieciOf(n.resourceName);
+    const kind = d[0]?.dimension?.kind ?? '';
+    const czesci = d.map((k) => `${bezWartosci(k) ? '*' : k.dimension.value}:${podpis(k)}`).sort();
+    return `${kind}{${czesci.join(',')}}`;
+  };
+  const poddrzewo = (n) => {
+    const out = [n];
+    for (let i = 0; i < out.length; i++) out.push(...dzieciOf(out[i].resourceName));
+    return out.map((x) => x.resourceName);
+  };
+  for (;;) {
+    let zmiana = false;
+    for (const p of wynik.filter((n) => n.type === 2)) {
+      const d = dzieciOf(p.resourceName);
+      const reszta = d.find(bezWartosci);
+      if (!reszta) continue;
+      const wzor = podpis(reszta);
+      const zbedne = d.filter((k) => k !== reszta && podpis(k) === wzor);
+      if (zbedne.length) {
+        const out = new Set(zbedne.flatMap(poddrzewo));
+        wynik = wynik.filter((n) => !out.has(n.resourceName));
+        zmiana = true;
+        break;
+      }
+      if (d.length === 1 && p.parentResourceName) {
+        wynik = wynik.filter((n) => n.resourceName !== reszta.resourceName).map((n) => {
+          if (n.resourceName === p.resourceName) return { ...n, type: reszta.type };
+          if (n.parentResourceName === reszta.resourceName) return { ...n, parentResourceName: p.resourceName };
+          return n;
+        });
+        zmiana = true;
+        break;
+      }
+    }
+    if (!zmiana) return wynik;
+  }
+}
+
+/**
  * Wspólny mechanizm PRZEBUDOWY drzewa filtrów: nowy pierwszy podział z wykluczeniami
  * obok gałęzi „wszystko inne", pod którą ląduje całe dotychczasowe drzewo.
  *
@@ -5634,10 +5828,13 @@ export function inferCatchAllDimensions(tree) {
  * rozwiązują się tylko w obrębie jednego żądania, a częściowa przebudowa zostawiłaby grupę
  * bez drzewa).
  */
-function planujPrzebudowe(tree, root, { assetGroup, entity, temp, src, podzialBezWartosci, wykluczenia }) {
+function planujPrzebudowe(tree, root, { assetGroup, entity, temp, src, podzialBezWartosci, wykluczenia, docelowe = tree }) {
   const create = (resource) => ({ entity, operation: 'create', resource });
   const remove = (resourceName) => ({ entity, operation: 'remove', resource: resourceName });
   const childrenOf = (rn) => tree.filter((n) => n.parentResourceName === rn);
+  // Usuwamy stare drzewo w całości, odtwarzamy `docelowe` — to samo drzewo albo jego
+  // uproszczona wersja (np. bez podziałów po etykiecie, która idzie na korzeń).
+  const childrenOfDocelowe = (rn) => docelowe.filter((n) => n.parentResourceName === rn);
 
   // Usuwamy od najgłębszych: kasowanie podziału przed jego dziećmi bywa odrzucane,
   // a nawet gdy przechodzi, plan przestaje być czytelny.
@@ -5682,7 +5879,7 @@ function planujPrzebudowe(tree, root, { assetGroup, entity, temp, src, podzialBe
 
   // Odtworzenie w kolejności BFS, żeby rodzic zawsze powstawał przed dzieckiem.
   const nowyRn = new Map([[root.resourceName, elseRn]]);
-  const kolejka = [...childrenOf(root.resourceName)];
+  const kolejka = [...childrenOfDocelowe(root.resourceName)];
   while (kolejka.length) {
     const n = kolejka.shift();
     const caseValue = rebuildListingCaseValue(n.dimension);
@@ -5702,7 +5899,7 @@ function planujPrzebudowe(tree, root, { assetGroup, entity, temp, src, podzialBe
       parent_listing_group_filter: nowyRn.get(n.parentResourceName),
       case_value: caseValue,
     }));
-    kolejka.push(...childrenOf(n.resourceName));
+    kolejka.push(...childrenOfDocelowe(n.resourceName));
   }
 
   const mutations = [...removes, ...creates];
@@ -5748,10 +5945,20 @@ export function buildLabelExclusionMutations(tree, plan, opts) {
   const remove = (resourceName) => ({ entity, operation: 'remove', resource: resourceName });
 
   if (plan.mode === 'flip') {
+    // Włączony węzeł tej wartości (liść albo cała gałąź) staje się jednym wykluczonym
+    // liściem. Usunięcia od najgłębszych, potem jedno utworzenie.
     const node = plan.node;
+    const galaz = [];
+    const kolejka = [node];
+    while (kolejka.length) {
+      const x = kolejka.shift();
+      galaz.push(x);
+      kolejka.push(...tree.filter((n) => n.parentResourceName === x.resourceName));
+    }
+    const removes = galaz.reverse().map((x) => remove(x.resourceName));
     return {
       mutations: [
-        remove(node.resourceName),
+        ...removes,
         create({
           asset_group: assetGroup,
           type: 4,
@@ -5760,7 +5967,7 @@ export function buildLabelExclusionMutations(tree, plan, opts) {
           case_value: labelCase(true),
         }),
       ],
-      removed: 1,
+      removed: removes.length,
       created: 1,
     };
   }
@@ -5784,10 +5991,13 @@ export function buildLabelExclusionMutations(tree, plan, opts) {
   }
 
   // ── rebuild ───────────────────────────────────────────────────────────────
+  const tenSlot = (n) => n?.dimension?.kind === 'product_custom_attribute'
+    && Number(n.dimension.index) === index + CUSTOM_LABEL_ENUM_OFFSET;
   return planujPrzebudowe(tree, root, {
     assetGroup, entity, temp, src,
     podzialBezWartosci: labelCase(false),
     wykluczenia: [labelCase(true)],
+    docelowe: uproscDrzewo(bezPodzialowPo(tree, tenSlot)),
   });
 }
 

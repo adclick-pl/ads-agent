@@ -232,9 +232,12 @@ Wykluczenie spamu z raportu: `--filter="sessionSource!~semalt;sessionSource!~but
   równości — `--from 2026-01-01` ze spacją też jest błędem, a nie cichym powrotem do
   domyślnego okresu. Celowo, bo zignorowana opcja daje dane za inny okres, wyglądające
   zupełnie poprawnie.
-- **Domyślnie okres kończy się na wczoraj.** `--days=30` to 30 **pełnych** dni. Dzisiejszy,
-  niepełny dzień dopisuje dopiero `--include-today`. To celowe — półdzień cicho psuje
-  każde porównanie okresów.
+- **Domyślnie okres kończy się na wczoraj, ale wczoraj nie jest jeszcze gotowe.** GA4
+  przetwarza dzień do 24–48 h. W tym czasie ruch z Google Ads (gclid) wpada do
+  `(direct) / (none)`, a w danych pojawia się wiersz `(data not available)`. Spadek
+  google/cpc i skok direct w ostatnim dniu okresu to opóźnienie GA4, nie problem
+  z tagowaniem. Ten dzień sprawdź jutro albo zakończ okres wcześniej przez `--to=`.
+  Dzisiejszy, niepełny dzień dopisuje dopiero `--include-today`.
 - **`keyEvents`, nie `conversions`.** Google przemianował metrykę. Jeśli usługa zwróci 400
   na `keyEvents`, sprawdź `--action=metadata --property=ID --only=metrics`.
 - **Próg danych.** Przy włączonych sygnałach Google GA4 ukrywa wiersze o małej liczbie

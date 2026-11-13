@@ -287,14 +287,27 @@ shape) and every asset group is supposed to exclude it. An asset group that is
 missing that node quietly serves everything the rest of the account already cut,
 and it shows up months later in the spend, not in any alert.
 
-The action picks the smallest change that works and says which one it picked:
+The exclusion belongs on the FIRST split: there one node covers every branch and
+the rest of the tree stays as it was. A label node deeper down protects only its
+own branch, so it never counts as "already excluded". The action picks the
+smallest change that gets the label onto the root and says which one it picked:
 
 | mode | what happens |
 |---|---|
-| `noop` | the label is already excluded — nothing is sent |
-| `flip` | the node exists but is included: one leaf is swapped |
+| `noop` | the root splits on this label and the value is excluded — nothing is sent |
+| `flip` | the root splits on this label and the value is included: that leaf (or branch) becomes one excluded leaf |
 | `add` | the root already splits on this label: one new sibling leaf, nothing existing is touched |
 | `rebuild` | the root splits on something else — see below |
+
+Deeper splits on the same label are folded away during a rebuild: under the new
+root they have nothing left to exclude, and Google forbids the same dimension twice
+on one path. The parent of such a split takes over what its "everything else"
+branch did. Only a deeper split that also carries OTHER values of the label is
+refused, because folding it would delete that targeting.
+
+The rebuilt tree is also simplified: a branch that does exactly what its
+"everything else" sibling does (same type, same subtree) is dropped, because it
+distinguishes nothing. Targeting stays the same, the tree gets as small as it can.
 
 **Why `rebuild` removes criteria, when the connector otherwise never does.**
 A subdivision splits on exactly ONE dimension, so a label that has to become the
@@ -843,6 +856,21 @@ node scripts/cli.js --action=add-listing-groups --account=zielonyogrod --input=p
 (`youtube_shorts`, `youtube_in_feed`, `youtube_in_stream`, `discover`, `gmail`,
 `display`) — never both; the connector blocks the batch if you do. Leave both
 empty and the group inherits the campaign default.
+
+**Changing channels of an existing group** is `update-demand-gen-channels` — the
+create action skips a group that already exists, so it never touches channels.
+
+```bash
+node scripts/cli.js --action=update-demand-gen-channels --account=zielonyogrod \
+  --ad-group=111222333,111222444 --channels="youtube_in_stream|youtube_in_feed"
+```
+
+The channel list is the **complete** new set: every channel not on it is
+switched off (the update sends all six as true/false). The dry run shows each
+group's channels **before → after** and is validated by Google; groups that
+already match are skipped. `--channel-strategy=ALL_CHANNELS` instead of
+`--channels` switches the group to a strategy. Batch form: `--input=mapa.csv`
+with `ad_group_id,channel_strategy|channels`.
 
 **`ad_group.type` is deliberately not set.** `AdGroupType` has no Demand Gen
 member — the campaign's channel type defines the group. The connector refuses a
