@@ -1610,6 +1610,70 @@ export async function addAccountNegativeYouTubeChannels(customerId, channelIds, 
 }
 
 /**
+ * Account-level exclusions of single MOBILE APPS (CustomerNegativeCriterion).
+ *
+ * app_id in Google's "{platform}-{id}" form (1 = App Store, 2 = Google Play), e.g.
+ * "2-com.example.app" or "1-123456789". Also accepted: the "mobileapp::" prefix that
+ * placement reports show, and Google Play / App Store URLs.
+ *
+ * The "All Apps" category (69500) cannot be created this way — Google rejects it at
+ * account level with INVALID_MOBILE_APP_CATEGORY. Account level covers every campaign,
+ * PMax and Demand Gen included. Idempotent.
+ */
+function parseMobileAppId(input) {
+  let s = String(input).trim();
+  if (!s) return null;
+  s = s.replace(/^mobileapp::/i, '');
+  const play = s.match(/play\.google\.com\/store\/apps\/details\?(?:.*&)?id=([\w.]+)/i);
+  if (play) return `2-${play[1]}`;
+  const apple = s.match(/apps\.apple\.com\/.*\/id(\d+)/i);
+  if (apple) return `1-${apple[1]}`;
+  if (/^[12]-[\w.]+$/.test(s)) return s;
+  throw new Error(`Unrecognised app id "${input}". Use "2-<android.package>" (Google Play), "1-<numeric id>" (App Store) or a store URL.`);
+}
+
+export async function addAccountNegativeMobileApps(customerId, appIds, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  const parsed = [...new Set(appIds.map(parseMobileAppId).filter(Boolean))];
+  if (parsed.length === 0) throw new Error('No apps given — use --apps="2-com.example.app".');
+
+  const customer = getCustomer(cleanCustomerId, loginCustomerId);
+
+  const existing = new Set();
+  try {
+    const rows = await customer.query(`
+      SELECT customer_negative_criterion.mobile_application.app_id
+      FROM customer_negative_criterion
+      WHERE customer_negative_criterion.type = 'MOBILE_APPLICATION'
+    `);
+    for (const r of rows) {
+      const id = r?.customer_negative_criterion?.mobile_application?.app_id;
+      if (id) existing.add(String(id));
+    }
+  } catch {
+    // An account with no exclusions yet may not expose the resource — treat as empty.
+  }
+
+  const toAdd = parsed.filter((a) => !existing.has(a));
+  const skipped = parsed.filter((a) => existing.has(a));
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Excluding ${toAdd.length} mobile app(s) on Account level${skipped.length ? ` (${skipped.length} already excluded)` : ''}...`);
+
+  if (dryRun || toAdd.length === 0) return { success: true, dryRun, added: toAdd, skipped };
+
+  try {
+    const response = await customer.mutateResources(toAdd.map((appId) => ({
+      entity: 'CustomerNegativeCriterion',
+      operation: 'create',
+      resource: { mobile_application: { app_id: appId } },
+    })));
+    return { success: true, dryRun: false, added: toAdd, skipped, response };
+  } catch (error) {
+    throw new Error(`Failed to add account negative mobile apps: ${unpackError(error)}`);
+  }
+}
+
+/**
  * Create sitelink assets and link them at customer or campaign level, in ONE
  * atomic `mutateResources` (temp resource IDs). Assets are de-duplicated by
  * (link_text + descriptions + final URL), so a set shared by several campaigns

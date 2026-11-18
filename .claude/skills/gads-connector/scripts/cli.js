@@ -34,6 +34,7 @@ import {
   removeCampaignNegativeKeywords,
   addAccountNegativePlacements,
   addAccountNegativeYouTubeChannels,
+  addAccountNegativeMobileApps,
   updateFinalUrls,
   clearKeywordFinalUrls,
   buildFinalUrlResourceName,
@@ -445,6 +446,8 @@ Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
                           Rusza tylko wykluczenia kampanii o tym samym tekście I typie dopasowania.
   add-negative-placements Wykluczenia miejsc docelowych — domeny (--domains).
   add-negative-youtube-channels  Wykluczenia kanałów YouTube na poziomie konta (--channels).
+  add-negative-mobile-apps  Wykluczenia pojedynczych aplikacji mobilnych na poziomie konta
+                          (--apps="2-com.example.app,1-123456789", też link do sklepu).
   update-custom-audience  Dopisuje/usuwa URL-e w niestandardowym segmencie odbiorców
                           (--audience=<custom_audience.id> --add-urls="a,b" --remove-urls="c").
                           URL-e z przecinkiem w ścieżce → --add-urls-file=plik (1 URL na linię).
@@ -1357,6 +1360,13 @@ async function main() {
       if (!channelsString) throw new Error('add-negative-youtube-channels requires --channels="UCxxx,UCyyy" (channel ids or full channel URLs)');
       const channels = channelsString.split(',').map((c) => c.trim()).filter(Boolean);
       const result = await addAccountNegativeYouTubeChannels(customerId, channels, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'add-negative-mobile-apps') {
+      const apps = String(args.apps || '').split(',').map((a) => a.trim()).filter(Boolean);
+      if (!apps.length) throw new Error('add-negative-mobile-apps requires --apps="2-com.example.app,1-123456789"');
+      const result = await addAccountNegativeMobileApps(customerId, apps, dryRun, loginCustomerId);
       console.log(JSON.stringify(result, null, 2));
     }
 

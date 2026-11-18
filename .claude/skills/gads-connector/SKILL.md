@@ -334,6 +334,12 @@ node scripts/cli.js --action=add-negative-placements --customer=1234567890 --dom
 # "protected" while the spending ones stay uncovered.
 node scripts/cli.js --action=add-negative-youtube-channels --customer=1234567890 --channels="UCaaaaaaaaaaaaaaaaaaaaaa,UCbbbbbbbbbbbbbbbbbbbbbb"
 
+# Add account-level MOBILE APP exclusions — single apps by app id ("2-" Google Play,
+# "1-" App Store; the "mobileapp::" prefix from placement reports and store URLs work too).
+# The "All Apps" category (69500) cannot be added at account level — Google rejects it
+# (INVALID_MOBILE_APP_CATEGORY); an app that slips past the excluded categories goes here.
+node scripts/cli.js --action=add-negative-mobile-apps --customer=1234567890 --apps="2-com.example.app"
+
 # Add / remove URLs in a custom audience (custom segment), e.g. a competitor list
 # used as a PMax audience signal. Rewrites the full member list; keywords stay.
 node scripts/cli.js --action=update-custom-audience --customer=1234567890 --audience=555666777 --add-urls="konkurent.example/drzwi-zewnetrzne" --remove-urls="tani-sklep.example"

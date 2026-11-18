@@ -7,6 +7,18 @@ restarcie sesji. Szczegóły każdego skilla: `.claude/skills/<skill>/SKILL.md`.
 
 ---
 
+## 2026-11-17
+
+### Nowe
+
+- **Wykluczanie aplikacji mobilnych na poziomie konta** (`add-negative-mobile-apps` w konektorze).
+  Gdy przez wykluczone kategorie aplikacji przecieka konkretna aplikacja, wykluczysz ją jednym
+  poleceniem — po ID z raportu miejsc docelowych albo po linku do Google Play / App Store.
+  Działa na wszystkie kampanie konta, także Performance Max i Demand Gen. Powtórzenie niczego
+  nie duplikuje. Kategorii „All Apps” nie da się dodać na poziomie konta — Google jej nie przyjmuje.
+
+---
+
 ## 2026-11-13
 
 ### Nowe
