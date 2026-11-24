@@ -249,6 +249,12 @@ użytkownikowi: ile haseł pewnych, ile do sprawdzenia, jaki koszt z 30 dni tego
 i **w których kampaniach** siedzi najwięcej do odzyskania. Przypomnij, że wykluczenia
 dodaje sam — skrypt niczego nie zmienia na koncie.
 
+**Dopasowanie wykluczenia dobierasz do hasła.** Domyślnie ścisłe `[hasło]`. Do wyrażenia —
+gdy hasło to marka konkurencji albo temat zupełnie spoza oferty. Wtedy skracasz je do rdzenia,
+który niesie znaczenie (`"nazwakonkurenta"`, a nie `"nazwakonkurenta pl"`), żeby złapać też
+warianty. Nie dajesz wyrażenia, jeśli rdzeń mógłby wyciąć trafione zapytania. W propozycji
+przy każdym haśle podajesz dopasowanie — lista do skopiowania w raporcie zostaje ścisła.
+
 ---
 
 ## Co jest w raporcie
@@ -287,6 +293,10 @@ konta).
 | **Wydajność roczna** (osobny sygnał) | 0 konwersji przez rok: **pewny** od 3× rocznego kosztu konwersji kampanii, **do sprawdzenia** od 2×. Konwersje są, ale wynik roczny mocno pod celem → **do sprawdzenia** | Łapie hasła, których 30 dni nie zgłosi (za mało kliknięć), a które systematycznie przepalają budżet. Między 2× a 3× decyduje człowiek — przy niskim CPA taki koszt uzbiera się w rok z samej wariancji |
 | Dopasowanie semantyczne do słów kluczowych grupy | zawsze **do sprawdzenia** | Próg podobieństwa nie zna specyfiki tematu |
 | Ocena AI (warstwa 3b) | **pewny** od `pewnosc ≥ 80`, niżej do sprawdzenia | Pewność deklarowana przy zapisie oceny |
+
+**Hasła już wykluczone na koncie** (negatyw kampanii, lista wspólna podpięta do kampanii
+albo lista konta) skrypt pomija sam — nie trafiają ani do list, ani do oceny AI; w
+podsumowaniu raportu zostaje po nich licznik. Nie sprawdzaj tego ręcznie.
 
 Hasło trafia do „pewnych", gdy ma **choć jeden pewny sygnał** — chyba że jest słowem
 kluczowym kampanii (patrz „Ochrona przez słowo kluczowe" niżej). Trzy niepewne sygnały to

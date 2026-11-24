@@ -7,6 +7,23 @@ restarcie sesji. Szczegóły każdego skilla: `.claude/skills/<skill>/SKILL.md`.
 
 ---
 
+## 2026-11-23
+
+### Poprawki
+
+- **Dopasowanie wykluczenia dobierane do hasła** (`gads-wykluczenia-hasel`). Domyślnie
+  ścisłe; marki konkurencji i tematy zupełnie spoza oferty skill proponuje do wyrażenia,
+  skrócone do rdzenia nazwy — wtedy jedno wykluczenie łapie też warianty zapytania.
+  Przy każdym proponowanym haśle widać, w jakim dopasowaniu go dodać.
+
+- **Raport wykluczeń haseł pomija hasła już wykluczone na koncie** (`gads-wykluczenia-hasel`).
+  Skrypt sam sprawdza wykluczenia kampanii, listy wykluczeń podpięte do kampanii i listy
+  wykluczeń całego konta. Hasło, które już blokujesz, nie wraca jako kandydat ani do oceny —
+  jego koszt z 30 dni zwykle pochodzi sprzed dodania wykluczenia. W podsumowaniu raportu
+  widać, ile takich haseł pominięto.
+
+---
+
 ## 2026-11-17
 
 ### Nowe

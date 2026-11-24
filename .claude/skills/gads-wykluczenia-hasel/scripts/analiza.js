@@ -242,6 +242,38 @@ export function keywordsByCampaign(adGroupKeywords) {
     return byCamp;
 }
 
+// ============================================================
+// NEGATYWY JUŻ NA KONCIE
+// ============================================================
+
+// Hasło już wykluczone w swojej kampanii nie jest kandydatem — jego koszt z 30 dni
+// pochodzi sprzed dodania negatywu. `negatywy` to { konto: [...], kampanie: { nazwa: [...] } },
+// wpis = { text, match } z match: 'EXACT' | 'PHRASE' | 'BROAD'.
+//
+// Porównanie DOSŁOWNE (słowa, bez podobieństwa 3-gramowego): wykluczające słowa kluczowe
+// w Google Ads nie łapią bliskich wariantów, więc „krzesło" nie blokuje „krzesła".
+const slowa = (s) => String(s || '').toLowerCase().trim().split(/\s+/).filter(Boolean);
+
+export function czyWykluczone(term, negatywy) {
+    const t = slowa(term);
+    return (negatywy || []).some(({ text, match }) => {
+        const w = slowa(text);
+        if (!w.length) return false;
+        if (match === 'EXACT') return w.length === t.length && w.every((x, i) => x === t[i]);
+        if (match === 'PHRASE') {
+            for (let i = 0; i + w.length <= t.length; i++) {
+                if (w.every((x, j) => x === t[i + j])) return true;
+            }
+            return false;
+        }
+        return w.every(x => t.includes(x)); // BROAD
+    });
+}
+
+export function negatywyKampanii(negatywy, camp) {
+    return [...(negatywy?.konto || []), ...(negatywy?.kampanie?.[camp] || [])];
+}
+
 // Czy hasło JEST słowem kluczowym kampanii — te same znaczące słowa, z tolerancją
 // polskiej fleksji (ten sam próg podobieństwa co przy tematach ze statusu).
 //

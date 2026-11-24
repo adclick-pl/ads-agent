@@ -311,7 +311,8 @@ const kpi = (label, value, sub = '', cls = '') =>
 export function buildReport({
     accountName, isEcom, industry, dates, benchOpis,
     kampanie, yearMap,
-    hasel, kosztCalosc, ocenionychAI, niepewnychDoOceny
+    hasel, kosztCalosc, ocenionychAI, niepewnychDoOceny,
+    juzWykluczone = { hasel: 0, koszt: 0 }
 }) {
     const wszystkie = (pole) => kampanie.flatMap(k => k[pole]);
     const pewne = wszystkie('pewne');
@@ -353,6 +354,7 @@ export function buildReport({
     ${kpi('Do sprawdzenia', fmt(doSprawdzenia.length), `${fmtMoney(kosztSprawdz)} / 30 dni`, 'kpi-amber')}
     ${kpi('Udział w koszcie konta', `${fmt(udzial, 1)}%`, 'tyle budżetu dotyczą obie listy')}
     ${kpi('Obronione wynikiem rocznym', fmt(bronione.length), 'słabe w 30 dniach, ale rok trzyma cel')}
+    ${kpi('Już wykluczone na koncie', fmt(juzWykluczone.hasel), `${fmtMoney(juzWykluczone.koszt)} / 30 dni — pominięte, koszt sprzed dodania negatywu`)}
     ${ocenaAI}
   </div>
   <div class="panel-desc" style="margin-top:14px">

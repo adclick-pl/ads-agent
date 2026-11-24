@@ -40,7 +40,7 @@ import {
     keywordsByCampaign,
     buildYearBenchmarks, campStatsFromRows, averagesFromCampStats,
     knownTopicsFromStatus, isKnownTopic, progKlikniec, yearKey, AI_PEWNOSC_PROG,
-    konwersjeRoczne, MIN_KONW_ROK,
+    konwersjeRoczne, MIN_KONW_ROK, czyWykluczone, negatywyKampanii,
 } from './analiza.js';
 import { buildReport } from './raport-html.js';
 
@@ -322,6 +322,49 @@ async function fetchAdGroupKeywords(account) {
         console.log(`   ⚠ Brak słów kluczowych (sygnał semantyczny wyłączony): ${e.message}`);
         return {};
     }
+}
+
+// Negatywy już na koncie — żeby nie proponować hasła, które ktoś już wykluczył (koszt
+// z 30 dni bywa sprzed dodania negatywu). Trzy źródła blokujące hasło w CAŁEJ kampanii:
+// negatywy kampanii, listy wspólne podpięte do kampanii i listy podpięte do konta.
+// Negatywów grup reklam świadomie nie liczymy — blokują hasło tylko w jednej grupie.
+const MATCH_MAP = { 2: 'EXACT', 3: 'PHRASE', 4: 'BROAD' };
+const matchTyp = (m) => MATCH_MAP[m] || String(m || '').toUpperCase();
+
+async function fetchExistingNegatives(account) {
+    const negatywy = { konto: [], kampanie: {} };
+    const wpis = (r, pole) => ({ text: r[`${pole}.keyword.text`], match: matchTyp(r[`${pole}.keyword.match_type`]) });
+    const doKampanii = (camp, n) => { if (camp && n.text) (negatywy.kampanie[camp] ||= []).push(n); };
+    try {
+        const [kampanii, listy, podpiecia, kontoListy] = await Promise.all([
+            query(account, `
+                SELECT campaign.name, campaign_criterion.keyword.text, campaign_criterion.keyword.match_type
+                FROM campaign_criterion
+                WHERE campaign_criterion.negative = TRUE AND campaign_criterion.type = 'KEYWORD'
+                  AND campaign.status != 'REMOVED'`),
+            query(account, `
+                SELECT shared_set.resource_name, shared_criterion.keyword.text, shared_criterion.keyword.match_type
+                FROM shared_criterion
+                WHERE shared_criterion.type = 'KEYWORD'`),
+            query(account, `
+                SELECT campaign.name, shared_set.resource_name
+                FROM campaign_shared_set
+                WHERE shared_set.type = 'NEGATIVE_KEYWORDS' AND campaign_shared_set.status = 'ENABLED'
+                  AND campaign.status != 'REMOVED'`),
+            query(account, `
+                SELECT customer_negative_criterion.negative_keyword_list.shared_set
+                FROM customer_negative_criterion
+                WHERE customer_negative_criterion.type = 'NEGATIVE_KEYWORD_LIST'`)
+        ]);
+        kampanii.forEach(r => doKampanii(r['campaign.name'], wpis(r, 'campaign_criterion')));
+        const wLiscie = {};
+        listy.forEach(r => (wLiscie[r['shared_set.resource_name']] ||= []).push(wpis(r, 'shared_criterion')));
+        podpiecia.forEach(r => (wLiscie[r['shared_set.resource_name']] || []).forEach(n => doKampanii(r['campaign.name'], n)));
+        kontoListy.forEach(r => negatywy.konto.push(...(wLiscie[r['customer_negative_criterion.negative_keyword_list.shared_set']] || [])));
+    } catch (e) {
+        console.log(`   ⚠ Nie udało się pobrać negatywów z konta — hasła już wykluczone mogą wrócić jako kandydaci: ${e.message}`);
+    }
+    return negatywy;
 }
 
 async function fetchCampaignTypes(account) {
@@ -700,7 +743,9 @@ const YEAR_KANDYDATOW_NA_KAMPANIE = 150;
 // haseł). Tniemy wg kosztu, czyli od strony, gdzie rok i tak niczego by nie orzekł.
 const SKAN_CAP = 1000;
 
-function przygotujKampanie(st30, adGroupKeywords, aiNegatives, isEcom, campTypes, celRoas) {
+// `aktywne` — wiersze bez haseł już wykluczonych na koncie. Benchmarki i sumy kampanii
+// liczymy z PEŁNEGO `st30` (ten koszt był realny), kandydatów i skan roczny z `aktywne`.
+function przygotujKampanie(st30, aktywne, adGroupKeywords, aiNegatives, isEcom, campTypes, celRoas) {
     const campStats = campStatsFromRows(st30);
     const { cpa: campAvgCPA, roas: campAvgROAS } = averagesFromCampStats(campStats);
 
@@ -715,8 +760,11 @@ function przygotujKampanie(st30, adGroupKeywords, aiNegatives, isEcom, campTypes
 
     const byCamp = {};
     st30.forEach(t => { (byCamp[t.campaign] ||= []).push(t); });
+    const aktywneByCamp = {};
+    aktywne.forEach(t => { (aktywneByCamp[t.campaign] ||= []).push(t); });
 
-    const camps = Object.entries(byCamp).map(([camp, terms]) => {
+    const camps = Object.entries(byCamp).map(([camp, wszystkie]) => {
+        const terms = aktywneByCamp[camp] || [];
         const avgCPA = campAvgCPA[camp] ?? null;
         const avgROAS = campAvgROAS[camp] ?? null;
         const avgMetric = isEcom ? benchROAS(avgROAS) : avgCPA;
@@ -746,8 +794,8 @@ function przygotujKampanie(st30, adGroupKeywords, aiNegatives, isEcom, campTypes
             camp, typ: campTypes[camp] || '', avgCPA, avgROAS, avgMetric, minKlikniec,
             kandydaci, rocznySkan,
             totals: {
-                terms: new Set(terms.map(t => t.term)).size,
-                cost: terms.reduce((s, t) => s + t.cost, 0)
+                terms: new Set(wszystkie.map(t => t.term)).size,
+                cost: wszystkie.reduce((s, t) => s + t.cost, 0)
             }
         };
     });
@@ -783,10 +831,11 @@ async function main() {
     const st30 = await fetchSearchTerms(account, dates.days30);
 
     console.log('   Pobieram słowa kluczowe, typy kampanii i roczne średnie...');
-    const [adGroupKeywords, campTypes, campYearStats] = await Promise.all([
+    const [adGroupKeywords, campTypes, campYearStats, negatywy] = await Promise.all([
         fetchAdGroupKeywords(account),
         fetchCampaignTypes(account),
-        fetchCampaignYearStats(account, dates.days365)
+        fetchCampaignYearStats(account, dates.days365),
+        fetchExistingNegatives(account)
     ]);
     const rok = buildYearBenchmarks(campYearStats);
 
@@ -795,6 +844,15 @@ async function main() {
     console.log(`\n   ✓ Haseł: ${st30.length} wierszy / ${unikalnych} unikalnych · koszt ${fmtMoney(kosztCalosc)}`);
     console.log(`   ✓ Grup reklam ze słowami kluczowymi: ${Object.keys(adGroupKeywords).length}`);
     console.log(`   ✓ Roczne średnie: ${Object.keys(campYearStats).length} kampanii`);
+    // Hasła już wykluczone w swojej kampanii wypadają z kandydatów i z oceny AI.
+    const aktywne = st30.filter(t => !czyWykluczone(t.term, negatywyKampanii(negatywy, t.campaign)));
+    const wykluczoneWiersze = st30.filter(t => !aktywne.includes(t));
+    const juzWykluczone = {
+        hasel: new Set(wykluczoneWiersze.map(t => t.term)).size,
+        koszt: wykluczoneWiersze.reduce((s, t) => s + t.cost, 0)
+    };
+    const liczbaNeg = negatywy.konto.length + Object.values(negatywy.kampanie).reduce((s, l) => s + l.length, 0);
+    console.log(`   ✓ Negatywy na koncie: ${liczbaNeg} (w tym ${negatywy.konto.length} z list konta) · już wykluczonych haseł: ${juzWykluczone.hasel} (${fmtMoney(juzWykluczone.koszt)})`);
 
     if (!st30.length) {
         console.log('\n⚠ Konto nie ma wyszukiwanych haseł w ostatnich 30 dniach — nie ma czego analizować.');
@@ -841,13 +899,13 @@ async function main() {
     console.log(`   Tryb oceny: ${isEcom ? 'ecommerce (ROAS)' : 'leadgen (koszt konwersji)'}`);
 
     // Warstwa 3b: hasła niepewne → plik do oceny; negatywy z poprzedniego przebiegu → analiza
-    const uncertainTerms = collectUncertainTerms(st30, adGroupKeywords);
+    const uncertainTerms = collectUncertainTerms(aktywne, adGroupKeywords);
     const pulaDoOceny = [...uncertainTerms].sort((a, b) => b.cost - a.cost).slice(0, PULA_DO_OCENY);
     const aiNegatives = loadAgentNegatives(outputDir, dateStr);
 
     // Analiza per kampania → rok tylko dla tego, co trafia do raportu → podział na kubełki
     const { camps, maCel, cel, benchROAS, benchLabel } =
-        przygotujKampanie(st30, adGroupKeywords, aiNegatives, isEcom, campTypes, celRoas);
+        przygotujKampanie(st30, aktywne, adGroupKeywords, aiNegatives, isEcom, campTypes, celRoas);
 
     // Rok pobieramy też dla puli haseł do oceny, i dlatego plik wymiany powstaje DOPIERO
     // PO nim: to rok rozstrzyga, których haseł do oceny nie wysyłamy. Hasło z konwersjami
@@ -908,7 +966,8 @@ async function main() {
         hasel: unikalnych,
         kosztCalosc,
         ocenionychAI: aiNegatives.size,
-        niepewnychDoOceny: uncertain.count
+        niepewnychDoOceny: uncertain.count,
+        juzWykluczone
     });
 
     const outputPath = join(outputDir, `${dateStr}-wykluczenia.html`);
