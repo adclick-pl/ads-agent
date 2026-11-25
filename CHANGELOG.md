@@ -7,6 +7,20 @@ restarcie sesji. Szczegóły każdego skilla: `.claude/skills/<skill>/SKILL.md`.
 
 ---
 
+## 2026-11-24
+
+### Nowości
+
+- **Grupa plików tylko z feedem w istniejącej kampanii PMax** (`gads-connector`, akcja
+  `create-asset-group`). Dokłada do działającej kampanii Performance Max nową grupę bez
+  tekstów, grafik i filmów — razem z filtrem produktów: kategoria (np. „ogród > meble
+  ogrodowe"), produkty dołączone albo wycięte po ID i wykluczona etykieta. Przydaje się,
+  gdy małą kategorię przenosisz do większej kampanii: wyniki kategorii dalej widać osobno,
+  a brak materiałów reklamowych trzyma ją z dala od Discover, Gmaila i YouTube. Jak każdy
+  zapis — najpierw symulacja sprawdzana przez Google, zmiana dopiero z `--commit`.
+
+---
+
 ## 2026-11-23
 
 ### Poprawki

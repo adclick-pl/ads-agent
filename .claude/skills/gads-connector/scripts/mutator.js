@@ -1,7 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { enums } from 'google-ads-api';
 import { getCustomer, unpackError } from './client.js';
-import { getKeywordsByCriteria, getCampaignBasics, getCampaignBiddingInfo, getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts, getExistingStructuredSnippets, getExistingCallAssets, callAssetIdentity, getExistingPriceAssets, getExistingPromotions, promotionIdentity, getAdGroupAdsByAdIds, getAdGroupsByIds, getExistingYoutubeAssets, getExistingDemandGenAds, getExistingDemandGenProductAds, getExistingListingGroups, getAssetGroupsByIds, getListingFilterTree, LISTING_FILTER_TYPE_NAME, getAdGroupTargetingCriteria, getCampaignChannelTypes, getDemandGenChannelControls, getCallToActionAssets, getConversionActions, getConversionGoals, getExistingCampaigns, getBudgetsByName, COPYABLE_CRITERION_TYPES } from './queries.js';
+import { getKeywordsByCriteria, getCampaignBasics, getCampaignBiddingInfo, getBudgetById, getCurrentFinalUrls, getSitelinkLinkDetails, sitelinkLinkLevel, getExistingSitelinks, getAdGroupsByCampaign, getExistingKeywords, getExistingRsa, getExistingCallouts, getExistingStructuredSnippets, getExistingCallAssets, callAssetIdentity, getExistingPriceAssets, getExistingPromotions, promotionIdentity, getAdGroupAdsByAdIds, getAdGroupsByIds, getExistingYoutubeAssets, getExistingDemandGenAds, getExistingDemandGenProductAds, getExistingListingGroups, getAssetGroupsByIds, getAssetGroupsByCampaign, getListingFilterTree, LISTING_FILTER_TYPE_NAME, getAdGroupTargetingCriteria, getCampaignChannelTypes, getDemandGenChannelControls, getCallToActionAssets, getConversionActions, getConversionGoals, getExistingCampaigns, getBudgetsByName, COPYABLE_CRITERION_TYPES } from './queries.js';
 import { checkBudgetChange, assertNotRemoval, validateFinalUrl, checkSitelinkTexts, checkKeywordText, checkAdGroupName, checkRsaTexts, checkCalloutText, checkStructuredSnippet, checkCallAsset, parseCallSchedule, normalizeCallReportingState, checkPriceOfferings, checkPromotion, checkDemandGenAdTexts, checkDemandGenChannels, planDemandGenChannelChange, DEMAND_GEN_LIMITS, adTextLength, checkConversionAction, checkCampaignSpec, checkPmaxSpec, checkListingFilterFlip, checkLabelExclusion, checkItemExclusion, planCustomAudienceUrls, planNegativeRemoval, planAudienceSegmentAdd, planAudienceSegmentRemove, planCampaignLanguages, ASSET_AUTOMATION_ALIASES, PMAX_ASSET_AUTOMATION, resolveAssetAutomationTypes, planAssetAutomation, checkCampaignTextAsset, CAMPAIGN_TEXT_ASSET_LIMITS, isIsoDate } from './safety.js';
 
 /**
@@ -2440,6 +2440,202 @@ export async function createPmaxCampaigns(customerId, items, dryRun = false, log
     return { name: r.name, campaignId: c ? c.campaignId : null, budgetId: c ? c.budgetId : null, status: r.status };
   });
   return { success: true, dryRun: false, entity: 'campaign', created: toCreate.length, skipped: skipped.length, plan, createdCampaigns, resourceNames: mutatedResourceNames(responses) };
+}
+
+/** `advertising_channel_type` value for Performance Max. */
+const PMAX_CHANNEL_TYPE = 10;
+
+/**
+ * Build the listing-group filter tree of a feed-only asset group, top-down:
+ *
+ *   ROOT
+ *   └─ custom_label_N: <label> → EXCLUDED, everything else ↓      (excludeLabel)
+ *      └─ item_id: include → INCLUDED, exclude → EXCLUDED, rest ↓  (include/excludeItems)
+ *         └─ product_type L1 > L2 > … : the path → INCLUDED,        (productTypePath)
+ *            every "everything else" on the way → EXCLUDED
+ *
+ * Each layer is optional. The order is the precedence: the exclusion label beats
+ * an explicitly listed ID, and listed IDs beat the category — so a product can be
+ * pulled in from outside the category, or cut out of it, by ID alone.
+ *
+ * @param {string} cid
+ * @param {string} assetGroupRef - (temporary) resource name of the asset group
+ * @param {{productTypePath:string[], includeItems:string[], excludeItems:string[],
+ *   excludeLabel:string|null, labelIndex:number}} spec
+ * @param {() => number} nextTemp
+ * @returns {Array<object>} mutate operations, parents before children
+ */
+export function buildAssetGroupTreeMutations(cid, assetGroupRef, spec, nextTemp) {
+  const agTemp = assetGroupRef.split('/').pop();
+  const ops = [];
+  const node = (type, parent, caseValue) => {
+    const resourceName = `customers/${cid}/assetGroupListingGroupFilters/${agTemp}~${nextTemp()}`;
+    ops.push({
+      entity: 'asset_group_listing_group_filter',
+      operation: 'create',
+      resource: {
+        resource_name: resourceName,
+        asset_group: assetGroupRef,
+        listing_source: 'SHOPPING',
+        type,
+        ...(parent ? { parent_listing_group_filter: parent } : {}),
+        ...(caseValue ? { case_value: caseValue } : {}),
+      },
+    });
+    return resourceName;
+  };
+  const labelCase = (value) => ({ product_custom_attribute: { index: spec.labelIndex + CUSTOM_LABEL_ENUM_OFFSET, ...(value ? { value } : {}) } });
+  const itemCase = (value) => ({ product_item_id: value ? { value } : {} });
+  const typeCase = (level, value) => ({ product_type: { level: `LEVEL${level}`, ...(value ? { value } : {}) } });
+
+  let cur = node('SUBDIVISION', null, null);
+  if (spec.excludeLabel) {
+    node('UNIT_EXCLUDED', cur, labelCase(spec.excludeLabel));
+    cur = node('SUBDIVISION', cur, labelCase(null));
+  }
+  if (spec.includeItems.length || spec.excludeItems.length) {
+    for (const id of spec.includeItems) node('UNIT_INCLUDED', cur, itemCase(id));
+    for (const id of spec.excludeItems) node('UNIT_EXCLUDED', cur, itemCase(id));
+    if (!spec.productTypePath.length) {
+      node('UNIT_EXCLUDED', cur, itemCase(null));
+      return ops;
+    }
+    cur = node('SUBDIVISION', cur, itemCase(null));
+  }
+  spec.productTypePath.forEach((value, i) => {
+    const level = i + 1;
+    const last = i === spec.productTypePath.length - 1;
+    const next = node(last ? 'UNIT_INCLUDED' : 'SUBDIVISION', cur, typeCase(level, value));
+    node('UNIT_EXCLUDED', cur, typeCase(level, null));
+    cur = next;
+  });
+  return ops;
+}
+
+/**
+ * Create a feed-only asset group (no headlines, images or videos) in an EXISTING
+ * Performance Max campaign, together with its product filter, in one atomic request.
+ *
+ * Why it exists: moving a product category into a bigger PMax campaign as its own
+ * asset group keeps the category's results visible, while the missing creative
+ * assets keep the group out of asset-based placements (Discover, Gmail, YouTube)
+ * where a small category can burn its budget. Google may still attach
+ * auto-generated assets if the campaign's asset automation allows it.
+ *
+ * Same contract as `create-pmax`: born PAUSED by default, idempotent on the group
+ * NAME within the campaign (the read must succeed), and the dry run is validated
+ * by Google itself (validate_only), tree included.
+ *
+ * @param {string} customerId
+ * @param {{campaignId:string|number, name:string, finalUrl:string, status?:string,
+ *   productTypePath?:string[]|string, includeItems?:string[], excludeItems?:string[],
+ *   excludeLabel?:string, labelIndex?:number}} spec
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>}
+ */
+export async function createAssetGroup(customerId, spec, dryRun = false, loginCustomerId) {
+  const cid = String(customerId).replace(/-/g, '');
+  const problems = [];
+
+  const campaignId = String(spec.campaignId ?? '').replace(/[^0-9]/g, '');
+  const name = String(spec.name ?? '').trim();
+  const finalUrl = String(spec.finalUrl ?? '').trim();
+  const status = String(spec.status ?? 'PAUSED').trim().toUpperCase();
+  assertNotRemoval(status);
+  const ids = (list) => [...new Set((list || []).map((v) => String(v ?? '').trim().toLowerCase()).filter(Boolean))];
+  const includeItems = ids(spec.includeItems);
+  const excludeItems = ids(spec.excludeItems);
+  const productTypePath = (Array.isArray(spec.productTypePath) ? spec.productTypePath : String(spec.productTypePath ?? '').split('>'))
+    .map((t) => String(t).trim().toLowerCase()).filter(Boolean);
+  const excludeLabel = String(spec.excludeLabel ?? '').trim().toLowerCase() || null;
+  const labelIndex = spec.labelIndex === undefined || spec.labelIndex === null || spec.labelIndex === '' ? 0 : Number(spec.labelIndex);
+
+  if (!campaignId) problems.push('brak --campaign=<ID kampanii PMax>.');
+  if (!name) problems.push('brak --name="nazwa grupy plików".');
+  if (!finalUrl) problems.push('brak --final-url=<adres strony>.');
+  else {
+    const urlCheck = validateFinalUrl(finalUrl);
+    if (!urlCheck.valid) problems.push(urlCheck.reason);
+  }
+  if (!['ENABLED', 'PAUSED'].includes(status)) problems.push(`status musi być ENABLED lub PAUSED (jest "${spec.status}").`);
+  if (productTypePath.length > 5) problems.push(`ścieżka typu produktu ma ${productTypePath.length} poziomów, a Google przyjmuje najwyżej 5.`);
+  if (!productTypePath.length && !includeItems.length) {
+    problems.push('grupa nic by nie włączała — podaj --product-type="poziom1 > poziom2" albo --include-items.');
+  }
+  const both = includeItems.filter((id) => excludeItems.includes(id));
+  if (both.length) problems.push(`${both.length} ID jest jednocześnie na liście włączonych i wykluczonych (np. "${both[0]}").`);
+  if (excludeLabel && !(Number.isInteger(labelIndex) && labelIndex >= 0 && labelIndex <= 4)) {
+    problems.push(`--label-index musi być liczbą 0–4 (jest "${spec.labelIndex}").`);
+  }
+  if (problems.length) {
+    throw new Error(`🛑 Zablokowano — ${problems.length} problem(ów) walidacji, nic nie zapisano:\n${problems.map((p) => `  • ${p}`).join('\n')}`);
+  }
+
+  // A read failure here MUST block: a duplicate asset group cannot be undone.
+  const campaigns = await getCampaignChannelTypes(cid, [campaignId], { loginCustomerId });
+  const campaign = campaigns.get(campaignId);
+  if (!campaign) throw new Error(`🛑 Nie ma kampanii ${campaignId} na tym koncie. Nic nie zapisano.`);
+  if (Number(campaign.channelType) !== PMAX_CHANNEL_TYPE) {
+    throw new Error(`🛑 Kampania "${campaign.name}" nie jest typu Performance Max — grupy plików są tylko w PMax. Nic nie zapisano.`);
+  }
+  const existing = await getAssetGroupsByCampaign(cid, campaignId, { loginCustomerId });
+  const hit = existing.find((g) => g.name.toLowerCase() === name.toLowerCase());
+
+  const plan = {
+    campaignId,
+    campaignName: campaign.name,
+    assetGroupName: name,
+    status,
+    finalUrl,
+    creativeAssets: 'brak (grupa tylko z feedem)',
+    productFilter: {
+      excludedLabel: excludeLabel ? { index: labelIndex, value: excludeLabel } : null,
+      includedItemIds: includeItems.length,
+      excludedItemIds: excludeItems.length,
+      productTypePath: productTypePath.length ? productTypePath.join(' > ') : null,
+      everythingElse: 'EXCLUDED',
+    },
+  };
+
+  if (hit) {
+    console.log(`[Mutator] Grupa plików "${name}" już jest w kampanii (ID ${hit.assetGroupId}) — pomijam.`);
+    return { success: true, dryRun, entity: 'asset_group', created: 0, skipped: 1, plan, assetGroupId: hit.assetGroupId, reason: 'grupa o tej nazwie już istnieje w kampanii' };
+  }
+
+  let tempId = 0;
+  const nextTemp = () => --tempId;
+  const assetGroupRef = `customers/${cid}/assetGroups/${nextTemp()}`;
+  const mutations = [
+    {
+      entity: 'asset_group',
+      operation: 'create',
+      resource: { resource_name: assetGroupRef, name, campaign: `customers/${cid}/campaigns/${campaignId}`, final_urls: [finalUrl], status },
+    },
+    ...buildAssetGroupTreeMutations(cid, assetGroupRef, { productTypePath, includeItems, excludeItems, excludeLabel, labelIndex }, nextTemp),
+  ];
+  if (mutations.length > MUTATE_CHUNK) {
+    throw new Error(`🛑 Grupa z drzewem to ${mutations.length} operacji, a żądanie mieści ${MUTATE_CHUNK} — za dużo ID produktów. Nic nie zapisano.`);
+  }
+  plan.operations = mutations.length;
+
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Grupa plików "${name}" w kampanii "${campaign.name}": ${mutations.length} operacji...`);
+  const customer = getCustomer(cid, loginCustomerId);
+
+  if (dryRun) {
+    const check = await validateWithApi(customer, [mutations]);
+    return { success: check.ok, dryRun: true, entity: 'asset_group', toCreate: 1, plan, apiValidated: check.ok, apiError: check.error };
+  }
+
+  let response;
+  try {
+    response = await customer.mutateResources(mutations);
+  } catch (error) {
+    throw new Error(`Nie udało się utworzyć grupy plików: ${unpackError(error)}`);
+  }
+  const after = await getAssetGroupsByCampaign(cid, campaignId, { loginCustomerId });
+  const created = after.find((g) => g.name.toLowerCase() === name.toLowerCase());
+  return { success: true, dryRun: false, entity: 'asset_group', created: 1, plan, assetGroupId: created ? created.assetGroupId : null, resourceNames: mutatedResourceNames([response]) };
 }
 
 /**

@@ -43,6 +43,7 @@ import {
   pauseSitelinkLinks,
   createSearchCampaigns,
   createPmaxCampaigns,
+  createAssetGroup,
   createAdGroups,
   addKeywords,
   addAds,
@@ -509,6 +510,18 @@ Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
                           start_date,end_date]). product_types rozdziel | — każdy typ jest
                           włączony, „wszystko inne" wykluczone; bez nich kampania bierze cały feed.
                           product_type_level: 1-5 (domyślnie 1). Strategia: maks. wartość konw.
+  create-asset-group      Dokłada GRUPĘ PLIKÓW tylko z feedem (bez tekstów i grafik) do
+                          ISTNIEJĄCEJ kampanii PMax — razem z drzewem produktów, atomowo.
+                          Do wydzielenia kategorii w większej kampanii jako osobnej grupy:
+                          brak zasobów trzyma ją z dala od Discover/Gmaila/YouTube.
+                          --campaign=<ID> --name="…" --final-url=<URL>
+                          [--product-type="poziom1 > poziom2"]  kategoria włączona
+                          [--include-items=<ID,ID | plik.txt>]  włączone po ID (także spoza kategorii)
+                          [--exclude-items=<ID,ID | plik.txt>]  wykluczone po ID (wycina z kategorii)
+                          [--exclude-label=wyklucz --label-index=0]  etykieta wykluczona
+                          Pierwszeństwo: etykieta > ID > kategoria; reszta feedu wykluczona.
+                          Domyślnie PAUSED (--status=ENABLED, by od razu działała),
+                          idempotentne po nazwie grupy. Symulacja walidowana przez Google.
   create-ad-groups        Tworzy grupy reklam w istniejących kampaniach Search. Idempotentne:
                           pomija grupę, której nazwa już jest w kampanii. Tylko --input=mapa.csv
                           (kolumny: campaign_id,ad_group_name[,status,cpc_bid]).
@@ -678,6 +691,7 @@ Przykłady:
   node scripts/cli.js --action=keyword-ideas --customer=1234567890 --url="https://example.com/sklep" --geo=2616 --language=1030 --auto
   node scripts/cli.js --action=get-campaigns --customer=1234567890 --days=30 --json
   node scripts/cli.js --action=raw-query --account=client-one --query="SELECT campaign.name, metrics.cost_micros FROM campaign WHERE segments.date DURING LAST_30_DAYS" --json
+  node scripts/cli.js --action=create-asset-group --account=zielonyogrod --campaign=987654321 --name="[Produktowa] Meble ogrodowe" --final-url=https://zielonyogrod.example/meble-ogrodowe --product-type="ogród > meble ogrodowe" --exclude-items="sku_1,sku_2" --exclude-label=wyklucz --status=ENABLED
   node scripts/cli.js --action=add-item-exclusion --account=zielonyogrod --asset-group=987654321 --item-ids="shopify_pl_1_2,shopify_pl_1_3"
   node scripts/cli.js --action=update-budget --customer=1234567890 --budget-id=111222333 --amount=150.00
   node scripts/cli.js --action=update-budget --customer=1234567890 --budget-id=111222333 --amount=150.00 --commit
@@ -1490,6 +1504,28 @@ async function main() {
         label: `${r.campaign_name || r.campaign || r.name} (wiersz ${i + 2})`,
       }));
       const result = await createPmaxCampaigns(customerId, items, dryRun, loginCustomerId);
+      console.log(JSON.stringify(result, null, 2));
+    }
+
+    else if (action === 'create-asset-group') {
+      // Listy ID z flagi albo z pliku (gdy wartość jest ścieżką istniejącego pliku):
+      // przy setkach produktów plik jest jedyną wygodną drogą.
+      const idList = (v) => {
+        if (v === undefined || v === true) return [];
+        const raw = existsSync(path.resolve(String(v))) ? readFileSync(path.resolve(String(v)), 'utf8') : String(v);
+        return raw.split(/[\s,|]+/).map((x) => x.trim()).filter(Boolean);
+      };
+      const result = await createAssetGroup(customerId, {
+        campaignId: args.campaign,
+        name: args.name,
+        finalUrl: args['final-url'],
+        status: args.status || 'PAUSED',
+        productTypePath: args['product-type'] || '',
+        includeItems: idList(args['include-items']),
+        excludeItems: idList(args['exclude-items']),
+        excludeLabel: args['exclude-label'] || '',
+        labelIndex: args['label-index'],
+      }, dryRun, loginCustomerId);
       console.log(JSON.stringify(result, null, 2));
     }
 

@@ -2193,6 +2193,32 @@ export async function getConversionTrackingSetting(customerId, opts = {}) {
  * ──────────────────────────────────────────────────────────────────────────── */
 
 /**
+ * Asset groups (ENABLED and PAUSED) of one campaign — `create-asset-group` reads
+ * them to stay idempotent on the group name, the same way `create-ad-groups`
+ * reads ad groups before creating new ones.
+ *
+ * @param {string} customerId
+ * @param {string|number} campaignId
+ * @param {{loginCustomerId?: string}} [opts]
+ * @returns {Promise<Array<{assetGroupId:string, name:string, status:string}>>}
+ */
+export async function getAssetGroupsByCampaign(customerId, campaignId, opts = {}) {
+  const clean = String(customerId).replace(/-/g, '');
+  const id = String(campaignId ?? '').replace(/[^0-9]/g, '');
+  if (!id) return [];
+  const rows = await runRawQuery(clean,
+    `SELECT asset_group.id, asset_group.name, asset_group.status
+     FROM asset_group
+     WHERE campaign.id = ${id} AND asset_group.status IN ('ENABLED', 'PAUSED')`,
+    { loginCustomerId: opts.loginCustomerId });
+  return rows.map((r) => ({
+    assetGroupId: String(r['asset_group.id']),
+    name: r['asset_group.name'] || '',
+    status: normaliseStatus(r['asset_group.status']),
+  }));
+}
+
+/**
  * Look up PMax ASSET GROUPS by bare id (the id shown in the Google Ads UI).
  *
  * Shaped exactly like `getAdGroupsByIds` so `applyStatusChange` can drive it
