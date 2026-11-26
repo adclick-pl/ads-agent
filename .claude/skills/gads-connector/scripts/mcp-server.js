@@ -17,7 +17,7 @@ import {
 import { 
   updateCampaignStatus, 
   updateCampaignBudget, 
-  addCampaignNegativeKeywords, 
+  addNegativeKeywords, 
   addAccountNegativePlacements 
 } from './mutator.js';
 
@@ -160,12 +160,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'gads_add_negative_keywords',
-        description: 'Adds list of negative keywords to a specified campaign.',
+        description: 'Adds list of negative keywords to a campaign (campaignId) or to a single ad group (adGroupId) — pass exactly one.',
         inputSchema: {
           type: 'object',
           properties: {
             customerId: { type: 'string', description: '10-digit Google Ads account ID.' },
-            campaignId: { type: 'string', description: 'Google Ads campaign numerical ID.' },
+            campaignId: { type: 'string', description: 'Google Ads campaign numerical ID (campaign-level negatives).' },
+            adGroupId: { type: 'string', description: 'Google Ads ad group numerical ID (ad-group-level negatives) — instead of campaignId.' },
             keywords: { 
               type: 'array', 
               items: { type: 'string' }, 
@@ -174,7 +175,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             commit: { type: 'boolean', description: 'Must be true to actually write to the account. Omitted or false = simulation only.' },
             dryRun: { type: 'boolean', description: 'Force a simulation; wins over commit. Writes are opt-in, so this is the default.' }
           },
-          required: ['customerId', 'campaignId', 'keywords']
+          required: ['customerId', 'keywords']
         }
       },
       {
@@ -252,7 +253,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         data = await updateCampaignBudget(args.customerId, args.budgetId, args.amountStandard, isDryRun(args), undefined, { force: !!args.force });
         break;
       case 'gads_add_negative_keywords':
-        data = await addCampaignNegativeKeywords(args.customerId, args.campaignId, args.keywords, isDryRun(args));
+        data = await addNegativeKeywords(args.customerId, { campaignId: args.campaignId, adGroupId: args.adGroupId }, args.keywords, isDryRun(args));
         break;
       case 'gads_add_negative_placements':
         data = await addAccountNegativePlacements(args.customerId, args.domains, isDryRun(args));

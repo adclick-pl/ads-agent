@@ -830,17 +830,38 @@ export async function updateCampaignBudget(customerId, budgetId, amountStandard,
 }
 
 /**
- * Adds negative keywords to a specific campaign.
- * @param {string} customerId 
- * @param {string|number} campaignId 
+ * Where a negative keyword lives. Both levels hold the same thing (text + match
+ * type, `negative = TRUE`); only the criterion entity and its parent differ.
+ * An ad-group negative blocks the term for that one ad group — the usual way to
+ * steer a query to the right ad group inside one campaign.
+ */
+const NEGATIVE_LEVELS = {
+  campaign: { entity: 'CampaignCriterion', table: 'campaign_criterion', parent: 'campaign', path: 'campaigns', flag: '--campaign', label: 'campaign', idKey: 'campaignId' },
+  adGroup: { entity: 'AdGroupCriterion', table: 'ad_group_criterion', parent: 'ad_group', path: 'adGroups', flag: '--ad-group', label: 'ad group', idKey: 'adGroupId' },
+};
+
+function negativeTarget({ campaignId, adGroupId } = {}) {
+  if (!!campaignId === !!adGroupId) throw new Error('Negatywy: podaj dokładnie jedno — kampanię (--campaign) albo grupę reklam (--ad-group).');
+  const level = adGroupId ? NEGATIVE_LEVELS.adGroup : NEGATIVE_LEVELS.campaign;
+  const id = String(adGroupId || campaignId).replace(/\D/g, '');
+  if (!id) throw new Error(`Negatywy: niepoprawne ID w ${level.flag}.`);
+  return { level, id };
+}
+
+/**
+ * Adds negative keywords to a campaign or to a single ad group.
+ * The simulation is validated by Google (`validate_only`), so a wrong ID or a
+ * rejected text shows up before `--commit`.
+ * @param {string} customerId
+ * @param {{campaignId?: string|number, adGroupId?: string|number}} target - exactly one of the two
  * @param {Array<string|object>} keywords - Array of strings (e.g., ['free', 'cheap']) or objects (e.g. [{text: 'spam', matchType: 'PHRASE'}])
- * @param {boolean} [dryRun=false] 
+ * @param {boolean} [dryRun=false]
  * @returns {Promise<object>} Mutation summary
  */
-export async function addCampaignNegativeKeywords(customerId, campaignId, keywords, dryRun = false, loginCustomerId) {
+export async function addNegativeKeywords(customerId, target, keywords, dryRun = false, loginCustomerId) {
   const cleanCustomerId = String(customerId).replace(/-/g, '');
-  const cleanCampaignId = String(campaignId);
-  
+  const { level, id } = negativeTarget(target);
+
   const parsedKeywords = keywords.map(kw => {
     if (typeof kw === 'string') {
       return { text: kw.trim().toLowerCase(), matchType: 'BROAD' };
@@ -851,28 +872,17 @@ export async function addCampaignNegativeKeywords(customerId, campaignId, keywor
     };
   }).filter(k => k.text);
 
-  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Adding ${parsedKeywords.length} negative keywords to campaign ${cleanCampaignId}...`);
-
-  if (dryRun) {
-    return {
-      success: true,
-      dryRun: true,
-      campaignId: cleanCampaignId,
-      keywordsAdded: parsedKeywords
-    };
-  }
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Adding ${parsedKeywords.length} negative keywords to ${level.label} ${id}...`);
+  const summary = { level: level.label, [level.idKey]: id, keywordsAdded: parsedKeywords };
 
   try {
     const customer = getCustomer(cleanCustomerId, loginCustomerId);
-
-    // In google-ads-api, adding negative keywords at campaign level is done via CampaignCriterion mutation
     const mutations = parsedKeywords.map(kw => ({
-      entity: 'CampaignCriterion',
+      entity: level.entity,
       operation: 'create',
       resource: {
-        campaign: `customers/${cleanCustomerId}/campaigns/${cleanCampaignId}`,
+        [level.parent]: `customers/${cleanCustomerId}/${level.path}/${id}`,
         negative: true,
-        type: 'KEYWORD',
         keyword: {
           text: kw.text,
           match_type: kw.matchType
@@ -880,60 +890,6 @@ export async function addCampaignNegativeKeywords(customerId, campaignId, keywor
       }
     }));
 
-    const response = await customer.mutateResources(mutations);
-    return {
-      success: true,
-      dryRun: false,
-      campaignId: cleanCampaignId,
-      keywordsAdded: parsedKeywords,
-      response
-    };
-  } catch (error) {
-    throw new Error(`Failed to add campaign negative keywords: ${unpackError(error)}`);
-  }
-}
-
-/**
- * Removes negative keywords from a campaign — the undoable carve-out from the
- * no-delete policy (see `planNegativeRemoval` in safety.js for why it is allowed).
- * Only campaign-level negative KEYWORD criteria with the exact text + match type
- * are touched. The simulation is validated by Google (`validate_only`); the result
- * always carries the `add-negatives` command that restores what was removed.
- *
- * @param {string} customerId
- * @param {string|number} campaignId
- * @param {Array<{text: string, matchType: string}>} keywords
- * @param {boolean} [dryRun=false]
- * @param {string} [loginCustomerId]
- * @returns {Promise<object>} Plan summary (+ API response when written)
- */
-export async function removeCampaignNegativeKeywords(customerId, campaignId, keywords, dryRun = false, loginCustomerId) {
-  const cleanCustomerId = String(customerId).replace(/-/g, '');
-  const cleanCampaignId = String(campaignId).replace(/\D/g, '');
-  const MATCH = { 2: 'EXACT', 3: 'PHRASE', 4: 'BROAD' };
-  try {
-    const customer = getCustomer(cleanCustomerId, loginCustomerId);
-    const rows = await customer.query(`
-      SELECT campaign_criterion.resource_name, campaign_criterion.keyword.text, campaign_criterion.keyword.match_type
-      FROM campaign_criterion
-      WHERE campaign.id = ${cleanCampaignId}
-        AND campaign_criterion.negative = TRUE
-        AND campaign_criterion.type = KEYWORD`);
-    const existing = rows.map((r) => ({
-      resourceName: r.campaign_criterion.resource_name,
-      text: r.campaign_criterion.keyword.text,
-      matchType: MATCH[r.campaign_criterion.keyword.match_type] || String(r.campaign_criterion.keyword.match_type),
-    }));
-    const { toRemove, notFound } = planNegativeRemoval(existing, keywords);
-    const undo = toRemove.length
-      ? [...new Set(toRemove.map((k) => k.matchType))].map((m) =>
-          `node scripts/cli.js --action=add-negatives --customer=${cleanCustomerId} --campaign=${cleanCampaignId} --match-type=${m} --keywords="${toRemove.filter((k) => k.matchType === m).map((k) => k.text).join(',')}"`)
-      : [];
-    const summary = { campaignId: cleanCampaignId, toRemove: toRemove.map(({ text, matchType }) => ({ text, matchType })), notFound, undo };
-    console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Removing ${toRemove.length} negative keywords from campaign ${cleanCampaignId}${notFound.length ? ` (${notFound.length} not found)` : ''}...`);
-    if (!toRemove.length) return { success: true, dryRun, ...summary };
-
-    const mutations = toRemove.map((k) => ({ entity: 'CampaignCriterion', operation: 'remove', resource: k.resourceName }));
     if (dryRun) {
       const validation = await validateWithApi(customer, [mutations]);
       return { success: validation.ok, dryRun: true, validation, ...summary };
@@ -941,7 +897,60 @@ export async function removeCampaignNegativeKeywords(customerId, campaignId, key
     const response = await customer.mutateResources(mutations);
     return { success: true, dryRun: false, ...summary, response };
   } catch (error) {
-    throw new Error(`Failed to remove campaign negative keywords: ${unpackError(error)}`);
+    throw new Error(`Failed to add ${level.label} negative keywords: ${unpackError(error)}`);
+  }
+}
+
+/**
+ * Removes negative keywords from a campaign or an ad group — the undoable
+ * carve-out from the no-delete policy (see `planNegativeRemoval` in safety.js
+ * for why it is allowed). Only negative KEYWORD criteria with the exact text +
+ * match type are touched. The simulation is validated by Google (`validate_only`);
+ * the result always carries the `add-negatives` command that restores what was removed.
+ *
+ * @param {string} customerId
+ * @param {{campaignId?: string|number, adGroupId?: string|number}} target - exactly one of the two
+ * @param {Array<{text: string, matchType: string}>} keywords
+ * @param {boolean} [dryRun=false]
+ * @param {string} [loginCustomerId]
+ * @returns {Promise<object>} Plan summary (+ API response when written)
+ */
+export async function removeNegativeKeywords(customerId, target, keywords, dryRun = false, loginCustomerId) {
+  const cleanCustomerId = String(customerId).replace(/-/g, '');
+  const { level, id } = negativeTarget(target);
+  const MATCH = { 2: 'EXACT', 3: 'PHRASE', 4: 'BROAD' };
+  const t = level.table;
+  try {
+    const customer = getCustomer(cleanCustomerId, loginCustomerId);
+    const rows = await customer.query(`
+      SELECT ${t}.resource_name, ${t}.keyword.text, ${t}.keyword.match_type
+      FROM ${t}
+      WHERE ${level.parent}.id = ${id}
+        AND ${t}.negative = TRUE
+        AND ${t}.type = KEYWORD`);
+    const existing = rows.map((r) => ({
+      resourceName: r[t].resource_name,
+      text: r[t].keyword.text,
+      matchType: MATCH[r[t].keyword.match_type] || String(r[t].keyword.match_type),
+    }));
+    const { toRemove, notFound } = planNegativeRemoval(existing, keywords);
+    const undo = toRemove.length
+      ? [...new Set(toRemove.map((k) => k.matchType))].map((m) =>
+          `node scripts/cli.js --action=add-negatives --customer=${cleanCustomerId} ${level.flag}=${id} --match-type=${m} --keywords="${toRemove.filter((k) => k.matchType === m).map((k) => k.text).join(',')}"`)
+      : [];
+    const summary = { level: level.label, [level.idKey]: id, toRemove: toRemove.map(({ text, matchType }) => ({ text, matchType })), notFound, undo };
+    console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Removing ${toRemove.length} negative keywords from ${level.label} ${id}${notFound.length ? ` (${notFound.length} not found)` : ''}...`);
+    if (!toRemove.length) return { success: true, dryRun, ...summary };
+
+    const mutations = toRemove.map((k) => ({ entity: level.entity, operation: 'remove', resource: k.resourceName }));
+    if (dryRun) {
+      const validation = await validateWithApi(customer, [mutations]);
+      return { success: validation.ok, dryRun: true, validation, ...summary };
+    }
+    const response = await customer.mutateResources(mutations);
+    return { success: true, dryRun: false, ...summary, response };
+  } catch (error) {
+    throw new Error(`Failed to remove ${level.label} negative keywords: ${unpackError(error)}`);
   }
 }
 

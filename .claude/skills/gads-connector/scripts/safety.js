@@ -40,26 +40,26 @@ export function assertNotRemoval(status) {
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
- * Carve-out from NO_DELETE_POLICY: campaign NEGATIVE keywords
+ * Carve-out from NO_DELETE_POLICY: NEGATIVE keywords (campaign or ad group)
  *
  * The policy exists so that every change the connector makes can be undone.
- * Removing a campaign negative keyword is fully undoable: the criterion is pure
+ * Removing a negative keyword is fully undoable: the criterion is pure
  * configuration (text + match type), carries no spend history of its own, and
  * re-adding the same text with the same match type (`add-negatives`) restores
  * exactly the state before. A negative also has no status field — it cannot be
  * paused — so removal is the only way to switch it off.
  *
  * The carve-out stays narrow:
- *   - campaign-level criteria with `negative = TRUE` and `type = KEYWORD` only —
- *     never a positive keyword, an ad group criterion or a shared-list entry;
+ *   - criteria with `negative = TRUE` and `type = KEYWORD` only, on the one
+ *     campaign or ad group named — never a positive keyword or a shared-list entry;
  *   - text AND match type must match exactly — `[donice betonowe]` never removes
  *     `"donice betonowe"`;
  *   - the result always prints the `add-negatives` command that undoes it.
  * ──────────────────────────────────────────────────────────────────────────── */
 
 /**
- * Pick the campaign negatives to remove. Pure — `existing` is what the account
- * returns for the campaign, so the matching is testable offline. Text compares
+ * Pick the negatives to remove. Pure — `existing` is what the account
+ * returns for the campaign or ad group, so the matching is testable offline. Text compares
  * case-insensitively with collapsed whitespace; match type must be identical.
  *
  * @param {Array<{resourceName: string, text: string, matchType: string}>} existing

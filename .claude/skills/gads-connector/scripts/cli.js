@@ -30,8 +30,8 @@ import {
   updateCampaignBidding,
   renameCampaign,
   BIDDING_STRATEGIES,
-  addCampaignNegativeKeywords,
-  removeCampaignNegativeKeywords,
+  addNegativeKeywords,
+  removeNegativeKeywords,
   addAccountNegativePlacements,
   addAccountNegativeYouTubeChannels,
   addAccountNegativeMobileApps,
@@ -440,11 +440,13 @@ Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
   rename-campaign         Zmiana NAZWY kampanii (--campaign=<ID> --name="Nowa nazwa").
                           Odmawia, gdy nazwa jest już zajęta przez inną kampanię
                           (Google wymaga unikalnych nazw wśród nieusuniętych).
-  add-negatives           Negatywne słowa kluczowe (--campaign, --keywords, --match-type).
-  remove-negatives        Usuwa wykluczające słowa z kampanii (--campaign, --keywords, --match-type).
+  add-negatives           Negatywne słowa kluczowe w kampanii (--campaign) ALBO w jednej grupie
+                          reklam (--ad-group); --keywords, --match-type.
+  remove-negatives        Usuwa wykluczające słowa z kampanii albo grupy reklam (--campaign | --ad-group,
+                          --keywords, --match-type).
                           Jedyne usuwanie słów w konektorze — dozwolone, bo da się je cofnąć:
                           wynik podaje gotową komendę add-negatives przywracającą stan.
-                          Rusza tylko wykluczenia kampanii o tym samym tekście I typie dopasowania.
+                          Rusza tylko wykluczenia z tego poziomu o tym samym tekście I typie dopasowania.
   add-negative-placements Wykluczenia miejsc docelowych — domeny (--domains).
   add-negative-youtube-channels  Wykluczenia kanałów YouTube na poziomie konta (--channels).
   add-negative-mobile-apps  Wykluczenia pojedynczych aplikacji mobilnych na poziomie konta
@@ -1275,31 +1277,23 @@ async function main() {
       console.log(JSON.stringify(result, null, 2));
     }
 
-    else if (action === 'add-negatives') {
-      const campaignId = args.campaign;
+    else if (action === 'add-negatives' || action === 'remove-negatives') {
+      // Campaign OR ad-group level. Removal is the one undoable removal — see planNegativeRemoval in safety.js.
+      const target = { campaignId: args.campaign, adGroupId: args['ad-group'] };
       const keywordsString = args.keywords;
-      if (!campaignId || !keywordsString) throw new Error('add-negatives requires --campaign=<ID> and --keywords="fraza1,fraza 2"');
+      if (!keywordsString || !!target.campaignId === !!target.adGroupId) {
+        throw new Error(`${action} requires --keywords="fraza1,fraza 2" and exactly one of --campaign=<ID> | --ad-group=<ID>`);
+      }
       // Match type is mandatory — choosing EXACT vs PHRASE vs BROAD must always be a conscious decision.
       const matchType = String(args['match-type'] || '').trim().toUpperCase();
       if (!['EXACT', 'PHRASE', 'BROAD'].includes(matchType)) {
-        throw new Error('add-negatives requires --match-type=EXACT|PHRASE|BROAD (mandatory — choose deliberately; for search-term exclusions EXACT is usually correct)');
+        throw new Error(action === 'add-negatives'
+          ? 'add-negatives requires --match-type=EXACT|PHRASE|BROAD (mandatory — choose deliberately; for search-term exclusions EXACT is usually correct)'
+          : 'remove-negatives requires --match-type=EXACT|PHRASE|BROAD — only a negative with the same text AND match type is removed');
       }
       const keywords = keywordsString.split(',').map((k) => ({ text: k.trim(), matchType })).filter((k) => k.text);
-      const result = await addCampaignNegativeKeywords(customerId, campaignId, keywords, dryRun, loginCustomerId);
-      console.log(JSON.stringify(result, null, 2));
-    }
-
-    else if (action === 'remove-negatives') {
-      // The one undoable removal in the connector — see planNegativeRemoval in safety.js.
-      const campaignId = args.campaign;
-      const keywordsString = args.keywords;
-      if (!campaignId || !keywordsString) throw new Error('remove-negatives requires --campaign=<ID> and --keywords="fraza1,fraza 2"');
-      const matchType = String(args['match-type'] || '').trim().toUpperCase();
-      if (!['EXACT', 'PHRASE', 'BROAD'].includes(matchType)) {
-        throw new Error('remove-negatives requires --match-type=EXACT|PHRASE|BROAD — only a negative with the same text AND match type is removed');
-      }
-      const keywords = keywordsString.split(',').map((k) => ({ text: k.trim(), matchType })).filter((k) => k.text);
-      const result = await removeCampaignNegativeKeywords(customerId, campaignId, keywords, dryRun, loginCustomerId);
+      const fn = action === 'add-negatives' ? addNegativeKeywords : removeNegativeKeywords;
+      const result = await fn(customerId, target, keywords, dryRun, loginCustomerId);
       console.log(JSON.stringify(result, null, 2));
     }
 
