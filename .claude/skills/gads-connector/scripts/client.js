@@ -79,10 +79,13 @@ function refreshTokenFor(customerId, config) {
  * @returns {string} Fully readable error report
  */
 export function unpackError(error) {
+  const hasErrors = Array.isArray(error.errors) && error.errors.length > 0;
   let message = error.message
-    || (error.request_id
-      ? `Google Ads returned an empty error (request_id: ${error.request_id}) — usually transient on Google's side, retry the call.`
-      : 'Unknown error occurred.');
+    || (hasErrors
+      ? `Google Ads rejected the request: ${error.errors[0].message || JSON.stringify(error.errors[0].error_code)}`
+      : error.request_id
+        ? `Google Ads returned an empty error (request_id: ${error.request_id}) — usually transient on Google's side, retry the call.`
+        : 'Unknown error occurred.');
   const details = [];
 
   if (error.errors && Array.isArray(error.errors)) {

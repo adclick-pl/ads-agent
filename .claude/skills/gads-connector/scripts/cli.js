@@ -465,7 +465,8 @@ Akcje zapisu (domyślnie SYMULACJA — zapis dopiero z --commit):
   update-ad-group-audience  Listy remarketingowe w odbiorcach grupy Demand Gen
                           (--ad-group=<ID> --add-user-list=<ID[,ID]> i/lub
                           --remove-user-list=<ID[,ID]>). Wiek, płeć i wykluczenia zostają;
-                          --all-ages zdejmuje ograniczenie wieku (reklama dla każdego wieku).
+                          --all-ages zdejmuje ograniczenie wieku (reklama dla każdego wieku);
+                          --name="<nazwa>" zmienia nazwę tych odbiorców (też bez zmiany list).
                           Usuwa też listy, których konto już nie widzi. Odmawia, gdy tych
                           samych odbiorców używa inna grupa albo gdy zostałyby puste.
   add-languages           Dodaje języki do kampanii (--campaign=<ID[,ID]> --languages=ru,uk
@@ -1327,10 +1328,11 @@ async function main() {
       const addUserListIds = idList(args['add-user-list']);
       const removeUserListIds = idList(args['remove-user-list']);
       const allAges = !!args['all-ages'];
-      if (!args['ad-group'] || (addUserListIds.length === 0 && removeUserListIds.length === 0 && !allAges)) {
-        throw new Error('update-ad-group-audience requires --ad-group=<ID> and --add-user-list=<ID[,ID]>, --remove-user-list=<ID[,ID]> and/or --all-ages');
+      const name = typeof args.name === 'string' ? args.name.trim() : '';
+      if (!args['ad-group'] || (addUserListIds.length === 0 && removeUserListIds.length === 0 && !allAges && !name)) {
+        throw new Error('update-ad-group-audience requires --ad-group=<ID> and --add-user-list=<ID[,ID]>, --remove-user-list=<ID[,ID]>, --all-ages and/or --name="<name>"');
       }
-      const result = await updateAdGroupAudienceSegments(customerId, args['ad-group'], { addUserListIds, removeUserListIds, allAges }, dryRun, loginCustomerId);
+      const result = await updateAdGroupAudienceSegments(customerId, args['ad-group'], { addUserListIds, removeUserListIds, allAges, name }, dryRun, loginCustomerId);
       console.log(JSON.stringify(result, null, 2));
     }
 

@@ -357,8 +357,10 @@ node scripts/cli.js --action=add-asset-group-audience --customer=1234567890 --as
 
 # Swap remarketing lists in a Demand Gen ad group's audience (age/gender/exclusions stay;
 # lists the account can no longer read can still be removed; a shared audience is refused).
-# --all-ages drops the age limit of that audience.
+# --all-ages drops the age limit of that audience. --name renames the audience — keep the name
+# true to the lists after a swap; it also works on its own, without list changes.
 node scripts/cli.js --action=update-ad-group-audience --customer=1234567890 --ad-group=4455667788 --add-user-list=111222333 --remove-user-list=444555666 --all-ages
+node scripts/cli.js --action=update-ad-group-audience --customer=1234567890 --ad-group=4455667788 --name="Oglądający produkt 30 dni"
 
 # Add target languages (codes or IDs). A campaign targeting ALL languages is skipped —
 # adding a language would narrow it.

@@ -7,6 +7,22 @@ restarcie sesji. Szczegóły każdego skilla: `.claude/skills/<skill>/SKILL.md`.
 
 ---
 
+## 2026-11-26
+
+### Zmiany
+
+- **Zmiana nazwy odbiorców grupy Demand Gen** (`gads-connector`, akcja
+  `update-ad-group-audience`, nowa opcja `--name`). Po podmianie list remarketingowych
+  możesz od razu nadać odbiorcom nazwę zgodną z tym, co zawierają (np. „Oglądający produkt
+  30 dni”), żeby stara nazwa nie wprowadzała w błąd. Działa też sama, bez zmiany list.
+  Nazwa zajęta przez innych odbiorców wychodzi już w symulacji.
+- **Czytelniejsze błędy z Google Ads** (`gads-connector`). Gdy Google odrzucał zmianę
+  (np. zajęta nazwa, niedozwolona wartość), komunikat zaczynał się od „spróbuj ponownie”,
+  a właściwy powód był dopiero niżej. Teraz pierwsza linia mówi, dlaczego zmiana nie
+  przeszła. „Spróbuj ponownie” zostaje tylko przy pustej odpowiedzi Google.
+
+---
+
 ## 2026-11-24
 
 ### Nowości

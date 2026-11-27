@@ -1182,8 +1182,9 @@ export async function updateAdGroupAudienceSegments(customerId, adGroupId, chang
   const addIds = ids(change.addUserListIds);
   const removeIds = ids(change.removeUserListIds);
   const allAges = !!change.allAges;
-  if (!agId || (addIds.length === 0 && removeIds.length === 0 && !allAges)) {
-    throw new Error('update-ad-group-audience: wymaga --ad-group=<ID> oraz --add-user-list=<ID[,ID]>, --remove-user-list=<ID[,ID]> i/lub --all-ages.');
+  const newName = String(change.name ?? '').trim();
+  if (!agId || (addIds.length === 0 && removeIds.length === 0 && !allAges && !newName)) {
+    throw new Error('update-ad-group-audience: wymaga --ad-group=<ID> oraz --add-user-list=<ID[,ID]>, --remove-user-list=<ID[,ID]>, --all-ages i/lub --name="<nazwa>".');
   }
 
   const customer = getCustomer(cleanCustomerId, loginCustomerId);
@@ -1254,6 +1255,7 @@ export async function updateAdGroupAudienceSegments(customerId, adGroupId, chang
   const ageCleared = allAges && dimensions.some((d) => d.age);
   if (ageCleared) dimensions = dimensions.filter((d) => !d.age);
   const remaining = dimensions.find((d) => d.audience_segments)?.audience_segments?.segments?.length || 0;
+  const renamed = !!newName && newName !== audience.name;
   if (remaining === 0) {
     throw new Error('update-ad-group-audience: po zmianie odbiorcy nie mieliby żadnego segmentu — dodaj listę zamiast zostawiać pustych odbiorców.');
   }
@@ -1269,15 +1271,18 @@ export async function updateAdGroupAudienceSegments(customerId, adGroupId, chang
     removed,
     notPresent,
     ageCleared,
+    renamedTo: renamed ? newName : null,
     segmentsAfter: remaining,
   };
-  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Ad group ${agId}: +${added.length} / -${removed.length} user list(s) in audience${ageCleared ? ', age limit cleared' : ''}...`);
-  if (added.length === 0 && removed.length === 0 && !ageCleared) return { success: true, dryRun, ...summary };
+  console.log(`[Mutator] ${dryRun ? '[DRY-RUN] ' : ''}Ad group ${agId}: +${added.length} / -${removed.length} user list(s) in audience${ageCleared ? ', age limit cleared' : ''}${renamed ? `, renamed to "${newName}"` : ''}...`);
+  if (added.length === 0 && removed.length === 0 && !ageCleared && !renamed) return { success: true, dryRun, ...summary };
+  const update = { resource_name: audienceRn, dimensions, ...(renamed ? { name: newName } : {}) };
   if (dryRun) {
     // Ask Google whether the rewritten audience is acceptable (e.g. a list type
-    // Demand Gen refuses), so an objection surfaces in the simulation.
+    // Demand Gen refuses, or a name another audience already uses), so an
+    // objection surfaces in the simulation.
     try {
-      await customer.audiences.update([{ resource_name: audienceRn, dimensions }], { validate_only: true });
+      await customer.audiences.update([update], { validate_only: true });
       return { success: true, dryRun: true, ...summary, apiValidated: true };
     } catch (error) {
       return { success: false, dryRun: true, ...summary, apiValidated: false, apiError: unpackError(error) };
@@ -1285,7 +1290,7 @@ export async function updateAdGroupAudienceSegments(customerId, adGroupId, chang
   }
 
   try {
-    const response = await customer.audiences.update([{ resource_name: audienceRn, dimensions }]);
+    const response = await customer.audiences.update([update]);
     return { success: true, dryRun: false, ...summary, response };
   } catch (error) {
     throw new Error(`Failed to update ad group audience: ${unpackError(error)}`);
